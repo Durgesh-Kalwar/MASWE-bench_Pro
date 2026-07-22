@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# End this agent's episode. Emits the working-tree diff bracketed by the submission
+# markers the SWE-agent run loop watches for. The orchestrator independently recomputes
+# each agent's diff restricted to its scope (`git diff -- <scope files>`), so distractor
+# edits never leak into the integrated patch; this command is the completion signal.
+#
+# Both git ops are restricted to SCOPE_FILES: an unscoped `git add -A` walks the entire
+# worktree, which on large repos (ansible) exceeds SWE-agent's 30s tool execution_timeout
+# and, after max_consecutive_execution_timeouts, kills the agent. Scoping is safe because
+# the submission diff is only a signal, not the graded patch.
+cd "${REPO_ROOT:-${ROOT:-/app}}" || exit 1
+FILES=$(python3 -c "import json,os;print(' '.join(json.loads(os.environ.get('SCOPE_FILES','[]'))))")
+git add -A -- $FILES >/dev/null 2>&1
+# SWE-agent's own handle_submission() (sweagent/agent/agents.py) does NOT parse the diff out
+# of this command's stdout/markers -- it unconditionally tries to read a fixed path,
+# /root/model.patch, and if that read raises FileNotFoundError it returns EARLY, before ever
+# reaching `step.done = True`. Echoing the diff between markers (as before) satisfies
+# check_for_submission_cmd()'s marker scan but NOT handle_submission()'s file read, so `done`
+# was never actually set -- the agent kept calling scoped_submit every remaining step of the
+# round with no way to stop early. Writing the file (not just echoing it) fixes that AND
+# sidesteps the pager entirely, since a redirect-to-file target isn't a tty.
+git --no-pager diff --cached -- $FILES > /root/model.patch
+echo "<<SWE_AGENT_SUBMISSION>>"
+cat /root/model.patch
+echo "<<SWE_AGENT_SUBMISSION>>"
