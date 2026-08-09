@@ -4,13 +4,32 @@
 # each agent's diff restricted to its scope (`git diff -- <scope files>`), so distractor
 # edits never leak into the integrated patch; this command is the completion signal.
 #
-# Both git ops are restricted to SCOPE_FILES: an unscoped `git add -A` walks the entire
-# worktree, which on large repos (ansible) exceeds SWE-agent's 30s tool execution_timeout
-# and, after max_consecutive_execution_timeouts, kills the agent. Scoping is safe because
-# the submission diff is only a signal, not the graded patch.
+# In allow mode both git ops are restricted to SCOPE_FILES: an unscoped `git add -A` walks the
+# entire worktree, which on large repos (ansible) can exceed SWE-agent's 30s tool
+# execution_timeout and, after max_consecutive_execution_timeouts, kill the agent. Scoping is
+# safe there because the submission diff is only a signal, not the graded patch. Full mode
+# cannot scope (edits span the repo); --no-pager keeps even the whole-repo diff well under 30s.
 cd "${REPO_ROOT:-${ROOT:-/app}}" || exit 1
-FILES=$(python3 -c "import json,os;print(' '.join(json.loads(os.environ.get('SCOPE_FILES','[]'))))")
-git add -A -- $FILES >/dev/null 2>&1
+# Optional coordination gate (SUBMIT_GATE env, from gen_solver_config --submit-gate; OFF by
+# default). A refusal must exit 0 WITHOUT emitting the <<SWE_AGENT_SUBMISSION>> markers and
+# WITHOUT writing /root/model.patch -- both are what end the episode -- so the agent keeps
+# stepping and can go satisfy the gate (read_messages / publish_interface) itself.
+if [ -n "${SUBMIT_GATE:-}" ]; then
+    SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+    if ! python3 "$SCRIPT_DIR/../lib/submit_gate.py"; then
+        exit 0
+    fi
+fi
+# In "full" (denylist) mode the agent may edit any file except peers' gold files, so restrict
+# neither git op -- the whole-repo diff is the true completion preview. Enforcement guarantees
+# no denied file was written. In "allow" mode, scope both ops to SCOPE_FILES (see below).
+if [ "${SCOPE_MODE:-allow}" = "full" ]; then
+    PATHSPEC=""
+else
+    FILES=$(python3 -c "import json,os;print(' '.join(json.loads(os.environ.get('SCOPE_FILES','[]'))))")
+    PATHSPEC="-- $FILES"
+fi
+git add -A $PATHSPEC >/dev/null 2>&1
 # SWE-agent's own handle_submission() (sweagent/agent/agents.py) does NOT parse the diff out
 # of this command's stdout/markers -- it unconditionally tries to read a fixed path,
 # /root/model.patch, and if that read raises FileNotFoundError it returns EARLY, before ever
@@ -19,7 +38,7 @@ git add -A -- $FILES >/dev/null 2>&1
 # was never actually set -- the agent kept calling scoped_submit every remaining step of the
 # round with no way to stop early. Writing the file (not just echoing it) fixes that AND
 # sidesteps the pager entirely, since a redirect-to-file target isn't a tty.
-git --no-pager diff --cached -- $FILES > /root/model.patch
+git --no-pager diff --cached $PATHSPEC > /root/model.patch
 echo "<<SWE_AGENT_SUBMISSION>>"
 cat /root/model.patch
 echo "<<SWE_AGENT_SUBMISSION>>"

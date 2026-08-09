@@ -50,6 +50,25 @@ Available tools:
 {{command_docs}}
 """
 
+FULL_SYSTEM_TEMPLATE = """\
+You are ONE of several software-engineering agents collaborating to resolve a GitHub issue
+in a shared repository. Each agent is primarily responsible for one file, but in THIS setting
+you have FULL read/write access to the entire repository — you may read and edit ANY file —
+EXCEPT the files owned by your peers (run `scoped_list` to see your primary file and the
+peer-owned files you may not touch). Those peer files are the only ones off-limits.
+
+Focus on your assigned file, but edit any other file you need to make the fix complete and
+consistent. Because peers can also edit shared (non-owned) files, COORDINATE: if you change
+something a peer depends on, announce it with `publish_interface`; if a peer owns a file you
+need changed, ask with `send_message`. Check `read_messages` every turn before editing, and
+avoid clobbering a shared file another agent is actively editing.
+
+When your changes are complete and consistent, run `scoped_submit` to finish.
+
+Available tools:
+{{command_docs}}
+"""
+
 INSTANCE_TEMPLATE = """\
 You are working in the repository checked out at {{working_dir}}.
 
@@ -63,9 +82,12 @@ Reminders:
 """
 
 
-def build_agent_config(spec, agent, inst_dir, *, model, cost_limit, roster, api_base=None, call_limit=0):
+def build_agent_config(spec, agent, inst_dir, *, model, cost_limit, roster, api_base=None,
+                       call_limit=0, submit_gate=False):
     inst_id = spec["instance_id"]
     aid = agent["id"]
+    scope_mode = agent.get("scope_mode", "allow")
+    system_template = FULL_SYSTEM_TEMPLATE if scope_mode == "full" else SYSTEM_TEMPLATE
     model_cfg = {"name": model, "per_instance_cost_limit": cost_limit, "top_p": None}
     if call_limit:
         model_cfg["per_instance_call_limit"] = call_limit
@@ -105,7 +127,7 @@ def build_agent_config(spec, agent, inst_dir, *, model, cost_limit, roster, api_
             # value, so dropping it is behavior-neutral for models that still accept it.
             "model": model_cfg,
             "templates": {
-                "system_template": SYSTEM_TEMPLATE,
+                "system_template": system_template,
                 "instance_template": INSTANCE_TEMPLATE,
                 "next_step_template": "OBSERVATION:\n{{observation}}",
                 "next_step_no_output_template":
@@ -118,9 +140,18 @@ def build_agent_config(spec, agent, inst_dir, *, model, cost_limit, roster, api_
                 "env_variables": {
                     "REPO_ROOT": REPO_ROOT_IN_IMAGE,
                     "SCOPE_FILES": json.dumps(agent["scope"]),
+                    # scope_mode="allow": SCOPE_FILES is a strict allowlist (gold + distractors).
+                    # scope_mode="full": denylist -- any in-repo path is editable EXCEPT SCOPE_DENY
+                    # (the other agents' gold files); SCOPE_FILES then names only the primary file.
+                    "SCOPE_MODE": scope_mode,
+                    "SCOPE_DENY": json.dumps(agent.get("deny", [])),
                     "AGENT_ID": aid,
                     "COMM_BOARD": COMM_BOARD_IN_IMAGE,
                     "AGENTS_ROSTER": json.dumps(roster),
+                    # --submit-gate only: scoped_submit refuses until the agent has ITSELF
+                    # read the current board (and announced any public-symbol removal).
+                    # Empty string = gate off (scoped_submit tests [ -n "$SUBMIT_GATE" ]).
+                    "SUBMIT_GATE": "1" if submit_gate else "",
                 },
                 "bundles": [
                     {"path": SCOPED_FS_BUNDLE},
@@ -138,7 +169,8 @@ def build_agent_config(spec, agent, inst_dir, *, model, cost_limit, roster, api_
     }
 
 
-def generate(inst_dir: Path, *, model, cost_limit, dockerhub_username, api_base=None, call_limit=0):
+def generate(inst_dir: Path, *, model, cost_limit, dockerhub_username, api_base=None,
+             call_limit=0, submit_gate=False):
     spec = json.loads((inst_dir / "spec.json").read_text())
     inst_id = spec["instance_id"]
 
@@ -155,7 +187,8 @@ def generate(inst_dir: Path, *, model, cost_limit, dockerhub_username, api_base=
     for agent in spec["agents"]:
         cfg = build_agent_config(spec, agent, inst_dir, model=model,
                                  cost_limit=cost_limit, roster=roster,
-                                 api_base=api_base, call_limit=call_limit)
+                                 api_base=api_base, call_limit=call_limit,
+                                 submit_gate=submit_gate)
         out = inst_dir / agent["id"] / "solver.yaml"
         out.write_text(yaml.safe_dump(cfg, sort_keys=False, width=100))
         written.append(out)
@@ -186,6 +219,12 @@ def main():
     ap.add_argument("--per-instance-call-limit", type=int, default=0,
                     help="Hard cap on API calls per agent, independent of $ cost. Extra safety "
                          "net alongside per-instance-cost-limit.")
+    ap.add_argument("--submit-gate", action="store_true",
+                    help="Coordination gate (OFF by default): scoped_submit refuses until the "
+                         "agent has itself run read_messages on the current board state, and "
+                         "has announced (publish_interface / send_message) any public "
+                         "def/class its edits delete. Pure refusal checks -- the harness "
+                         "never calls comm tools for the agent.")
     args = ap.parse_args()
 
     # No-ops immediately for models litellm already prices (claude-*, gpt-*, ...); only prompts
@@ -204,7 +243,8 @@ def main():
                                   cost_limit=args.per_instance_cost_limit,
                                   dockerhub_username=args.dockerhub_username,
                                   api_base=args.api_base,
-                                  call_limit=args.per_instance_call_limit)
+                                  call_limit=args.per_instance_call_limit,
+                                  submit_gate=args.submit_gate)
         print(f"{d.name}: image={image}  ->  {len(written)} solver config(s)")
 
 

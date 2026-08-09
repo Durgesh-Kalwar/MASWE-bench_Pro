@@ -6,9 +6,12 @@ gold-patched source file becomes one agent. Every agent gets:
   * a *scope* of files it may read/write = its gold file + K distractor siblings
     (oracle + distractors: the real target is hidden among decoys so localization
     isn't trivially leaked, while every needed file is still owned by someone),
-  * a *local* slice of the issue text routed by the symbols its gold hunks change
-    (local-only: there is no shared global copy). `problem_statement` is always routed;
-    `--include-requirements` additionally routes the Pro `requirements` field,
+  * *local* issue text: by default the FULL `problem_statement` (+ full `requirements`
+    with `--include-requirements`) plus a generated "Your focus" highlight — limited info
+    is enforced by file scope, not by withholding text. With `--partition-issue`, instead
+    an EXCLUSIVE per-agent slice routed by the symbols its gold hunks change (peers hold
+    the rest; symbol-free passages are shared) so cross-file coordination over the message
+    board is genuinely required,
   * optionally a shared coordination note built from the Pro `interface` field
     (`--include-interface`): the explicit signatures of any new public interface the
     gold solution couples through.
@@ -127,6 +130,22 @@ def anchor_symbols(code_syms, file_path):
     return {s for s in symbols if s not in _NOISE}
 
 
+# Names an agent's gold diff INTRODUCES on ADDED lines: def/class definitions plus
+# class-level UPPER_CASE constants (enum members like `SETUP = 1` count -- they are part of
+# the contract a consumer must learn). Used by partition_units for definer-priority routing.
+_DEF_LINE = re.compile(r"^\+\s*(?:async\s+def|def|class)\s+([A-Za-z_]\w*)", re.MULTILINE)
+_CONST_LINE = re.compile(r"^\+\s*([A-Z][A-Z0-9_]{2,})\s*=", re.MULTILINE)
+
+
+def defined_symbols(file_diff_text):
+    """The public names this agent's gold diff *defines* (as opposed to merely references).
+    These are the definer's chosen names -- exactly what --partition-issue must keep away
+    from consumer agents so they have to ask over the board."""
+    return {s for s in (set(_DEF_LINE.findall(file_diff_text))
+                        | set(_CONST_LINE.findall(file_diff_text)))
+            if s not in _NOISE}
+
+
 # --------------------------------------------------------------------------- #
 # Local-only issue split
 # --------------------------------------------------------------------------- #
@@ -203,17 +222,131 @@ def _render_focus_units(units):
     return out
 
 
-def build_local_info(meta, agents, include_requirements):
-    """Assemble each agent's local_issue.md body (returns {agent_idx0: markdown}).
+def partition_units(text, agents):
+    """EXCLUSIVELY assign each issue unit to at most one agent (--partition-issue mode).
 
-    Limited information is enforced by file *scope*, not by withholding issue text: EVERY
-    agent receives the FULL problem statement (and full requirements when
-    include_requirements). A generated `## Your focus` section then highlights the passages
-    that mention this agent's gold file / symbols, plus a responsibility note, so the agent
-    knows where to act. No agent is ever handed an empty slice."""
+    Unlike focus_units (a non-exclusive highlight over a shared full text), this is a true
+    partition: every unit that mentions any agent's anchor symbols goes to exactly ONE agent,
+    so a consumer agent genuinely does not see the passages describing the definer's contract
+    and must coordinate over the message board instead. Assignment: highest score wins, where
+    a mention of a symbol an agent's gold diff INTRODUCES (its `defined_symbols`) weighs far
+    more than a mere reference-overlap -- without this definer priority, a unit like
+    "linear.py must use IteratingStates" would often land with the CONSUMER (whose diff also
+    references the name), handing it the very names it is supposed to have to ask for. Ties
+    -> fewest units so far, then lowest agent index. Units mentioning NO agent's symbols
+    (repro steps, error text, generic prose) leak no contract by construction and are shared
+    with everyone. An agent left with zero units takes its best-scoring unit from an owner
+    that keeps >= 1 (rescue); if it scored 0 everywhere it simply gets only the shared
+    context -- a legitimately hard, coordination-only task.
+
+    Returns (slices, shared): slices[j] = agent j's units in reading order; shared = the
+    symbol-free units in reading order.
+    """
+    if not text:
+        return [[] for _ in agents], []
+    units = segment_issue(text)
+    scores = []
+    for block in units:
+        tokens = _IDENT.findall(block)
+        scores.append([
+            sum(1 for t in tokens if t in ag["symbols"])
+            + 100 * sum(1 for t in tokens if t in ag.get("defined_symbols", ()))
+            for ag in agents
+        ])
+
+    owner = [None] * len(units)               # agent index, or None -> shared
+    counts = [0] * len(agents)
+    for i, sc in enumerate(scores):
+        best = max(sc)
+        if best <= 0:
+            continue
+        tied = [j for j, s in enumerate(sc) if s == best]
+        j = min(tied, key=lambda j: (counts[j], j))
+        owner[i] = j
+        counts[j] += 1
+
+    for j in range(len(agents)):              # rescue empty-sliced agents
+        if counts[j] > 0:
+            continue
+        # Never move a unit that mentions ANOTHER agent's defined symbols (score >= 100 for
+        # someone else): that would hand the rescued agent the very contract names the
+        # partition withholds -- exactly what happened before this guard, when agent_4's
+        # rescue pulled the "play_iterator.py must expose IteratingStates/FailedStates"
+        # requirement away from its definer. If only leaky units qualify, leave the agent
+        # empty: coordination-only is the intended hard case, leaking is not.
+        movable = [(scores[i][j], -i) for i in range(len(units))
+                   if scores[i][j] > 0 and owner[i] is not None and counts[owner[i]] >= 2
+                   and not any(scores[i][k] >= 100 for k in range(len(agents)) if k != j)]
+        if not movable:
+            continue
+        _, neg_i = max(movable)
+        i = -neg_i
+        counts[owner[i]] -= 1
+        owner[i] = j
+        counts[j] += 1
+
+    slices = [[units[i] for i in range(len(units)) if owner[i] == j]
+              for j in range(len(agents))]
+    shared = [units[i] for i in range(len(units)) if owner[i] is None]
+    return slices, shared
+
+
+def build_local_info(meta, agents, include_requirements, partition=False):
+    """Assemble each agent's local_issue.md body. Returns (bodies, unit_counts) where
+    bodies = {agent_idx0: markdown} and unit_counts = {agent_idx0: n_units} (counts are only
+    meaningful in partition mode; {} otherwise).
+
+    Default (partition=False) — limited information is enforced by file *scope*, not by
+    withholding issue text: EVERY agent receives the FULL problem statement (and full
+    requirements when include_requirements). A generated `## Your focus` section then
+    highlights the passages that mention this agent's gold file / symbols, plus a
+    responsibility note, so the agent knows where to act. No agent is handed an empty slice.
+
+    Partition (partition=True, --partition-issue) — genuine-coordination mode: each agent
+    sees ONLY its exclusively-assigned slice of the issue (see partition_units) plus the
+    symbol-free shared context. No full problem statement, no "Key symbols" line (it would
+    leak definer names to consumers, since an agent's symbols are harvested from its own
+    gold diff which *references* peers' new names), no focus highlight. Whatever an agent
+    needs that isn't in its slice must be obtained via the message board."""
     problem = decode_text(meta.get("problem_statement")).strip()
     requirements = (decode_text(meta.get("requirements")).strip()
                     if include_requirements else "")
+
+    if partition:
+        p_slices, p_shared = partition_units(problem, agents)
+        if include_requirements:
+            r_slices, r_shared = partition_units(requirements, agents)
+        else:
+            r_slices, r_shared = [[] for _ in agents], []
+        shared = p_shared + r_shared
+        bodies, unit_counts = {}, {}
+        for i, ag in enumerate(agents):
+            mine = p_slices[i] + r_slices[i]
+            unit_counts[i] = len(mine)
+            sections = [
+                f"## Your responsibility (file: {ag['gold_file']})", "",
+                f"You are responsible for **`{ag['gold_file']}`**.",
+                "",
+                "IMPORTANT: you hold only PART of the issue description. Each agent was "
+                "given only the passages about its own file; your peers hold the rest. "
+                "Anything you need that is not written here — especially the names and "
+                "signatures of functions/classes/enums another agent introduces — must be "
+                "obtained by coordinating: `send_message` to ask a peer, `read_messages` to "
+                "receive, `publish_interface` to announce anything you define that peers "
+                "must call.",
+                "", "## Your part of the issue", "",
+            ]
+            if mine:
+                sections += _render_focus_units(mine)
+            else:
+                sections += ["(No issue passages were routed to you — the issue text does "
+                             "not mention your file's symbols. Coordinate with your peers "
+                             "to learn what your file must provide.)"]
+            if shared:
+                sections += ["", "## Shared context (all agents see this)", ""]
+                sections += _render_focus_units(shared)
+            bodies[i] = "\n".join(sections)
+        return bodies, unit_counts
 
     bodies = {}
     for i, ag in enumerate(agents):
@@ -240,7 +373,7 @@ def build_local_info(meta, agents, include_requirements):
             sections += ["", "Issue passages that mention your file / symbols:"]
             sections += _render_focus_units(focus)
         bodies[i] = "\n".join(sections)
-    return bodies
+    return bodies, {}
 
 
 # --------------------------------------------------------------------------- #
@@ -364,7 +497,12 @@ def fetch_distractors(repo, base_commit, gold_files, k, gold_set,
 
 def build_instance(meta, out_dir, k_distractors, include_requirements,
                    include_interface, emit_gold=False,
-                   distractor_source="docker", dockerhub_username="jefzda"):
+                   distractor_source="docker", dockerhub_username="jefzda",
+                   partition_issue=False):
+    if partition_issue and include_interface:
+        raise SystemExit("--partition-issue and --include-interface are incompatible: the "
+                         "shared interface would leak the exact cross-file contract the "
+                         "partition is designed to withhold.")
     instance_id = meta[KEY_INSTANCE_ID]
     gold = meta["patch"]
     repo = meta["repo"]
@@ -373,14 +511,22 @@ def build_instance(meta, out_dir, k_distractors, include_requirements,
     gold_by_file = split_gold_by_file(gold)
     gold_files = list(gold_by_file.keys())
     gold_set = set(gold_files)
+    # k == -1 => "full" mode: each agent gets read/write to the ENTIRE repo EXCEPT the gold
+    # files owned by the OTHER agents (its own gold file stays editable). Enforcement inverts
+    # from an allowlist to a denylist (see aci/tools/scoped_fs/lib/scoped.py), so no distractor
+    # enumeration is needed -- scope is just the agent's own gold file plus a per-agent deny set.
+    full_access = k_distractors == -1
     image = None
     if distractor_source == "docker" and get_dockerhub_image_uri is not None:
         try:
             image = get_dockerhub_image_uri(instance_id, dockerhub_username, repo)
         except Exception:
             image = None
-    distractors = fetch_distractors(repo, base_commit, gold_files, k_distractors, gold_set,
-                                    source=distractor_source, image=image)
+    if full_access:
+        distractors = {gf: [] for gf in gold_files}
+    else:
+        distractors = fetch_distractors(repo, base_commit, gold_files, k_distractors, gold_set,
+                                        source=distractor_source, image=image)
 
     agents = []
     for idx, gf in enumerate(gold_files, start=1):
@@ -397,11 +543,17 @@ def build_instance(meta, out_dir, k_distractors, include_requirements,
             "gold_lines": gold_lines,
             "distractors": distractors.get(gf, []),
             "scope": [gf] + distractors.get(gf, []),
+            # allow = the classic allowlist (gold + distractors); full = whole repo minus the
+            # deny set below. deny is every OTHER agent's gold file (never this agent's own gf).
+            "scope_mode": "full" if full_access else "allow",
+            "deny": sorted(gold_set - {gf}) if full_access else [],
             "code_symbols": csyms,
             "symbols": anchor_symbols(csyms, gf),
+            "defined_symbols": defined_symbols(diff_text),
         })
 
-    local = build_local_info(meta, agents, include_requirements)
+    local, local_units = build_local_info(meta, agents, include_requirements,
+                                          partition=partition_issue)
     interface = parse_interface(meta.get("interface"))
 
     # ---- write folders ----
@@ -416,6 +568,7 @@ def build_instance(meta, out_dir, k_distractors, include_requirements,
         "degenerate": len(agents) == 1,
         "include_requirements": include_requirements,
         "include_interface": include_interface,
+        "partition_issue": partition_issue,
         "shared_contract": interface["raw"] if (include_interface and interface["has_contract"]) else None,
         "agents": [],
         "integration": "concatenate agent_<k>.patch in agent index order -> single model_patch",
@@ -433,17 +586,29 @@ def build_instance(meta, out_dir, k_distractors, include_requirements,
     for ag in agents:
         adir = inst_dir / f"agent_{ag['idx']}"
         adir.mkdir(parents=True, exist_ok=True)
-        (adir / "SCOPE.txt").write_text(
-            "# Files this agent may READ and WRITE (everything else is invisible).\n"
-            f"# Target (gold) file is hidden among {len(ag['distractors'])} distractor(s).\n"
-            + "\n".join(ag["scope"]) + "\n"
-        )
-        (adir / "local_issue.md").write_text(
-            f"# Issue context for agent_{ag['idx']}\n"
-            f"# (full issue text + your focus — limited information is enforced by file "
-            f"SCOPE, not by withholding the issue)\n\n"
-            + local[ag["idx"] - 1] + "\n"
-        )
+        if ag["scope_mode"] == "full":
+            (adir / "SCOPE.txt").write_text(
+                "# FULL repo access: this agent may READ and WRITE any file in the repo\n"
+                "# EXCEPT the gold files owned by peers (listed below). Its assigned/primary\n"
+                f"# file is {ag['gold_file']}.\n"
+                "# --- denied (owned by other agents) ---\n"
+                + ("\n".join(ag["deny"]) if ag["deny"] else "(none)") + "\n"
+            )
+        else:
+            (adir / "SCOPE.txt").write_text(
+                "# Files this agent may READ and WRITE (everything else is invisible).\n"
+                f"# Target (gold) file is hidden among {len(ag['distractors'])} distractor(s).\n"
+                + "\n".join(ag["scope"]) + "\n"
+            )
+        if partition_issue:
+            issue_header = (f"# Issue context for agent_{ag['idx']}\n"
+                            f"# (PARTITIONED: you hold only your slice of the issue — peers "
+                            f"hold the rest; coordinate via the message board)\n\n")
+        else:
+            issue_header = (f"# Issue context for agent_{ag['idx']}\n"
+                            f"# (full issue text + your focus — limited information is "
+                            f"enforced by file SCOPE, not by withholding the issue)\n\n")
+        (adir / "local_issue.md").write_text(issue_header + local[ag["idx"] - 1] + "\n")
         if emit_gold:
             # Oracle reference solution for this agent's scope — used to sanity-check
             # that integrate(agent patches) -> grade reproduces the gold result.
@@ -452,9 +617,15 @@ def build_instance(meta, out_dir, k_distractors, include_requirements,
             "id": f"agent_{ag['idx']}",
             "gold_file": ag["gold_file"],
             "scope": ag["scope"],
+            "scope_mode": ag["scope_mode"],
+            "deny": ag["deny"],
             "distractors": ag["distractors"],
             "anchor_symbols": sorted(ag["symbols"]),
+            "defined_symbols": sorted(ag["defined_symbols"]),
             "gold_changed_lines": ag["gold_lines"],
+            # partition mode only: how many issue units were routed exclusively to this
+            # agent (0 = it must learn its task entirely over the message board).
+            "local_units": local_units.get(ag["idx"] - 1, None) if partition_issue else None,
         })
 
     # Shared contract: emitted only when --include-interface (else agents discover coupling).
@@ -465,7 +636,8 @@ def build_instance(meta, out_dir, k_distractors, include_requirements,
     (inst_dir / "spec.json").write_text(json.dumps(spec, indent=2))
     (inst_dir / "README.md").write_text(
         render_readme(instance_id, repo, agents, interface,
-                      include_requirements, include_interface, out_dir))
+                      include_requirements, include_interface, out_dir,
+                      partition_issue=partition_issue))
     return spec
 
 
@@ -498,13 +670,19 @@ def render_coordination(instance_id, agents, interface):
 
 
 def render_readme(instance_id, repo, agents, interface,
-                  include_requirements, include_interface, out_dir):
+                  include_requirements, include_interface, out_dir,
+                  partition_issue=False):
     n = len(agents)
     verdict = ("degenerate single-agent (N=1) — identical to standard single-agent Pro"
                if n == 1 else f"genuine {n}-agent decomposition")
-    local_fields = ("full problem_statement"
-                    + (" + requirements" if include_requirements else "")
-                    + " + per-file focus highlight")
+    if partition_issue:
+        local_fields = ("PARTITIONED problem_statement"
+                        + (" + requirements" if include_requirements else "")
+                        + " — each agent holds only its exclusive slice; coordination required")
+    else:
+        local_fields = ("full problem_statement"
+                        + (" + requirements" if include_requirements else "")
+                        + " + per-file focus highlight")
     if not include_interface:
         contract = "none emitted (--include-interface off; agents discover coupling)"
     elif interface["has_contract"]:
@@ -531,7 +709,9 @@ def render_readme(instance_id, repo, agents, interface,
         "",
         "## Layout",
         "- `agent_<k>/SCOPE.txt` — files this agent may read/write (gold target + distractors)",
-        "- `agent_<k>/local_issue.md` — full issue text + this agent's per-file focus highlight",
+        ("- `agent_<k>/local_issue.md` — this agent's EXCLUSIVE issue slice + shared context"
+         if partition_issue else
+         "- `agent_<k>/local_issue.md` — full issue text + this agent's per-file focus highlight"),
         "- `shared/coordination.md` — the interface contract (only if --include-interface)",
         "- `spec.json` — machine-readable spec (scopes, symbols, integration, grade command)",
         "",
@@ -601,16 +781,26 @@ def main():
     ap.add_argument("--input", default="sampled_pro", help="Folder of sampled instances (build mode)")
     ap.add_argument("--output", default="multiagent_pro_out", help="Output folder")
     ap.add_argument("--instances", nargs="*", help="Restrict to these instance ids")
-    ap.add_argument("--distractors", type=int, default=3, help="Distractor siblings per agent (0 = pure oracle)")
+    ap.add_argument("--distractors", type=int, default=3,
+                    help="Distractor siblings per agent (0 = pure oracle; "
+                         "-1 = full repo access except other agents' gold files, denylist mode)")
     ap.add_argument("--distractor-source", choices=["docker", "github", "oracle"], default="docker",
                     help="How to enumerate sibling files: docker (offline, via the Pro image) "
                          "[default], github (contents API), or oracle (none)")
     ap.add_argument("--dockerhub_username", default="jefzda",
                     help="Docker Hub user for the Pro image (docker distractor source)")
     ap.add_argument("--include-requirements", action="store_true",
-                    help="Also route the Pro `requirements` field into each agent's local slice")
+                    help="Also give agents the Pro `requirements` field (full text by "
+                         "default; routed through the partition with --partition-issue)")
     ap.add_argument("--include-interface", action="store_true",
-                    help="Emit shared/coordination.md from the Pro `interface` field (the contract)")
+                    help="Emit shared/coordination.md from the Pro `interface` field (the "
+                         "contract). Incompatible with --partition-issue.")
+    ap.add_argument("--partition-issue", action="store_true",
+                    help="Genuine-coordination mode: each agent's local_issue.md contains "
+                         "ONLY its exclusively-routed slice of the issue (peers hold the "
+                         "rest; symbol-free passages are shared), so cross-file contracts "
+                         "must be negotiated over the message board. No full issue text, "
+                         "no Key-symbols hint.")
     ap.add_argument("--emit-gold", action="store_true",
                     help="Also write each agent's gold.patch (oracle solution) for grade sanity-checks")
     ap.add_argument("--prefix", default="multiagent", help="Prefix namespacing eval output (merge mode)")
@@ -633,7 +823,8 @@ def main():
                                   include_interface=args.include_interface,
                                   emit_gold=args.emit_gold,
                                   distractor_source=args.distractor_source,
-                                  dockerhub_username=args.dockerhub_username)
+                                  dockerhub_username=args.dockerhub_username,
+                                  partition_issue=args.partition_issue)
             tag = "N=1 (degenerate)" if spec["degenerate"] else f"N={spec['num_agents']}"
             contract = "yes" if spec["shared_contract"] else "no"
             print(f"  {spec[KEY_INSTANCE_ID]:<70} {tag:<16} contract={contract}")

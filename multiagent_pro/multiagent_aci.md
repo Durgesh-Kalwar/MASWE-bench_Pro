@@ -67,13 +67,13 @@ argument(s) through `require_scope()`:
 
 | Tool | Role | Scope rule |
 | --- | --- | --- |
-| `scoped_list` | list the files you may edit (+ line counts) | shows only the allowlist |
+| `scoped_list` | list the files you may edit (+ line counts) | shows the allowlist; in full mode shows the primary file + the peer-owned deny list |
 | `scoped_view <path> [start] [end]` | windowed, line-numbered file view (100-line window) | denies out-of-scope paths |
 | `scoped_str_replace <path> <old_str> <new_str>` | unique exact-match edit | denies; refuses non-unique/0 matches; **rejected (unapplied) if it breaks `.py` syntax** |
 | `scoped_insert <path> <line> <text>` | insert after a line | denies out-of-scope; **rejected (unapplied) if it breaks `.py` syntax** |
 | `scoped_create <path> <file_text>` | create a NEW in-scope file (e.g. a gold-added module) | path must still be in the allowlist; **rejected if `file_text` has a `.py` syntax error** |
-| `scoped_search <term> [path]` | search **only** scope files | never lists out-of-scope files |
-| `scoped_submit` | end the episode, emit the diff (writes `/root/model.patch`) | — |
+| `scoped_search <term> [path]` | literal-substring search over scope files (whole repo minus denied files in full mode) | never lists out-of-scope / peer-owned files |
+| `scoped_submit` | end the episode, emit the diff (writes `/root/model.patch`) | with `SUBMIT_GATE`: refused until the agent has read the current board and announced any public-symbol removal (see §2.5) |
 | `exit_forfeit` | give up and end the episode without submitting | — |
 
 Two enforcement subtleties: paths are `Path.resolve()`d before comparison, so `../` and
@@ -119,11 +119,54 @@ into the persistent bash session before the first action; the bins read `os.envi
 
 | Var | Meaning |
 | --- | --- |
-| `SCOPE_FILES` | JSON array of the agent's allowlist (gold file + distractors) |
+| `SCOPE_FILES` | JSON array of the agent's allowlist (gold file + distractors); in full mode, just its primary file |
+| `SCOPE_MODE` | `allow` (default; `SCOPE_FILES` is a strict allowlist) or `full` (denylist — see below) |
+| `SCOPE_DENY` | full mode only: JSON array of files the agent may NOT touch (peers' gold files); empty otherwise |
+| `SUBMIT_GATE` | `"1"` when configs were generated with `--submit-gate`, else `""` (gate off) |
 | `REPO_ROOT` | repo checkout dir in the image — **`/app` on Pro images, not `/testbed`** |
 | `AGENT_ID` | this agent's id (`agent_2`) |
 | `COMM_BOARD` | path to the message board inside the container |
 | `AGENTS_ROSTER` | JSON `[{id, gold_file}]` of all peers |
+
+**Full-access mode (`--distractors -1`).** When the build is run with `--distractors -1`,
+scoping inverts from allowlist to **denylist**: `SCOPE_MODE=full` and `SCOPE_DENY` lists the
+other agents' gold files. `require_scope()` then permits any path **inside the repo** that is
+not in `SCOPE_DENY` (and denies paths outside the repo). The tool surface adapts: `scoped_list`
+prints "full access except (peer-owned): …", `scoped_search` walks the **whole repo** (skipping
+`.git/` and denied files) instead of only the scope, and `scoped_submit` emits an **unscoped**
+whole-repo diff. Correspondingly, `orchestrate.py` collects each agent's final patch as an
+unscoped `git diff` (the agent's `scope` is no longer the edit boundary). Since agents may now
+edit the same non-gold file, `merge` warns on overlapping file paths and the concatenated patch
+may fail `git apply` — surfaced honestly, not reconciled.
+
+**Partitioned issue text (`--partition-issue`, build-time).** The default local info makes
+cooperation optional (every agent holds the full issue, which spells out the whole cross-file
+contract — measured: zero comm-tool calls across full qwen/gpt-4o-mini runs). With
+`--partition-issue`, each `local_issue.md` holds only that agent's exclusively-routed slice
+(definer-priority routing: units naming symbols an agent's gold diff *introduces* go to that
+definer, so consumers must ask over the board for the names), plus symbol-free shared context.
+Pure build-time change — no runtime env var; the solver sees it only as different
+problem-statement content.
+
+**Submit gate (`--submit-gate` at config-gen, OFF by default).** When `SUBMIT_GATE` is set,
+`scoped_submit` runs `scoped_fs/lib/submit_gate.py` before any git work and REFUSES (prints
+the reason, exits 0, emits **no** submission markers and **no** `/root/model.patch`, so the
+episode continues) until:
+1. **Read-gate** — the agent has itself run `read_messages` on the CURRENT board state.
+   `read_messages` records a canonical content-hash marker (`/root/comm/.read_<AGENT_ID>`);
+   content hash, not mtime, because the orchestrator truncate-rewrites the board at every
+   turn start and host/agent JSON formatting differs. Reading an empty board satisfies the
+   gate (no round-1 deadlock).
+2. **Publish-check** — any public `def`/`class` deleted by the agent's edits (HEAD vs
+   worktree, `ast`-parsed, `_`-prefixed names exempt) has been announced in one of the
+   agent's own board messages (name match against its `publish_interface`/`send_message`
+   texts). Deleting a whole class also flags its public methods — one message naming all of
+   them satisfies the check. Targets the observed contract-break failures (`HostState`,
+   `_is_fqcn`).
+
+Both checks are pure refusals — the harness never calls a comm tool on the agent's behalf;
+the refusal text says exactly what to run. Internal gate errors fail OPEN (submission
+proceeds) so the gate can never strand an agent. Escape hatch: `exit_forfeit`.
 
 ### 2.6 Context management
 

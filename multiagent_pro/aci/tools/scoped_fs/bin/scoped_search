@@ -1,9 +1,28 @@
 #!/usr/bin/env python3
-"""Search for a term across the files in your scope ONLY (never leaks out-of-scope files).
-With an explicit path, search just that (in-scope) file."""
-import argparse
+"""Search for a term across the files you may read.
 
-from scoped import repo_root, require_scope, scope_files
+- allow mode: searches your scope (allowlist) ONLY -- never leaks out-of-scope files.
+- full mode:  searches the whole repo, skipping .git/ and any file owned by a peer.
+With an explicit path, searches just that (readable) file.
+Matching is literal substring (not regex)."""
+import argparse
+import os
+
+from scoped import deny_files, repo_root, require_scope, scope_files, scope_mode
+
+# Directories never worth walking in full-mode repo-wide search.
+_SKIP_DIRS = {".git", ".hg", ".svn", "__pycache__", ".mypy_cache", ".pytest_cache",
+             "node_modules", ".tox", ".venv", "venv"}
+
+
+def _iter_full_repo(root, denied):
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
+        for fn in filenames:
+            p = os.path.join(dirpath, fn)
+            if os.path.realpath(p) in denied:
+                continue
+            yield p
 
 
 def main():
@@ -13,20 +32,34 @@ def main():
     a = ap.parse_args()
 
     root = repo_root()
-    targets = [require_scope(a.path)] if a.path else [root / f for f in scope_files()]
+    full = scope_mode() == "full"
+    if a.path:
+        targets = [str(require_scope(a.path))]
+    elif full:
+        denied = {str((root / f).resolve()) for f in deny_files()}
+        targets = _iter_full_repo(str(root.resolve()), denied)
+    else:
+        targets = [str(root / f) for f in scope_files()]
+
     hits = 0
     for p in targets:
-        if not p.exists():
+        try:
+            if not os.path.isfile(p):
+                continue
+            with open(p, errors="replace") as fh:
+                for i, line in enumerate(fh, 1):
+                    if a.search_term in line:
+                        try:
+                            name = os.path.relpath(p, root)
+                        except ValueError:
+                            name = p
+                        print(f"{name}:{i}: {line.rstrip()[:300]}")
+                        hits += 1
+        except (OSError, UnicodeError):
             continue
-        for i, line in enumerate(p.read_text(errors="replace").splitlines(), 1):
-            if a.search_term in line:
-                try:
-                    name = str(p.relative_to(root))
-                except ValueError:
-                    name = str(p)
-                print(f"{name}:{i}: {line.strip()}")
-                hits += 1
-    print(f"[{hits} match(es) — search is restricted to your scope]")
+    where = "the whole repo (excluding peer-owned files)" if (full and not a.path) \
+        else "your scope"
+    print(f"[{hits} match(es) — literal substring search over {where}]")
 
 
 if __name__ == "__main__":

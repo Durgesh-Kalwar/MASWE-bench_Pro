@@ -44,6 +44,16 @@ M(x) = (A, scope, local, integrate, grade)
   even *read* outside its files) is enforced at solve time by the multi-agent ACI — see
   [`multiagent_aci.md`](multiagent_aci.md).
 
+  **`K = -1` — full-access baseline (denylist).** Passing `--distractors -1` flips scoping
+  from an **allowlist** to a **denylist**: each agent gets read/write to the **entire repo
+  EXCEPT the gold files owned by the other agents** (its own gold file stays editable). This is
+  the unrestricted-baseline setting for comparison against scoped coordination. Enforcement is
+  driven by two env vars the ACI tools read — `SCOPE_MODE=full` and `SCOPE_DENY` (JSON list of
+  peers' gold files); `SCOPE_FILES` then names only the agent's primary file. Because agents
+  can now edit the *same* non-gold file, the integrate step (plain concatenation) prints a
+  loud overlap warning and the merged patch may fail `git apply` — that failure is reflected
+  honestly in the grade rather than reconciled.
+
 - **`local(a_i)` — per-agent task info (scope-limited, not text-limited).** Limited information
   is defined by **file scope, not by withholding the issue**: **every agent receives the FULL
   `problem_statement`** (and the full `requirements` when `--include-requirements`), plus a
@@ -53,6 +63,21 @@ M(x) = (A, scope, local, integrate, grade)
   - `--include-requirements` — also include the Pro `requirements` field (impl-specific
     acceptance criteria naming concrete functions/files) in every agent's local info.
   - `--include-interface` — emit the shared coordination contract (see below).
+
+  **`--partition-issue` — the genuine-coordination setting.** The default above makes
+  cooperation *optional*: since every agent holds the full issue (which spells out the entire
+  cross-file contract), the message board is redundant — verified empirically: across full
+  qwen and gpt-4o-mini runs, agents made **zero** comm-tool calls yet gpt-4o-mini still
+  passed. With `--partition-issue`, each agent's `local_issue.md` instead contains **only its
+  exclusively-routed slice** of the issue: units (sentences / code blocks) are scored by
+  symbol overlap and each goes to exactly ONE agent, with **definer priority** — a unit
+  mentioning a name some agent's gold diff *introduces* (new `def`/`class`/enum members)
+  routes to that definer, so a consumer genuinely never sees the definer's chosen names and
+  must `send_message`/`read_messages` to learn them. Symbol-free units (repro steps, error
+  text) are shared with everyone; there is no "Key symbols" hint (it would leak names right
+  back). Incompatible with `--include-interface`; `--include-requirements` is routed through
+  the same partition rather than given in full. Per-agent slice sizes land in `spec.json`
+  (`local_units`; `0` = that agent must learn its task entirely over the board).
 
 - **`integrate` — patch union.** Because scopes are disjoint, the candidate fix is the plain
   concatenation of each agent's scoped diff (`agent_<k>.patch`) into one `model_patch`.
@@ -93,6 +118,11 @@ python multiagent_pro/sample_instances_pro.py --instances <instance_id> ...
 python multiagent_pro/build_multiagent_pro.py --mode build \
     --distractor-source docker --distractors 3 --include-requirements --include-interface
 
+# ...or the genuine-coordination build: full repo access (denylist) + partitioned issue text
+# (no --include-interface here -- the two are incompatible by design)
+python multiagent_pro/build_multiagent_pro.py --mode build --distractors -1 \
+    --instances <instance_id> --include-requirements --partition-issue
+
 # Inspect a decomposition
 cat multiagent_pro_out/<instance_id>/README.md
 cat multiagent_pro_out/<instance_id>/agent_1/SCOPE.txt          # files this agent may edit
@@ -116,6 +146,13 @@ python multiagent_pro/aci/gen_solver_config.py --instances <instance_id> \
 #   institute/provider's model page) are saved to aci/custom_model_pricing.json and reused
 #   automatically on every later run with that model name. Omitting them for an unregistered
 #   model raises an error telling you exactly what to supply.
+
+# Optional coordination gate (OFF by default; add to either gen_solver_config call above):
+#   --submit-gate    scoped_submit REFUSES (pure refusal -- the harness never calls comm
+#                    tools for the agent) until the agent has itself (1) run read_messages
+#                    on the CURRENT board state and (2) announced on the board any public
+#                    def/class its edits delete (publish_interface). The default -- no gate --
+#                    measures whether models coordinate unprompted under --partition-issue.
 
 python multiagent_pro/aci/orchestrate.py --mode agents --instances <instance_id> --grade
 #   ...or drive the agents yourself, write each agent_<k>.patch, then merge directly:

@@ -201,21 +201,28 @@ def run_agents(inst_dir, spec, rounds, steps_per_round):
     for a in spec["agents"]:
         aid = a["id"]
         env = envs[aid]
-        scope = " ".join(shlex.quote(f) for f in a["scope"])
-        # Stage only this agent's scope: `git add -A` walks the entire worktree,
-        # which on large repos (ansible) exceeds the default 25s timeout and
-        # loses the agent's work. Intent is unchanged -- the diff was already
+        full = a.get("scope_mode") == "full"
+        # In "full" (denylist) mode the agent could edit ANY file except peers' gold files, so
+        # a["scope"] (= just its own gold file) is NOT the edit boundary -- scoping the diff to
+        # it would drop every edit to other files. Diff the whole repo instead; enforcement
+        # guarantees the agent never wrote a denied file, so the diff holds only allowed edits.
+        # In allow mode, stage only this agent's scope: `git add -A` walks the entire worktree,
+        # which on large repos (ansible) exceeds the default 25s timeout; the diff was already
         # restricted to `scope`, so staging beyond it was never needed.
+        pathspec = "" if full else " -- " + " ".join(shlex.quote(f) for f in a["scope"])
         try:
-            # --no-pager: env.communicate runs in the same pty session as the agent's tool
-            # calls, so git sees an isatty stdout and invokes $PAGER (less), which then blocks
-            # on "(press RETURN)" forever -- hangs the full 120s timeout and drops this
-            # agent's diff (see scoped_submit's identical fix for the same failure mode).
-            diff = env.communicate(f'cd "${{ROOT:-/app}}" && git add -A -- {scope} && '
-                                   f'git --no-pager diff --cached -- {scope}',
-                                   timeout=120)
+            # base64 -w0 the diff instead of capturing it raw: env.communicate runs in a pty,
+            # which (a) CRLF-mangles every line and (b) can eat trailing blank/whitespace
+            # context lines -- observed truncating a hunk 2 lines short of its @@ header
+            # count, making `git apply` reject the ENTIRE merged patch as "corrupt patch"
+            # (graded as if the agents did nothing). A single base64 line survives the pty
+            # byte-exact. --no-pager still needed so git never invokes $PAGER in the pty.
+            out = env.communicate(f'cd "${{ROOT:-/app}}" && git add -A{pathspec} && '
+                                  f'git --no-pager diff --cached{pathspec} | base64 -w0',
+                                  timeout=120)
+            diff = base64.b64decode("".join(out.split())).decode("utf-8", errors="replace")
             (inst_dir / f"{aid}.patch").write_text(diff)
-            print(f"  {aid}: scoped diff -> {aid}.patch")
+            print(f"  {aid}: scoped diff -> {aid}.patch ({len(diff.splitlines())} lines)")
         except Exception as e:
             # Never let one agent's collection failure strand the other agents'
             # containers -- that leaks disk until the next manual cleanup.
@@ -283,8 +290,11 @@ def main():
             for a in spec["agents"]:
                 RunSingleConfig(**yaml.safe_load(
                     (inst_dir / a["id"] / "solver.yaml").read_text()))
-                print(f"  {a['id']}: solver.yaml OK | owns {a['gold_file']} "
-                      f"| scope={len(a['scope'])} files")
+                if a.get("scope_mode") == "full":
+                    access = f"full access (deny {len(a.get('deny', []))} peer file(s))"
+                else:
+                    access = f"scope={len(a['scope'])} files"
+                print(f"  {a['id']}: solver.yaml OK | owns {a['gold_file']} | {access}")
             continue
         if args.mode == "gold":
             run_gold(inst_dir, spec)

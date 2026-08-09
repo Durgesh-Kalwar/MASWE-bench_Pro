@@ -59,6 +59,14 @@ RUN set -eux; \\
         --index-url https://pypi.org/simple "swe-rex==$SWEREX_VERSION"; \\
     ln -sf {prefix}/bin/swerex-remote /usr/local/bin/swerex-remote; \\
     swerex-remote --version
+# Reset any ENTRYPOINT the Pro base sets (some ansible bases use ENTRYPOINT ["/bin/bash"]).
+# swe-rex launches the container as `docker run <img> /bin/sh -c '<swerex-remote ...>'`,
+# which it EXPECTS to run as the command directly. With an inherited ENTRYPOINT, that whole
+# argv becomes arguments to the entrypoint instead (`/bin/bash /bin/sh -c ...`), so bash tries
+# to execute the /bin/sh binary as a shell script -> "cannot execute binary file" and the
+# runtime never boots. Clearing it makes the derived image behave like the no-entrypoint bases.
+ENTRYPOINT []
+CMD ["bash"]
 """.format(prefix=RUNTIME_PY_PREFIX)
 
 
@@ -66,11 +74,12 @@ def derived_runtime_tag(base_image: str, *, swerex_version: str = SWEREX_VERSION
                         pbs_url: str = PBS_URL) -> str:
     """Deterministic local tag for the swe-rex runtime image derived from ``base_image``.
 
-    Content-addressed by (base image, swe-rex version, python tarball) so a change to any of
-    them yields a fresh tag (and thus a rebuild), while identical inputs reuse the cache.
+    Content-addressed by (base image, swe-rex version, python tarball, Dockerfile) so a change
+    to any of them — including the Dockerfile recipe itself — yields a fresh tag (and thus a
+    rebuild), while identical inputs reuse the cache.
     """
     digest = hashlib.sha256(
-        "\n".join([base_image, swerex_version, pbs_url]).encode()).hexdigest()[:16]
+        "\n".join([base_image, swerex_version, pbs_url, _DOCKERFILE]).encode()).hexdigest()[:16]
     return f"swerex-runtime:{digest}"
 
 

