@@ -73,7 +73,8 @@ argument(s) through `require_scope()`:
 | `scoped_insert <path> <line> <text>` | insert after a line | denies out-of-scope; **rejected (unapplied) if it breaks `.py` syntax** |
 | `scoped_create <path> <file_text>` | create a NEW in-scope file (e.g. a gold-added module) | path must still be in the allowlist; **rejected if `file_text` has a `.py` syntax error** |
 | `scoped_search <term> [path]` | literal-substring search over scope files (whole repo minus denied files in full mode) | never lists out-of-scope / peer-owned files |
-| `scoped_submit` | end the episode, emit the diff (writes `/root/model.patch`) | with `SUBMIT_GATE`: refused until the agent has read the current board and announced any public-symbol removal (see §2.5) |
+| `scoped_submit` | end the episode, emit the diff (writes `/root/model.patch`) | with `SUBMIT_GATE`: refused until the agent has read the board **once** and announced any public-symbol removal (see §2.5) |
+| `no_op` | pass: end this agent's turn for the CURRENT round without submitting | prints `###MULTIAGENT-NO-OP###`; the orchestrator stops stepping the agent for the round and brings it back next round |
 | `exit_forfeit` | give up and end the episode without submitting | — |
 
 Two enforcement subtleties: paths are `Path.resolve()`d before comparison, so `../` and
@@ -139,6 +140,25 @@ unscoped `git diff` (the agent's `scope` is no longer the edit boundary). Since 
 edit the same non-gold file, `merge` warns on overlapping file paths and the concatenated patch
 may fail `git apply` — surfaced honestly, not reconciled.
 
+**Lockstep rounds + `no_op` (orchestrator, always on).** The board is frozen at the start of
+each round: every agent in that round is handed the identical snapshot, and everything posted
+during the round is published only at the round barrier. So an agent reads peers' messages
+from **previous rounds only** — turn order within a round confers no information advantage
+(previously the board was merged after *each* agent's turn, so later agents saw earlier ones'
+same-round messages). `read_messages` is peer-only and incremental: it never shows an agent
+its own messages and never repeats one it has already delivered, tracked by the per-agent
+cursor `/root/comm/.read_<AGENT_ID>`.
+
+Every agent gets a turn **every round, including agents that already submitted**, so a peer's
+later question can still be answered; the run stops once every still-active agent submits
+within the *same* round. An agent ends its turn by `scoped_submit`, by `no_op` (a pass — "I'm
+missing information only a peer can give me"; it returns next round), or by exhausting its
+step budget. Only `exit_status` starting with `submitted` counts as a submission — the ~10
+other causes of SWE-agent's `done` (`exit_cost`, `exit_context`, `exit_format`,
+`exit_command_timeout`, `exit_forfeit`, `exit_error`, …) retire the agent permanently instead,
+and `agent.step()` is wrapped so a re-raised `TotalCostLimitExceededError` can't abort the run
+before diff collection.
+
 **Partitioned issue text (`--partition-issue`, build-time).** The default local info makes
 cooperation optional (every agent holds the full issue, which spells out the whole cross-file
 contract — measured: zero comm-tool calls across full qwen/gpt-4o-mini runs). With
@@ -152,11 +172,14 @@ problem-statement content.
 `scoped_submit` runs `scoped_fs/lib/submit_gate.py` before any git work and REFUSES (prints
 the reason, exits 0, emits **no** submission markers and **no** `/root/model.patch`, so the
 episode continues) until:
-1. **Read-gate** — the agent has itself run `read_messages` on the CURRENT board state.
-   `read_messages` records a canonical content-hash marker (`/root/comm/.read_<AGENT_ID>`);
-   content hash, not mtime, because the orchestrator truncate-rewrites the board at every
-   turn start and host/agent JSON formatting differs. Reading an empty board satisfies the
-   gate (no round-1 deadlock).
+1. **Read-gate** — the agent has itself run `read_messages` at least ONCE, ever.
+   `read_messages` writes a per-agent read cursor (`/root/comm/.read_<AGENT_ID>`) and the gate
+   only asks whether that file exists. Reading an empty board satisfies it (no round-1
+   deadlock), and the agent is never asked to re-read. *Superseded design:* the gate used to
+   compare a content hash of the whole board, but the agent's own `send_message`/
+   `publish_interface` mutate the board without marking it read — so publishing an interface
+   re-blocked your own submission until you re-read. Existence-only removes that by
+   construction.
 2. **Publish-check** — any public `def`/`class` deleted by the agent's edits (HEAD vs
    worktree, `ast`-parsed, `_`-prefixed names exempt) has been announced in one of the
    agent's own board messages (name match against its `publish_interface`/`send_message`
@@ -211,10 +234,16 @@ note with it; agents can also negotiate/announce one at runtime when the dataset
 ### 3.3 Synchronization — round-based barrier
 
 Messages propagate at a **round barrier**, not instantly. Within a round each agent runs a
-bounded number of `step()`s against the board as it was at the start of the round; between
-rounds the orchestrator merges every container's new messages into the canonical board and
-pushes it back. This gives deterministic, debuggable turn-taking and avoids racing on a shared
-file. The merge de-duplicates by `(from, ts, to, text, signature)`.
+bounded number of `step()`s against the board **frozen at the start of that round** — every
+agent in the round gets byte-identical state — and the orchestrator only merges everyone's new
+messages into the canonical board once the round ends. So a message is readable exactly one
+round after it is posted, regardless of who posted it or in what order agents run. This gives
+deterministic, debuggable turn-taking, removes any turn-order information advantage, and avoids
+racing on a shared file. The merge de-duplicates by `(from, ts, to, text, signature)`.
+
+(Earlier revisions merged the board after *each agent's turn*, so agent *k* saw agents
+1…*k*−1's same-round messages while agent 1 saw none — turn order silently decided who knew
+what. That is fixed; see §2.5.)
 
 ---
 
@@ -232,12 +261,19 @@ the host.
 for each agent: start SWEEnv from its solver.yaml (env.start)            # one container each
 board = []
 for round in 1..R:
-    for each not-done agent:
-        env.write_file(COMM_BOARD, board)         # sync canonical board IN
-        run up to `steps_per_round` of agent.step()   # bounded turn; stop early on submit
-        board = merge(board, env.read_file(COMM_BOARD))   # collect new messages OUT
-    stop if all submitted
-for each agent: agent.patch = env.communicate("git diff -- <scope files>")   # scoped diff
+    frozen = board                                # FROZEN: identical for every agent
+    submitted, pending = {}, []
+    for each agent not permanently retired:       # includes agents that already submitted
+        env.write_file(COMM_BOARD, frozen)        # same bytes for everyone
+        notify_round(agent)                       # "round N began, board updated"
+        run up to `steps_per_round` of agent.step()
+            # turn ends on: no_op marker (pass, returns next round)
+            #             | done + exit_status "submitted*"  -> submitted[aid]
+            #             | done otherwise (exit_cost/context/format/...) -> retire agent
+        pending += messages this container added on top of `frozen`
+    board = merge(board, pending)                 # PUBLISH once, at the round barrier
+    stop if every still-active agent submitted THIS round
+for each agent: agent.patch = env.communicate("git diff ... | base64 -w0")   # scoped diff
 # integrate + grade (unchanged):
 build_multiagent_pro.py --mode merge  ->  patches.json  ->  swe_bench_pro_eval.py
 ```

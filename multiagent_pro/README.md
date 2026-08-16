@@ -150,10 +150,16 @@ python multiagent_pro/aci/gen_solver_config.py --instances <instance_id> \
 # Optional coordination gate (OFF by default; add to either gen_solver_config call above):
 #   --submit-gate    scoped_submit REFUSES (pure refusal -- the harness never calls comm
 #                    tools for the agent) until the agent has itself (1) run read_messages
-#                    on the CURRENT board state and (2) announced on the board any public
-#                    def/class its edits delete (publish_interface). The default -- no gate --
-#                    measures whether models coordinate unprompted under --partition-issue.
+#                    ONCE (ever -- it is never asked to re-read) and (2) announced on the
+#                    board any public def/class its edits delete (publish_interface). The
+#                    default -- no gate -- measures whether models coordinate unprompted
+#                    under --partition-issue.
 
+# Rounds are LOCKSTEP: the board is frozen at the start of each round, so every agent sees the
+# same state and reads peers' messages from PREVIOUS rounds only. Every agent gets a turn every
+# round (including ones that already submitted, so late questions can be answered); the run
+# stops once every still-active agent submits in the SAME round. An agent that lacks
+# information a peer must supply can end its turn early with `no_op` and return next round.
 python multiagent_pro/aci/orchestrate.py --mode agents --instances <instance_id> --grade
 #   ...or drive the agents yourself, write each agent_<k>.patch, then merge directly:
 python multiagent_pro/build_multiagent_pro.py --mode merge --instances <instance_id>

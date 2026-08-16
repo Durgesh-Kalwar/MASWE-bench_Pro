@@ -1,14 +1,20 @@
 # Checkpoint — multi-agent full-access mode + coordination findings
 
-**Date:** 2026-08-07 (updated 2026-08-08) · **Branch:** `main` (base `da9a301`) · **State:** all changes UNCOMMITTED in the working tree.
+**Started:** 2026-08-07 · **Last updated:** 2026-08-15 · **Branch:** `main`
 
-> **2026-08-08 UPDATE — decision (b) TAKEN and IMPLEMENTED.** The genuine-coordination
-> mode now exists and is verified offline: `--partition-issue` (build) + optional
-> `--submit-gate` (config-gen, OFF by default). See §6 below; §3's fork is resolved.
+> ## ▶ START HERE (2026-08-15): read **§8**, then **§8.9 "Session status"** at the very end.
+> §§1-7 are historical: §§1-5 = full-access mode (committed as `4ad402b`), §6 = the
+> coordination mode (`--partition-issue`/`--submit-gate`), §7 = a design study whose open
+> questions §8 **supersedes**. Everything from §8 onward is the current state.
+>
+> **One-line status:** lockstep rounds + `no_op` + per-round read gate are implemented and
+> verified; agents now genuinely coordinate (asking, answering, publishing correct
+> contracts), but the top blocker is no longer coordination — it is a recurring
+> **structural edit bug** that has decided 3 runs. See §8.9 for the ranked next steps.
 
-This file is a resume anchor: where the work stands, what was learned, and the one open
-decision to pick up next. Feature docs live in `README.md` (§scope) and `multiagent_aci.md`
-(§2.5); this file is the experiment log + next-step plan.
+This file is the resume anchor: where the work stands, what was learned, and what to pick up
+next. Feature docs live in `README.md` (§scope) and `multiagent_aci.md` (§2.5); this file is
+the experiment log + next-step plan.
 
 ---
 
@@ -62,7 +68,7 @@ lines are real calls.) So unused comm tools are **model-agnostic**, not a weak-m
 
 ---
 
-## 3. The open decision (RESUME HERE)
+## 3. The open decision *(HISTORICAL — resolved on 2026-08-08; see §6. Current state is §8.)*
 
 **Insight (user, confirmed on `395e5e20`):** cooperation is **not required** in the current
 setup, because the coordinating information is pre-loaded into every agent:
@@ -461,3 +467,227 @@ Still-open items carried over from §6 (unchanged, not addressed this session):
   valid-but-corrupting indentation changes like the `IntFlag`/`PlayIterator` bug in §6).
 
 Git state unchanged from §5 — still all uncommitted on `main` (base `da9a301`).
+*(Superseded: §7's work was committed + pushed as `4ad402b`; see §8.)*
+
+---
+
+## 8. 2026-08-15 — lockstep rounds, `no_op`, unread-only reads, read-once gate (IMPLEMENTED)
+
+§7 ended with three open sub-decisions about "resumable done". The user replaced that design
+with a cleaner one, implemented and verified this session. **This supersedes §7.5** — the
+revival-bound/filtering questions are moot because agents are never retired on submission at
+all, and the read-marker bug (§7.1 Finding A) is fixed by construction.
+
+### The new protocol
+1. **Lockstep board.** The board is FROZEN at the start of each round; every agent in that
+   round is handed byte-identical state, and everything posted during the round is published
+   only at the round barrier. An agent therefore reads peers' messages from **previous rounds
+   only**. (Before: the board was merged after *each agent's turn*, so agent *k* saw agents
+   1…*k*−1's same-round messages — turn order silently decided who knew what.)
+2. **Everyone runs every round.** No retirement on submission. A submitted agent still gets a
+   turn so it can answer a peer's later question or revise; the run stops when every
+   still-active agent submits **in the same round** (or `--rounds` runs out). No early stop on
+   an all-`no_op` stalemate (user's explicit choice).
+3. **New `no_op` tool** (`scoped_fs/bin/no_op`): "I'm missing information only a peer can give
+   me" — ends the agent's step loop for THIS round only, does not mark it done, returns next
+   round. Distinct from `exit_forfeit` (permanent).
+4. **Peer-only, unread-only reads.** `visible_to` now excludes the agent's own messages, and a
+   per-agent cursor (`/root/comm/.read_<AGENT_ID>`, content-digest set) means each peer message
+   is shown exactly once, ever.
+5. **Read-once submit gate.** `check_read_gate` now only asks whether the cursor file exists.
+   Kills §7.1 Finding A by construction: nothing posted later (least of all the agent's own
+   `publish_interface`) can re-block a submission.
+
+### Two SWE-agent facts that shaped the implementation
+- **`done=True` has ~10 causes**, only one being a real submission. The loop treats
+  `exit_status.startswith("submitted")` as submitted (per-round, resettable) and every other
+  cause (`exit_cost`, `exit_context`, `exit_format`, `exit_command_timeout`, `exit_forfeit`,
+  `exit_error`, …) as **permanent retirement** — otherwise a cost-limited agent would burn a
+  wasted step every remaining round.
+- **`TotalCostLimitExceededError` is re-raised**, not converted to a done-step
+  (`agents.py:1163-1164`). Unguarded it would abort `run_agents` and skip diff collection,
+  losing every agent's work. `agent.step()` is now wrapped.
+- `no_op`'s marker must be the FIRST output line (observations truncate head-first at 100k),
+  matched as a substring (pty adds CRLF), must not collide with `###SWE-AGENT-*` /
+  `<<SWE_AGENT_SUBMISSION>>`, and must stay off the submit path (a submitting step overwrites
+  its own observation with the patch text).
+- A **round notice** is injected as a plain `user` turn via `agent._append_history` from round 2
+  on (valid because function-calling observations are appended with role `tool`). Without it a
+  re-invoked agent has no idea why it is being stepped again, and "all submit in the same
+  round" termination is unreachable. Best-effort: wrapped in try/except.
+
+### Verified (2026-08-15)
+- **Host unit tests:** peer-only filter drops self-authored messages; cursor returns each
+  message exactly once and survives the host rewriting `board.json` in different formatting.
+- **Lockstep simulation:** all agents in a round see identical state; round-1 posts invisible
+  in round 1 and delivered in round 2; no duplication through `merge_board`.
+- **Real py3.9 container** (`swerex-runtime:da5951963937328f`), 8 checks: `no_op` marker is
+  line 1 / exit 0; gate blocks before any read; read of an EMPTY board satisfies it;
+  **publishing afterwards does NOT re-block (the §7.1 regression)**; a host-added peer message
+  does not re-block; `read_messages` shows a new message once then nothing; own messages never
+  echoed back; gate-off `scoped_submit` still emits both markers + writes `/root/model.patch`.
+- Configs regenerated (templates changed) + `--mode dry` passes for all 4 agents.
+
+### Files changed
+`aci/orchestrate.py` (lockstep loop, `NOOP_MARKER`, `_notify_round`, retire-vs-submitted, step
+guard), `aci/tools/scoped_fs/bin/no_op` (NEW), `aci/tools/scoped_fs/config.yaml`,
+`aci/tools/scoped_fs/lib/submit_gate.py`, `aci/tools/comm/lib/board.py`,
+`aci/tools/comm/bin/read_messages`, `aci/tools/comm/config.yaml`, `aci/gen_solver_config.py`
+(templates), `README.md`, `multiagent_aci.md`.
+
+### Per-round read gate (user amendment, same session)
+The first lockstep run exposed that a **read-once-ever** gate lets a finished agent submit
+straight past a board holding a question for it: agent_2 (the only agent that knew the enum
+names) took exactly ONE step in round 3 (`scoped_submit`) while agent_3 and agent_4 sat
+blocked asking for exactly those names. Fix (user-specified):
+- **Read once per ROUND, not once ever.** The host writes the round number to
+  `/root/comm/.round` at the start of every turn; `read_messages` stamps it into
+  `.read_round_<AGENT_ID>`; the gate blocks unless they match. Still not a content
+  comparison, so the §7.1 self-invalidation stays fixed (publishing after reading never
+  re-blocks within a round). Falls back to read-once-ever when no `.round` file exists
+  (offline tooling / gold mode).
+- **Personalized re-invocation notice.** An agent that already submitted gets a notice naming
+  the round it submitted in ("You already submitted your patch in round N …"), telling it to
+  read the board FIRST and decide from what it finds (answer a peer / apply their info /
+  re-submit to confirm).
+
+### RUN RESULT (2026-08-15, gpt-4o-mini, `395e5e20`, partition + full scope + gate, rounds=3)
+**PASS 100% — 8/8 tests, real local-docker eval** (`eval_results.json: true`; eval_out cleared
+beforehand). First pass under the partitioned/coordination-required setting.
+
+**First successful definer→consumer answer in the project's history:**
+`agent_2 -> agent_3: "the HostState class is defined in lib/ansible/executor/play_iterator.py.
+Its __str__ method was just updated to use the new IteratingStates and FailedStates enums..."`
+— produced only because the per-round gate forced agent_2 to read in round 3.
+
+Board timeline (lockstep verified): round 1 = **0 messages**; round 2 = agent_3 broadcasts a
+question + agent_4 asks agent_1; round 3 = agent_1 replies, **agent_2 answers agent_3**,
+agent_4 follows up.
+
+Comm usage: 5 `send_message`, 8 `read_messages`, 3 `no_op`, 1 `list_agents` (vs 4 total
+ungated, 10 gated-non-lockstep). Gate refusals: **5** across 4 agents × 3 rounds — one per
+agent-round, vs 8 for a single agent under the old hash gate.
+
+**But the answer was delivered one round too late.** agent_2 posted it *during* round 3, so it
+was only readable in round 4 — which never ran. Verified: agent_3's round-3 read saw **0
+messages**, and both consumers submitted 0-line patches. The PASS came from agent_1 +
+agent_2's own work, not from completed coordination.
+
+**Actionable consequence — `--rounds 3` is too few for a full chain.** Under lockstep, an
+ask→answer→apply cycle costs three round transitions: ask in round R, readable R+1, answer in
+R+1, readable R+2, applied in R+2. With the first ask landing in round 2, the consumer cannot
+act before round 4. **Use `--rounds 5+` for coordination experiments.**
+
+Secondary: agent_4 twice asked **agent_1** (the changelog owner) for the enum names instead of
+agent_2, despite calling `list_agents`; agent_1 honestly answered that it had not defined
+them. Peer-targeting remains a real weakness (same root as the §6 collision finding).
+
+### NEW failure mode observed: a bad patch can HANG the grader
+The preceding (read-once) run's eval ran **25+ minutes at 100% CPU while allocating ~10 GiB/min
+(reached 132 GiB)** — a non-terminating loop in agent_2's `play_iterator.py` rewrite, driven
+forever by `test_play_iterator.py`. Killed manually; freed ~128 GiB. Grading now deserves a
+timeout/memory guard, since a runaway patch threatens the whole machine, not just the run.
+
+### RUN RESULT (2026-08-15, same setup, `--rounds 5`) — richer coordination, FAIL 0%
+Run with two extra rounds so an ask→answer→apply chain could physically complete.
+
+**Coordination went much further than any previous run:**
+- 12 `send_message`, 15 `read_messages`, **2 `publish_interface`**, 6 `no_op`; 10 gate refusals
+  (≈1 per agent-round, as designed).
+- agent_2 published the **correct** contract, twice: `class IteratingStates(IntEnum)` and
+  `class FailedStates(IntFlag)` — and answered agent_3 directly with the enum members. The
+  §6 naming-collision reappeared (agent_1 again announced invented
+  `PlayIteratorRunState`/`PlayIteratorFailureState`), but agent_2 also *corrected the record*
+  on the board, which is new.
+
+**Yet both consumers still shipped 0-line patches.** agent_3 `no_op`'d in rounds 2, 3, 4 AND 5
+— it kept re-asking for "the exact enum names and members" even after agent_2 published them,
+never once submitting. agent_4 `no_op`'d in 2 and 5 and at one point forwarded agent_3's own
+question *back to agent_3*. So more rounds bought more conversation, not more code.
+
+**Grade: FAIL 0%, `tests: []` — but NOT a coordination failure.** Same recurring structural
+bug as §6, third occurrence on this file: agent_2 dedented the new enum classes mid-`class
+PlayIterator`, orphaning the original class body into the enum. Verified by `ast.walk` on the
+applied patch: `PlayIterator` ends with **0 methods** while `FailedStates` swallowed **15**
+(`__init__`, `get_host_state`, `get_next_task_for_host`, …), so the Enum metaclass raises
+`TypeError: __init__() missing 4 required positional arguments` at import. Syntactically valid,
+so `compile()` (the current linter) cannot see it.
+
+**Regression worth noting: agent_2's code output shrank as coordination grew** — 159 patch
+lines under `--rounds 3` (PASS) vs **68** under `--rounds 5` (FAIL). Time went into the board
+instead of the file. More rounds is not monotonically better.
+
+### 8.8 All runs to date on `395e5e20` (4 agents, gpt-4o-mini via CreateAI)
+
+| # | Setting | Real comm calls | Grade | What decided it |
+|---|---|---|---|---|
+| 1 | unpartitioned (§6) | **0** | PASS 100% | no coordination needed — every agent held the full issue |
+| 2 | partition, no gate (§6) | 4 (1 agent) | FAIL 0% | agent_3 never read the board; question died unseen |
+| 3 | partition + hash gate (§6) | 10 (3 agents) | FAIL 0% | **structural edit bug** (`PlayIterator` methods reparented) |
+| 4 | + lockstep, read-once gate, rounds=3 | 17 | *(ungraded — grader HUNG, see above)* | agent_2 submitted past the board without reading |
+| 5 | + **per-round gate**, rounds=3 | 17 | **PASS 100%** (8/8) | agent_2 answered agent_3 — but 1 round too late to use |
+| 6 | + per-round gate, **rounds=5** | **35** | FAIL 0% | **structural edit bug again** (3rd time) |
+
+Read across the rows: the coordination mechanisms are working (0 → 35 real comm calls, and by
+run 6 the definer publishes correct contracts and corrects a peer's wrong ones). What now
+decides pass/fail is **not** coordination — it is the edit-tool bug in rows 3 and 6, and
+round-budget arithmetic in row 5.
+
+### 8.9 Session status — STOP HERE (2026-08-15)
+
+**Nothing is running.** No background processes, no stray containers (verified). Grading of
+run 4 was killed deliberately (runaway; see above) and its container removed.
+
+**Working tree: UNCOMMITTED.** Base commit is `4ad402b` (the §1-7 work, already pushed).
+Changed today: `aci/orchestrate.py`, `aci/tools/scoped_fs/bin/no_op` (NEW),
+`aci/tools/scoped_fs/config.yaml`, `aci/tools/scoped_fs/lib/submit_gate.py`,
+`aci/tools/comm/lib/board.py`, `aci/tools/comm/bin/read_messages`,
+`aci/tools/comm/config.yaml`, `aci/gen_solver_config.py`, `README.md`, `multiagent_aci.md`,
+`CHECKPOINT.md`, plus regenerated `multiagent_pro_out/` artifacts. **Committing is the first
+decision for the next session.** (`SWE-agent` submodule still carries its own separate
+uncommitted `models.py` fix — deliberately excluded, see §5.)
+
+**Artifacts kept for comparison:** the rounds=3 PASS (boards, patches, `eval_results.json`) is
+backed up under the session scratchpad `.../scratchpad/rounds3_pass/`; `multiagent_pro_out/`
+currently holds the rounds=5 FAIL run.
+
+**Ranked next steps (start here tomorrow):**
+1. **AST structural edit-check** — highest value by a wide margin; this one bug class has now
+   decided runs 3 and 6. In `scoped_fs/lib/scoped.py`, extend the existing `check_syntax()`
+   (which only runs `compile()`) to also parse before/after and **reject an edit that changes
+   the enclosing class/def of any pre-existing member** — i.e. catch "content reparented into
+   the wrong scope", which is syntactically valid and therefore invisible today. Verify by
+   replaying agent_2's exact bad edit: `PlayIterator` must not end up with 0 methods.
+2. **`no_op` livelock guard** — agent_3 passed in rounds 2/3/4/5 and shipped nothing. Options:
+   cap consecutive `no_op`s, or force a submit attempt in the final round.
+3. **Peer-targeting** — agents broadcast, ask the wrong peer (agent_4 asked the changelog
+   owner for enum names, twice), or echo a question back to its own sender. `list_agents`
+   exists and is under-used; consider surfacing the owner of a symbol/file in the roster.
+4. **Round budget** — `--rounds 5` gave more talk but *less* code (agent_2: 159 → 68 patch
+   lines). Not monotonic; worth measuring 4 vs 5 vs 6 once (1) is fixed.
+5. Interface-naming-collision reconciliation; grader timeout/memory guard; parallel execution
+   (separate branch, §7.3).
+
+**Reproduce the current best configuration** (run 5, the PASS) — note `--rounds 3`:
+```bash
+eval "$(grep -m1 '^export CREATEAI_API_KEY=' ~/.bashrc)"; export OPENAI_API_KEY="$CREATEAI_API_KEY"
+eval "$(grep -m1 '^export CREATAI_BASE_URL=' ~/.bashrc)"
+INST=instance_ansible__ansible-395e5e20fab9cad517243372fa3c3c5d9e09ab2a-v7eee2454f617569fd6889f2211f75bc02a35f9f8
+python multiagent_pro/build_multiagent_pro.py --mode build --distractors -1 \
+    --instances $INST --output multiagent_pro_out --include-requirements --partition-issue
+python multiagent_pro/aci/gen_solver_config.py --output multiagent_pro_out --instances $INST \
+    --model openai/gpt4o_mini --api-base "$CREATAI_BASE_URL" \
+    --per-instance-cost-limit 1.5 --submit-gate
+rm -rf multiagent_pro_out/eval_out/$INST                      # else the grade is STALE
+rm -f  multiagent_pro_out/$INST/agent_*.patch multiagent_pro_out/$INST/board*.json
+rm -rf multiagent_pro_out/$INST/agent_*/traj
+python multiagent_pro/aci/orchestrate.py --mode agents --instances $INST \
+    --output multiagent_pro_out --rounds 3 --steps-per-round 25 --grade
+```
+**Watch grading** — a non-terminating patch can hang it at 100% CPU while allocating ~10
+GiB/min (it reached 132 GiB before being killed). If `Overall accuracy` has not appeared a few
+minutes after `Running local-docker evaluation`, check `docker stats` and kill it.
+
+**Counting comm calls correctly:** only `[agent_N] step K: <tool>` lines are real calls.
+Grepping the raw log for tool names also counts the tool DOCS embedded in every prompt, which
+inflates the number several-fold.

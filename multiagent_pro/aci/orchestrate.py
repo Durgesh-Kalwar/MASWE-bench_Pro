@@ -8,8 +8,16 @@ the unchanged Pro harness.
 Container model (per the design): each agent runs in its OWN container started from the same
 Pro image at the same base_commit (SWE-agent's DockerDeployment always starts a fresh
 container, and the registry/state files are hardcoded single paths, so agents cannot safely
-co-tenant). The comm board is owned here on the host and synced into/out of every container
-each round, so messages propagate at the round barrier.
+co-tenant). The comm board is owned here on the host.
+
+Round model (strict lockstep): at the start of a round the board is FROZEN, and every agent
+in that round is handed the identical snapshot. Whatever the agents post is collected but
+published only once the round ends, so an agent can only ever read what peers said in
+PREVIOUS rounds -- turn order within a round carries no information advantage. Every agent
+gets a turn every round, including agents that already submitted (so a peer's later question
+can still be answered); the run stops once every agent submits within the SAME round. An
+agent ends its turn by submitting, by `no_op` (a pass: "I'm missing information a peer must
+give me" -- it returns next round), or by exhausting its step budget.
 
 Modes
 -----
@@ -35,6 +43,14 @@ from pathlib import Path
 REPO_DIR = Path(__file__).resolve().parent.parent.parent
 BUILD_SCRIPT = REPO_DIR / "multiagent_pro" / "build_multiagent_pro.py"
 COMM_BOARD_IN_IMAGE = "/root/comm/board.json"
+# Current round number, rewritten into every container at the start of each turn. The submit
+# gate compares it against the round the agent last ran read_messages in, which is what makes
+# "read the board once per round" enforceable (a read-once-ever gate let an agent that had
+# finished sail past questions posted for it in later rounds).
+ROUND_FILE_IN_IMAGE = "/root/comm/.round"
+# Emitted by tools/scoped_fs/bin/no_op. Matched as a SUBSTRING of the step observation: the
+# swe-rex pty appends CRLF, so equality/line comparisons would miss it.
+NOOP_MARKER = "###MULTIAGENT-NO-OP###"
 
 
 # --------------------------------------------------------------------------- #
@@ -95,6 +111,65 @@ def _format_tool_calls(calls):
     return ", ".join(f"{c['name']}({c['args']})" for c in calls)
 
 
+ROUND_NOTICE = """\
+--- Round {n} begins ---
+The message board has just been updated with everything your peers posted in round {prev}.
+Anything you post from now on reaches them in round {next}, not this one.
+
+Start by running `read_messages` (it shows only what is new, and never your own messages).
+Then:
+  * if a peer gave you what you were waiting for, apply it and run `scoped_submit`;
+  * if your file is already complete and nothing has changed for you, run `scoped_submit`
+    again to confirm you are finished -- the run ends once every agent submits in the same
+    round;
+  * if you are still missing something only a peer can give you, `send_message` to ask, then
+    `no_op` to end your turn and wait for their reply next round.
+
+You must run `read_messages` in EVERY round before `scoped_submit` -- a peer may be blocked
+waiting on an answer only you can give.
+"""
+
+SUBMITTED_NOTICE = """\
+--- Round {n} begins ---
+You already submitted your patch in round {submitted_in}. You are being given another turn
+because your peers may need something from you -- they can only reach you while you keep
+taking turns.
+
+The board now carries everything your peers posted in round {prev}. Run `read_messages`
+FIRST, then decide from what you actually find there:
+  * a peer asked you for something (a name, a signature, where something lives) -> answer
+    with `send_message`, or `publish_interface` the EXACT names you wrote in your file;
+  * a peer told you something that changes your file -> edit it, then `scoped_submit` again;
+  * nothing on the board concerns you -> run `scoped_submit` again to confirm you are still
+    finished (the run ends once every agent submits in the same round).
+
+You must run `read_messages` in EVERY round before `scoped_submit`, including this one.
+"""
+
+
+def _notify_round(agent, r, submitted_in=None):
+    """Tell an agent a new round started. Without this, an agent re-invoked after submitting
+    just sees its own last observation and has no idea why it is being stepped again, so it
+    can neither answer a peer's new question nor confirm it is finished (which is what ends
+    the run). Agents that already submitted get a notice naming the round they submitted in,
+    since "why am I running again?" is exactly their question. Injected as a plain user turn
+    -- valid after a step because function-calling observations are appended with role "tool"
+    (agents.py _add_templated_messages_to_history). Best-effort: the round loop must never die
+    over a prompt nicety."""
+    if r == 0:
+        return
+    tmpl = SUBMITTED_NOTICE if submitted_in else ROUND_NOTICE
+    try:
+        agent._append_history({
+            "role": "user",
+            "content": tmpl.format(n=r + 1, prev=r, next=r + 2, submitted_in=submitted_in),
+            "agent": getattr(agent, "name", "primary"),
+            "message_type": "user",
+        })
+    except Exception as e:
+        print(f"    (round notice skipped: {type(e).__name__}: {e})")
+
+
 # --------------------------------------------------------------------------- #
 # gold mode (offline, no LLM)
 # --------------------------------------------------------------------------- #
@@ -150,7 +225,7 @@ def run_agents(inst_dir, spec, rounds, steps_per_round):
     # solver.yaml files already point at this deterministic tag with pull=never.
     ensure_runtime_image(spec["image"])
 
-    envs, agents, done = {}, {}, {}
+    envs, agents, retired = {}, {}, {}
     for a in spec["agents"]:
         aid = a["id"]
         cfg = RunSingleConfig(**yaml.safe_load((inst_dir / aid / "solver.yaml").read_text()))
@@ -162,40 +237,76 @@ def run_agents(inst_dir, spec, rounds, steps_per_round):
         agent = get_agent_from_config(cfg.agent)
         agent.setup(env=env, problem_statement=cfg.problem_statement,
                     output_dir=Path(cfg.output_dir))
-        envs[aid], agents[aid], done[aid] = env, agent, False
+        envs[aid], agents[aid], retired[aid] = env, agent, False
         print(f"  started {aid}")
 
     board = []
+    submitted_round = {}              # aid -> round it FIRST submitted in (for the notice)
     for r in range(rounds):
         print(f"  -- round {r + 1}/{rounds} --")
+        frozen = list(board)          # every agent this round sees the SAME board state
+        frozen_keys = {_msg_key(m) for m in frozen}
+        submitted, pending = {}, []
         for a in spec["agents"]:
             aid = a["id"]
-            if done[aid]:
+            if retired[aid]:          # terminal failure only -- NOT "already submitted"
                 continue
             env, agent = envs[aid], agents[aid]
-            env.write_file(COMM_BOARD_IN_IMAGE, json.dumps(board))   # sync board IN
+            env.write_file(COMM_BOARD_IN_IMAGE, json.dumps(frozen))   # identical for everyone
+            env.write_file(ROUND_FILE_IN_IMAGE, str(r + 1))   # arms the per-round read gate
+            _notify_round(agent, r, submitted_round.get(aid))
             round_steps = []
             for _ in range(steps_per_round):
-                out = agent.step()
+                try:
+                    out = agent.step()
+                except Exception as e:
+                    # SWE-agent turns most failures into done-steps, but re-raises
+                    # TotalCostLimitExceededError -- unguarded that would abort run_agents
+                    # entirely and skip the diff collection below, losing EVERY agent's work.
+                    print(f"    [{aid}] step raised {type(e).__name__}: {e} -- retiring agent")
+                    retired[aid] = True
+                    break
                 record = _step_record(len(agent.trajectory), out)
                 round_steps.append(record)
                 print(f"    [{aid}] step {record['step']}: {_format_tool_calls(record['tool_calls'])}")
+                if NOOP_MARKER in (out.observation or ""):
+                    print(f"    [{aid}] passed this round (no_op)")
+                    break             # turn over for this round; agent is NOT done
                 if getattr(out, "done", False):
-                    done[aid] = True
+                    # `done` covers ~10 outcomes, only one of which is a real submission
+                    # (agents.py sets exit_status "submitted"/"submitted (...)"). The rest --
+                    # exit_cost, exit_context, exit_format, exit_command_timeout, exit_forfeit,
+                    # exit_error, ... -- mean the agent cannot usefully continue, so retire it
+                    # instead of burning a wasted step on it every remaining round.
+                    if str(out.exit_status or "").startswith("submitted"):
+                        submitted[aid] = True
+                        submitted_round.setdefault(aid, r + 1)
+                    else:
+                        print(f"    [{aid}] ended: {out.exit_status} -- retiring agent")
+                        retired[aid] = True
                     break
             traj_dir = inst_dir / aid / "traj"
             traj_dir.mkdir(parents=True, exist_ok=True)
             (traj_dir / f"round_{r + 1}.json").write_text(json.dumps(round_steps, indent=2))
-            try:                                                    # collect new msgs OUT
-                new_board = merge_board(board, json.loads(env.read_file(COMM_BOARD_IN_IMAGE)))
+            try:            # stage this agent's new messages; do NOT publish them yet
+                posted = json.loads(env.read_file(COMM_BOARD_IN_IMAGE))
+                if not isinstance(posted, list):
+                    posted = []
             except Exception:
-                new_board = board
-            for m in new_board[len(board):]:
-                print(f"    [board] {m.get('from')} -> {m.get('to', 'all')}: {m.get('text')}")
-            board = new_board
+                posted = []
+            pending.extend(m for m in posted
+                           if isinstance(m, dict) and _msg_key(m) not in frozen_keys)
+        board = merge_board(board, pending)          # publish once, at the round barrier
+        for m in board[len(frozen):]:
+            print(f"    [board] {m.get('from')} -> {m.get('to', 'all')}: "
+                  f"{m.get('signature') or m.get('text')}")
         (inst_dir / f"board_after_round_{r + 1}.json").write_text(json.dumps(board, indent=2))
-        if all(done.values()):
-            print("  all agents submitted")
+        active = [a["id"] for a in spec["agents"] if not retired[a["id"]]]
+        if active and all(submitted.get(aid) for aid in active):
+            print("  all agents submitted in the same round")
+            break
+        if not active:
+            print("  no agents left to run")
             break
 
     for a in spec["agents"]:

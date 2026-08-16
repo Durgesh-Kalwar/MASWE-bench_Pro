@@ -40,11 +40,21 @@ file in the repo is invisible to you — there is no `bash` tool and no general 
 
 Because each agent sees only its own files, you must COORDINATE. If you define or change
 something a peer depends on (a function, class, or signature they must call), announce it
-with `publish_interface`. If you need something owned by another file, ask with
-`send_message`. Check `read_messages` every turn before editing.
+with `publish_interface` — publish the EXACT names you actually wrote, and only for files
+you own. If you need something owned by another file, ask for it with `send_message`.
 
-When your file's changes are complete and consistent with the shared interface, run
-`scoped_submit` to finish.
+WORK PROCEEDS IN ROUNDS, and the message board advances one round at a time: messages you
+post are delivered to your peers in the NEXT round, and `read_messages` shows you what peers
+posted in PREVIOUS rounds (only what is new, never your own messages). So:
+
+  * Run `read_messages` at the start of EVERY round, before editing and before submitting --
+    a peer may be blocked waiting on an answer only you can give.
+  * Do not guess a name a peer is supposed to define — a wrong guess silently breaks the
+    build. Ask with `send_message`, then run `no_op` to end your turn and wait; you get
+    another turn next round, with their reply readable.
+  * Run `scoped_submit` when your file's changes are complete. You will still get a turn in
+    later rounds so peers can reach you; if nothing has changed for you, simply
+    `scoped_submit` again to confirm you are finished.
 
 Available tools:
 {{command_docs}}
@@ -59,11 +69,22 @@ peer-owned files you may not touch). Those peer files are the only ones off-limi
 
 Focus on your assigned file, but edit any other file you need to make the fix complete and
 consistent. Because peers can also edit shared (non-owned) files, COORDINATE: if you change
-something a peer depends on, announce it with `publish_interface`; if a peer owns a file you
-need changed, ask with `send_message`. Check `read_messages` every turn before editing, and
-avoid clobbering a shared file another agent is actively editing.
+something a peer depends on, announce it with `publish_interface` — publish the EXACT names
+you actually wrote, and only for files you own; if a peer owns a file you need changed, ask
+with `send_message`. Avoid clobbering a shared file another agent is actively editing.
 
-When your changes are complete and consistent, run `scoped_submit` to finish.
+WORK PROCEEDS IN ROUNDS, and the message board advances one round at a time: messages you
+post are delivered to your peers in the NEXT round, and `read_messages` shows you what peers
+posted in PREVIOUS rounds (only what is new, never your own messages). So:
+
+  * Run `read_messages` at the start of EVERY round, before editing and before submitting --
+    a peer may be blocked waiting on an answer only you can give.
+  * Do not guess a name a peer is supposed to define — a wrong guess silently breaks the
+    build. Ask with `send_message`, then run `no_op` to end your turn and wait; you get
+    another turn next round, with their reply readable.
+  * Run `scoped_submit` when your changes are complete. You will still get a turn in later
+    rounds so peers can reach you; if nothing has changed for you, simply `scoped_submit`
+    again to confirm you are finished.
 
 Available tools:
 {{command_docs}}
@@ -78,6 +99,8 @@ Reminders:
 - Run `scoped_list` first to see the file(s) you may edit, and `list_agents` to see peers.
 - Run `read_messages` before each edit; `publish_interface` anything peers must code against.
 - Make the minimal change needed in YOUR file(s); do not try to fix peers' files.
+- Missing something only a peer can tell you? `send_message` to ask, then `no_op` to wait for
+  their reply next round — do not guess.
 - Run `scoped_submit` when done.
 """
 
