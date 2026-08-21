@@ -147,6 +147,17 @@ python multiagent_pro/aci/gen_solver_config.py --instances <instance_id> \
 #   automatically on every later run with that model name. Omitting them for an unregistered
 #   model raises an error telling you exactly what to supply.
 
+# Context window per agent (add to either gen_solver_config call above):
+#   --last-n-observations N   keep the full text of only the last N tool observations; older
+#                    ones become "Old environment output: (K lines omitted)". Actions and
+#                    thoughts are never elided, and the window spans the WHOLE run, not a
+#                    round -- SWE-agent has no round concept. Default 5 (the SWE-agent
+#                    default) also elides read_messages output, which is UNRECOVERABLE here
+#                    because read_messages is unread-only: a peer's interface that scrolls
+#                    out is gone for good. Use N >= --steps-per-round so a full previous
+#                    round always survives. Costs more per step -- raise
+#                    --per-instance-cost-limit with it. See multiagent_aci.md §2.6.
+
 # Optional coordination gate (OFF by default; add to either gen_solver_config call above):
 #   --submit-gate    scoped_submit REFUSES (pure refusal -- the harness never calls comm
 #                    tools for the agent) until the agent has itself (1) run read_messages

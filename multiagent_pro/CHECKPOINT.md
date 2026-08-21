@@ -1,16 +1,19 @@
 # Checkpoint — multi-agent full-access mode + coordination findings
 
-**Started:** 2026-08-07 · **Last updated:** 2026-08-15 · **Branch:** `main`
+**Started:** 2026-08-07 · **Last updated:** 2026-08-16 · **Branch:** `main`
 
-> ## ▶ START HERE (2026-08-15): read **§8**, then **§8.9 "Session status"** at the very end.
+> ## ▶ START HERE (2026-08-16): read **§9** (newest), then **§8** for the mechanism it tests.
 > §§1-7 are historical: §§1-5 = full-access mode (committed as `4ad402b`), §6 = the
 > coordination mode (`--partition-issue`/`--submit-gate`), §7 = a design study whose open
 > questions §8 **supersedes**. Everything from §8 onward is the current state.
 >
 > **One-line status:** lockstep rounds + `no_op` + per-round read gate are implemented and
-> verified; agents now genuinely coordinate (asking, answering, publishing correct
-> contracts), but the top blocker is no longer coordination — it is a recurring
-> **structural edit bug** that has decided 3 runs. See §8.9 for the ranked next steps.
+> verified. On a second instance (§9) coordination **provably changed real code** — a published
+> `prepare_multipart` contract crossed the board and two consumers coded against it (35/46
+> tests pass across two runs, best results yet). Remaining blockers are NOT the coordination
+> channel: `no_op` livelock (an agent talked for 3 rounds and shipped 0 lines), agents that
+> invent a competing API instead of adopting the published one (reproducible in BOTH runs), and
+> a structural edit bug (§8). **Ranked next steps: §9.3.**
 
 This file is the resume anchor: where the work stands, what was learned, and what to pick up
 next. Feature docs live in `README.md` (§scope) and `multiagent_aci.md` (§2.5); this file is
@@ -434,7 +437,8 @@ substantial. Proceed with evaluating resumable-`done` as the near-term fix on `m
   turns today (existing mechanism, no new plumbing needed).
 - **`history_processors: last_n_observations n=5`** means a long-dormant revived agent may have
   "forgotten" earlier context — pre-existing behavior for ANY multi-round agent, not something
-  revival introduces.
+  revival introduces. (Superseded in part: N is now the `--last-n-observations` flag, and the
+  elision is *not* harmless for `read_messages` output — see §9.4.)
 
 ### 7.5 Open sub-decisions before implementing (unresolved, pick up next session)
 
@@ -638,14 +642,16 @@ round-budget arithmetic in row 5.
 **Nothing is running.** No background processes, no stray containers (verified). Grading of
 run 4 was killed deliberately (runaway; see above) and its container removed.
 
-**Working tree: UNCOMMITTED.** Base commit is `4ad402b` (the §1-7 work, already pushed).
-Changed today: `aci/orchestrate.py`, `aci/tools/scoped_fs/bin/no_op` (NEW),
-`aci/tools/scoped_fs/config.yaml`, `aci/tools/scoped_fs/lib/submit_gate.py`,
-`aci/tools/comm/lib/board.py`, `aci/tools/comm/bin/read_messages`,
-`aci/tools/comm/config.yaml`, `aci/gen_solver_config.py`, `README.md`, `multiagent_aci.md`,
-`CHECKPOINT.md`, plus regenerated `multiagent_pro_out/` artifacts. **Committing is the first
-decision for the next session.** (`SWE-agent` submodule still carries its own separate
-uncommitted `models.py` fix — deliberately excluded, see §5.)
+**Working tree: COMMITTED + PUSHED** as `bec29b9` (all of §8's work; supersedes the
+"uncommitted" note that stood here mid-session). `origin/main` is level with local.
+(`SWE-agent` submodule still carries its own separate uncommitted `models.py` fix —
+deliberately excluded, see §5.)
+
+**`.gitignore` bug fixed in that same commit:** a stock Python-packaging `lib/` rule was
+silently excluding the ACI tool libraries, so `4ad402b` and earlier had shipped bins that
+`import scoped`/`import board` **without the modules themselves** — a fresh clone had broken
+bundles. `scoped.py`, `board.py` and `submit_gate.py` are now tracked via a targeted negation
+(`!multiagent_pro/aci/tools/*/lib/`); `__pycache__` and real build `lib/` dirs stay ignored.
 
 **Artifacts kept for comparison:** the rounds=3 PASS (boards, patches, `eval_results.json`) is
 backed up under the session scratchpad `.../scratchpad/rounds3_pass/`; `multiagent_pro_out/`
@@ -691,3 +697,245 @@ minutes after `Running local-docker evaluation`, check `docker stats` and kill i
 **Counting comm calls correctly:** only `[agent_N] step K: <tool>` lines are real calls.
 Grepping the raw log for tool names also counts the tool DOCS embedded in every prompt, which
 inflates the number several-fold.
+
+---
+
+## 9. 2026-08-16 — second instance (`b748edea`, multipart): coordination provably changes code
+
+Switched instances to test coordination independently of the PlayIterator case. Picked
+`b748edea` because it is the only remaining sample whose dataset `interface` field declares a
+**real cross-file contract**: `prepare_multipart` defined in `lib/ansible/module_utils/urls.py`
+and called from three other files. (`a26c325b` says "No new interfaces are introduced" — no
+contract, so partitioning would create no coordination need; `e40889e7` is 10 agents, 6 of them
+docs.) Topology: **1 definer + 3 consumers + 1 changelog**.
+
+**Partition verified before launch:** `prepare_multipart` appears **6×** in the definer's issue
+slice and **0×** in all four consumers'. They are told they need multipart handling with
+`filename`/`content`/`mime_type` but never the function name — the name is obtainable *only*
+over the board.
+
+Config: partition + full scope + per-round gate, gpt-4o-mini, `--rounds 4` (minimum for a
+complete ask→answer→apply chain per §8's arithmetic, avoiding the `--rounds 5` talk-drift).
+
+### Three firsts
+1. **Coordination provably changed real code.** `agent_3` published
+   `def prepare_multipart(fields)`; `agent_4` (`modules/uri.py`) and `agent_5`
+   (`plugins/action/uri.py`) then used that exact name in their patches (2 mentions each).
+   Their issue slices contain 0 mentions, so the name can only have come from the board.
+   Previous instance never reached this.
+2. **The "all agents submitted in the same round" termination fired** — run ended at round 2
+   of 4 instead of exhausting the budget.
+3. **Every agent produced a non-empty patch** (13/48/88/33/82 lines) — no 0-line consumers.
+
+Best grade shape so far: **35/46 tests PASSED** (previous runs were all-or-nothing 8/8 or 0).
+Comm: 2 `publish_interface`, 9 `read_messages`, 1 `send_message`, 9 gate refusals, 0 `no_op`.
+
+### Grade: FAIL 0% — two distinct causes, both instructive
+- **8 failures in `test/units/galaxy/test_api.py` = agent_2 non-adoption.** In round 1 (board
+  necessarily empty) agent_2 spent all 25 steps implementing its OWN
+  `_encode_multipart_formdata(self, fields, files)` as a method on its class. In round 2 it
+  DID read the board and see `prepare_multipart` — and instead of adopting it, announced its
+  own competing function to agent_3 and submitted. Its patch has **0** mentions of
+  `prepare_multipart`.
+- **3 failures in `test/units/module_utils/urls/test_prepare_multipart.py` = the definer's own
+  edge cases** (`test_bad_mime`, `test_unknown_mime`): agent_3 implemented the contract but got
+  MIME fallback handling wrong. Nothing to do with coordination.
+
+### The full conversation was THREE messages (verbatim)
+- **round 1** — `agent_3 -> all` *(interface)*: `def prepare_multipart(fields)` + "Prepares a
+  multipart/form-data body and Content-Type header from a dictionary of fields. Raises
+  TypeError if fields is not a Mapping...; ValueError if a file field mapping does not contain
+  'filename' or 'content'." (Nobody else could post anything useful — round 1's board is empty
+  by construction.)
+- **round 2** — `agent_2 -> agent_3`: "The multipart encoding function I implemented is
+  `_encode_multipart_formdata(fields, files)`... **Let me know if you want me to publish this
+  interface explicitly or adapt it.**"
+- **round 2** — `agent_4 -> all`: re-broadcast of agent_3's interface *verbatim* (a pure echo,
+  no new information).
+
+### GAP 1: `publish_interface` transmits the signature but NOT the location
+agent_3's broadcast said *what* the function is and never *where* it lives. Both adopting
+consumers learned the name and call convention correctly — and then **each invented a
+different, wrong import path**:
+
+| agent | import written | reality |
+|---|---|---|
+| agent_4 | `ansible.module_utils.common._multipart` | invented |
+| agent_5 | `ansible.utils.multipart` | invented, and different from agent_4's |
+| truth | `ansible.module_utils.urls` | where agent_3 actually defined it |
+
+Both call sites are otherwise correct (`body, content_type = prepare_multipart(body)` — right
+name, right 2-tuple return). The board conveyed the contract's *shape* and failed to convey its
+*address*. **Cheap fix:** have `publish_interface` attach the publisher's owning file — the
+harness already knows it (it is in `AGENTS_ROSTER`), so this needs no extra agent effort.
+
+### GAP 2: termination fired while a negotiation was still in flight
+agent_2's message explicitly asked whether to adapt its function. Under lockstep that question
+was posted *during* round 2 and would only be readable in round 3 — but all five agents
+submitted in round 2, the "all submitted in the same round" condition fired, and the run ended
+with an **unanswered question on the board**. agent_2 therefore shipped its competing
+implementation, which is exactly what produced the 8 `test_api.py` failures.
+**Fix to consider:** do not terminate while the final round posted messages nobody can yet have
+read — i.e. require a quiet round (all submitted AND no new messages) before stopping.
+
+### Evidence that "everyone runs every round" (§8) paid off
+`agent_5` **had already submitted in round 1**. Because submitted agents still get a turn, it
+read the contract in round 2, made 4 more edits, and re-submitted — adopting `prepare_multipart`
+in work it had already called finished. Under the pre-§8 design it would have been retired
+after round 1 and would never have seen the contract at all.
+
+### The sharpest new finding: round-1 sunk cost defeats coordination
+agent_2's failure is not "didn't see the contract" — it is that it **fully implemented a
+competing design in round 1, before any contract could exist**, and would not revise in round 2.
+By construction round 1 has an empty board, so any agent that front-loads implementation locks
+in a design blind. agent_4 by contrast did mostly *searching* in round 1 (9 searches, 14 views,
+1 edit) and did its real editing in round 2 **after** reading — and adopted cleanly.
+
+**Implied mitigation (new, untried):** make round 1 discovery/announce-only — no edit tools, or
+require definers to `publish_interface` before consumers may edit. This would remove the
+blind-implementation window entirely. Worth trying before more prompt tweaking.
+
+### Priority update
+This run **demotes** "peer-targeting" and **promotes** adoption + message payload: the contract
+was broadcast correctly and read by everyone; one agent chose not to use it, and the two that
+did could not tell where to import it from. Revised ranking:
+1. **`publish_interface` should carry the owning file** (GAP 1) — smallest change, highest
+   certainty of payoff: the harness already knows the publisher's file from `AGENTS_ROSTER`,
+   and today two adopting agents each invented a different wrong import path.
+2. **AST structural edit-check** (unchanged from §8 — decided 2 runs on `395e5e20`; not
+   implicated in this run).
+3. **Round-1 blind-implementation window** — discovery-only first round, so no agent commits
+   to a design before any contract can exist (this is what sank agent_2).
+4. **Don't terminate with unread messages in flight** (GAP 2) — require a quiet round.
+5. **Adoption over invention** — an agent that reads a published interface for a symbol it
+   needs should use it, not publish a competitor. Consider gating `publish_interface` on
+   owning the file, and/or surfacing "an interface already exists for X" on conflict.
+6. `no_op` livelock guard; round budget; grader timeout/memory guard.
+
+### 9.2 SECOND run, identical config — large variance, and GAP 1 self-corrects
+
+Re-ran `b748edea` with the *same* settings (partition + full scope + per-round gate,
+gpt-4o-mini, `--rounds 4`) purely to measure run-to-run variance. It diverged sharply.
+
+| | run 1 | run 2 |
+|---|---|---|
+| rounds used | 2 (early termination fired) | 4 (full budget) |
+| board messages | **3** | **14** |
+| `send_message` / `read_messages` | 1 / 9 | **12 / 18** |
+| `no_op` | 0 | 4 |
+| agent_4 (consumer) patch | 33 lines, adopted | **0 lines**, livelocked |
+| agent_5 (consumer) patch | 82 lines, adopted | 23 lines, adopted |
+| tests | 35/46 pass | **36/46 pass** |
+| grade | FAIL | FAIL |
+
+**GAP 1 self-corrected through dialogue.** agent_4 asked the exact missing question —
+*"Could you please share the exact file path…"* — and agent_3 answered correctly:
+*"`prepare_multipart(fields)` is defined in **lib/ansible/module_utils/urls.py**. It accepts a
+dictionary where keys are field names and values are either strings, bytes, or dictionaries
+containing 'filename', 'content', and optionally 'mimetype'. It returns a tuple of
+(body_bytes, content_type_header)…"* — i.e. given enough rounds, agents can recover the
+location the `publish_interface` payload omits. That does **not** retire GAP 1: attaching the
+owning file makes this free instead of costing a 2-round round-trip that may not happen.
+
+**But more talk produced LESS code.** agent_4 asked its question, *got a complete and correct
+answer*, and still shipped **0 lines** — it `no_op`'d in rounds 2, 3 AND 4, spending each turn
+on further follow-ups (next wanting "the exact name and location of the standard utility
+function used to determine MIME types"). Run 1's agent_4, with far less information, wrote 33
+working lines. **`no_op` livelock is therefore promoted to a top-tier problem**: it converts an
+agent that would have produced a decent-but-imperfect patch into one that produces nothing.
+
+**The FAIL cause is reproducible, not noise.** Both runs fail in exactly the same two places:
+`test/units/galaxy/test_api.py` (8 then 7 failures — agent_2 inventing
+`_encode_multipart_formdata` and never adopting the published contract, in BOTH runs) and
+`test/units/module_utils/urls/test_prepare_multipart.py` (3 failures both times — agent_3's MIME
+fallback edge cases). Coordination varies wildly run-to-run; these two defects do not.
+
+**New minor oddity:** run 2 contains an `agent_1 -> agent_1` message. Since `visible_to`
+excludes an agent's own messages, self-addressed sends are guaranteed no-ops and silently waste
+a turn. Cheap fix: have `send_message` reject `to == $AGENT_ID` with a hint to use `list_agents`.
+
+### 9.3 Revised priorities after two runs on `b748edea`
+1. **`no_op` livelock guard** (promoted from #6) — demonstrably worse than imperfect action:
+   agent_4 went 33 lines → 0 lines while asking 3× more questions. Cap consecutive `no_op`s
+   and/or force a submit attempt in the final round.
+2. **`publish_interface` should carry the owning file** — GAP 1; agents can recover it by
+   dialogue (proven in run 2) but it costs a 2-round round-trip and often doesn't happen.
+3. **Adoption over invention** — agent_2 shipped its own competing encoder in BOTH runs,
+   causing 7-8 failures each time. The single most reproducible defect.
+4. **AST structural edit-check** (§8) — still open; not implicated on this instance.
+5. Round-1 discovery-only window; quiet-round termination (GAP 2); `send_message` self-send
+   rejection; grader timeout/memory guard.
+
+---
+
+## 9.4 `--last-n-observations`: the context window is a coordination variable
+
+**New knob** (`aci/gen_solver_config.py`, threaded main → `generate` → `build_agent_config`):
+
+```
+--last-n-observations N     default 5
+```
+
+It sets `history_processors: [{type: last_n_observations, n: N}]` in each generated
+`solver.yaml`. Mechanism and rationale are documented in `multiagent_aci.md` §2.6; this
+section records the evidence that motivated exposing it.
+
+**The bug it was found chasing.** At the SWE-agent default N=5, `read_messages` output is
+elided like any other observation — but `read_messages` is unread-only (content-digest cursor),
+so an elided message is **unrecoverable**. Traced concretely in run 2 on `b748edea`: `agent_4`
+received `agent_3`'s `prepare_multipart` interface, lost the observation at ~step 40, and
+re-invented `prepare_multipart_payload`. The window spans the whole run, not a round, so with
+`--steps-per-round 25` an agent begins round 2 having lost all of round 1 but the first
+observation.
+
+**N=25 works mechanically.** Run 3 (gpt-4o-mini) and run 5 (gpt-4o), both N=25 / 25 steps:
+zero `read_messages` observations elided for any agent; `agent_2` elided nothing at all in any
+round; `agent_4` elided only 5-7 round-1 searches. `agent_4`'s output went 0 → 61 lines vs run 2.
+
+**But N does not fix adoption.** `agent_4` wrote its own competing multipart encoder in run 3
+*and* run 5 with the published interface fully in context. In run 5 the definer even endorsed
+the duplication when asked — `agent_3` replied the two were *"intended to complement"* each
+other. Elision was a *contributing* cause of §9.3 priority #3, not the cause. Priority #3
+stands unchanged.
+
+### Run ledger on `b748edea` (same instance throughout)
+
+| run | model | N | tests | notes |
+| --- | --- | --- | --- | --- |
+| 2 | gpt-4o-mini | 5 | 36/46 | interface elided → re-invention |
+| 3 | gpt-4o-mini | 25 | 2/5 | **collection died** — structural edit bug (reparenting) |
+| 4 | claude sonnet | 25 | — | aborted; see repetition loop below |
+| 5 | **gpt-4o** | 25 | **42/46** | best yet; all 46 collected; $5.30; 3 of 4 rounds |
+
+**Cost scales with N.** Run 5 spent $5.30 across 5 agents ($1.74/$1.90/$0.70/$0.73/$0.23)
+against ~$0.05 for run 2 at N=5 — a large N raises prompt size on every step, so
+`--per-instance-cost-limit` must rise with it. Sizing run 4's Sonnet limit off run 3's
+gpt-4o-mini token peak was wrong by ~4×.
+
+**Sonnet-only degenerate loop (run 4, aborted).** At N=25 Claude Sonnet issued 26-70 identical
+`read_messages` calls per agent with **empty THOUGHT fields**. The initial hypothesis — that 25
+verbatim copies of the same observation prime the same action — is **not supported**: gpt-4o at
+identical N=25 (run 5) used 2-3 `read_messages` calls per agent and showed no loop. Treat it as
+model-specific until a Sonnet-at-N=5 control is run (offered, declined).
+
+**Default deliberately left at 5** so every reproduce command already recorded above still
+reproduces what it claims. New runs should pass the flag explicitly.
+
+### Structural edit bug — 5th occurrence, and a variant the proposed check would miss
+
+Run 5, `agent_2` inserted a new method *between* a decorator and the function it decorates:
+
+```python
+     @g_connect(['v2', 'v3'])
++    def _encode_multipart(self, fields):            # steals the decorator
++        ...
+     def publish_collection(self, collection_path):  # now undecorated
+```
+
+`publish_collection` loses its API-version guard, so `test_publish_collection_unsupported_version`
+sees `"The collection path specified 'path' does not exist."` instead of the version error.
+Syntactically valid — `compile()` passes, so `scoped.check_syntax` cannot catch it.
+
+Critically this is **not** a reparenting: `publish_collection` stays inside `GalaxyAPI`, so the
+scope-map/parent-changed AST check sketched in §8 would **not** flag it. The check needs a
+second invariant: *which decorators attach to which pre-existing function must not change.*

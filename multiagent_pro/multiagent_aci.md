@@ -191,12 +191,44 @@ Both checks are pure refusals — the harness never calls a comm tool on the age
 the refusal text says exactly what to run. Internal gate errors fail OPEN (submission
 proceeds) so the gate can never strand an agent. Escape hatch: `exit_forfeit`.
 
-### 2.6 Context management
+### 2.6 Context management — `--last-n-observations`
 
-Reused from SWE-agent unchanged: the solver config uses the `last_n_observations` history
-processor (elide all but the last N observations) and SWE-agent's observation truncation. The
-scoped windowed view keeps individual observations small, exactly as the single-agent ACI
-intends.
+Mechanism is SWE-agent's, unchanged: the solver config carries a `last_n_observations` history
+processor, plus SWE-agent's per-observation truncation. The scoped windowed view keeps
+individual observations small, exactly as the single-agent ACI intends. What *is*
+multi-agent-specific is the choice of N, which `gen_solver_config.py --last-n-observations N`
+exposes (default 5, the SWE-agent 0.7 default).
+
+**What the processor actually does.** It is applied at *query* time in `DefaultAgent.messages`
+(`agents.py:534-546`) and never mutates `self.history` — the trajectory on disk is always
+complete; only what the model sees is trimmed. All but the newest N entries with
+`message_type == "observation"` have their text replaced by `Old environment output: (K lines
+omitted)`. Three properties matter here:
+
+- **Actions and thoughts are never elided** — the agent always remembers what it *did* and
+  said, only what the tools *replied* is dropped.
+- **The first observation is never elided** — it is the instance template
+  (`history_processors.py::_get_omit_indices` slices `[1:...]`).
+- **The window spans the whole run, not a round.** SWE-agent has no notion of rounds; N=5 with
+  `--steps-per-round 25` means an agent starts round 2 having lost every observation from
+  round 1 but the first.
+
+**Why the single-agent default is a hazard here.** In a single-agent loop, stale file dumps are
+pure noise and N=5 is well tuned. In this ACI the same window also elides `read_messages`
+output — and because `read_messages` is **unread-only** (§3.3, per-agent content-digest
+cursor), a peer's message that scrolls out of the window can **never be retrieved again**.
+Observed directly on `b748edea` at N=5: `agent_4` received `agent_3`'s `prepare_multipart`
+interface, lost it to elision mid-round, and re-invented a competing
+`prepare_multipart_payload` (CHECKPOINT §9.4).
+
+**Rule of thumb: N ≥ `--steps-per-round`,** so a full previous round always survives into the
+next one. Verified at N=25 / 25 steps: no agent had a single `read_messages` observation
+elided. Note that N does not fix *adoption* — an agent that has the interface in context may
+still invent its own (also §9.4) — and that a large N is not free: it raises per-step prompt
+size, so per-agent `--per-instance-cost-limit` must rise with it.
+
+The default stays 5 so every reproduce command recorded in `CHECKPOINT.md` still reproduces
+what it claims; pass the flag explicitly for new runs.
 
 ---
 

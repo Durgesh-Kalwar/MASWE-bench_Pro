@@ -106,7 +106,7 @@ Reminders:
 
 
 def build_agent_config(spec, agent, inst_dir, *, model, cost_limit, roster, api_base=None,
-                       call_limit=0, submit_gate=False):
+                       call_limit=0, submit_gate=False, last_n_observations=5):
     inst_id = spec["instance_id"]
     aid = agent["id"]
     scope_mode = agent.get("scope_mode", "allow")
@@ -181,7 +181,15 @@ def build_agent_config(spec, agent, inst_dir, *, model, cost_limit, roster, api_
                     {"path": COMM_BUNDLE},
                 ],
             },
-            "history_processors": [{"type": "last_n_observations", "n": 5}],
+            # Sliding window over ALL observations ever, not per round -- SWE-agent has no
+            # notion of rounds. n=5 (the SWE-agent 0.7 default) is tuned for a single-agent
+            # loop where stale file dumps are noise; here it also elides `read_messages`
+            # output, and since read_messages is unread-only the lost interface can NEVER be
+            # recovered (b748edea run 2: agent_4 lost `prepare_multipart` mid-round-4).
+            # Set n >= --steps-per-round to guarantee a full previous round survives.
+            "history_processors": [
+                {"type": "last_n_observations", "n": last_n_observations}
+            ],
         },
         "problem_statement": {
             "type": "text_file",
@@ -193,7 +201,7 @@ def build_agent_config(spec, agent, inst_dir, *, model, cost_limit, roster, api_
 
 
 def generate(inst_dir: Path, *, model, cost_limit, dockerhub_username, api_base=None,
-             call_limit=0, submit_gate=False):
+             call_limit=0, submit_gate=False, last_n_observations=5):
     spec = json.loads((inst_dir / "spec.json").read_text())
     inst_id = spec["instance_id"]
 
@@ -211,7 +219,8 @@ def generate(inst_dir: Path, *, model, cost_limit, dockerhub_username, api_base=
         cfg = build_agent_config(spec, agent, inst_dir, model=model,
                                  cost_limit=cost_limit, roster=roster,
                                  api_base=api_base, call_limit=call_limit,
-                                 submit_gate=submit_gate)
+                                 submit_gate=submit_gate,
+                                 last_n_observations=last_n_observations)
         out = inst_dir / agent["id"] / "solver.yaml"
         out.write_text(yaml.safe_dump(cfg, sort_keys=False, width=100))
         written.append(out)
@@ -242,6 +251,14 @@ def main():
     ap.add_argument("--per-instance-call-limit", type=int, default=0,
                     help="Hard cap on API calls per agent, independent of $ cost. Extra safety "
                          "net alongside per-instance-cost-limit.")
+    ap.add_argument("--last-n-observations", type=int, default=5, metavar="N",
+                    help="Keep the full text of only the last N tool observations per agent; "
+                         "older ones are replaced by 'Old environment output: (K lines "
+                         "omitted)'. The window spans ALL rounds (SWE-agent has no round "
+                         "concept), and actions/thoughts are never elided -- only tool output. "
+                         "Default 5 (SWE-agent 0.7) elides read_messages output, which is "
+                         "unrecoverable because read_messages is unread-only. Use N >= "
+                         "--steps-per-round so a full previous round always survives.")
     ap.add_argument("--submit-gate", action="store_true",
                     help="Coordination gate (OFF by default): scoped_submit refuses until the "
                          "agent has itself run read_messages on the current board state, and "
@@ -267,7 +284,8 @@ def main():
                                   dockerhub_username=args.dockerhub_username,
                                   api_base=args.api_base,
                                   call_limit=args.per_instance_call_limit,
-                                  submit_gate=args.submit_gate)
+                                  submit_gate=args.submit_gate,
+                                  last_n_observations=args.last_n_observations)
         print(f"{d.name}: image={image}  ->  {len(written)} solver config(s)")
 
 
