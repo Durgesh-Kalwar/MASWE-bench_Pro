@@ -128,7 +128,55 @@ cat multiagent_pro_out/<instance_id>/README.md
 cat multiagent_pro_out/<instance_id>/agent_1/SCOPE.txt          # files this agent may edit
 cat multiagent_pro_out/<instance_id>/agent_1/local_issue.md     # full issue + this agent's focus
 cat multiagent_pro_out/<instance_id>/shared/coordination.md     # the interface contract
+```
 
+### Stage 2b (optional) — tag coupling between the agent slices
+
+[`metrics/tag_coupling.py`](metrics/tag_coupling.py) builds a **dependency graph between
+the per-agent gold-patch slices** (the def-use approach of commit-untangling work,
+ClusterChanges/SmartCommit): each slice's introduced definitions (`DEFS_NEW`), modified
+definitions (`DEFS_MOD`), and the names its added lines reference are extracted by
+ast-diffing the pre-patch file (fetched from the Pro image or GitHub raw at
+`base_commit`, cached under `.coupling_cache/`) against the slice applied via `git apply`.
+Directed edges point consumer → definer, cross-agent only:
+
+- **DEF-USE** — agent j's added lines use a name agent i's slice *introduces*
+  (e.g. `linear.py` reads `IteratingStates.TASKS`, an enum `play_iterator.py` creates).
+- **USE-USE-ON-CHANGED** — agent j's added lines use a name agent i's slice *modifies*
+  (e.g. `get_url.py` threads the new `use_netrc=` kwarg into `fetch_url`, whose
+  signature `urls.py` changes).
+
+An instance with ≥ 1 cross-agent edge is labeled **`coupled`** (agents provably must
+coordinate on a symbol), else **`decomposable`** — an under-approximation: data-shape
+contracts (dict keys, tuple arity, registration side effects) are invisible to def-use.
+Ambiguous name matches are logged to `coupling_review.jsonl`, never silently linked.
+
+```bash
+# Tag every built instance: adds an ADDITIVE "coupling" key to each spec.json and
+# writes a per-instance coupling_graph.svg/.png (PNGs need `pip install cairosvg`)
+python multiagent_pro/metrics/tag_coupling.py
+
+# Also collect every instance's dependency graph into one flat, pushable folder
+python multiagent_pro/metrics/tag_coupling.py --graphs-dir multiagent_pro_out/coupling_graphs
+
+# Empirical cross-check (costs (N+1) container runs per instance): grade the gold merge
+# with one agent's slice removed at a time through the UNMODIFIED Pro evaluator; tests
+# that break under two different removals are empirical coupling, reported against the
+# static edges as static_and_empirical / static_only / empirical_only.
+python multiagent_pro/metrics/tag_coupling.py --validate
+```
+
+What you get, per instance: `spec.json → coupling` = `{edges: [{from, to, kind, symbol}],
+label: coupled|decomposable, per_agent: {in_degree, out_degree, role:
+definer|consumer|both|isolated}, per_agent_defs, notes}` (instances without a spec.json
+get a standalone `coupling.json`), plus `coupling_graph.png` — consumers left, definers
+right; solid arrow = DEF-USE, dashed = USE-USE-ON-CHANGED, one labeled arrow per symbol.
+Dataset-wide: `multiagent_pro_out/coupling_index.json` lists **every** Python instance
+with its label and edge counts, sorted most→least coupled (full set: **121 coupled /
+92 decomposable multi-file / 53 single-file degenerate**), and `coupling_summary.json`
+summarizes the last run.
+
+```bash
 # Stage 3 — solve with the multi-agent ACI, then integrate + grade (see multiagent_aci.md)
 python multiagent_pro/aci/gen_solver_config.py --instances <instance_id> --model <lm> \
     --per-instance-cost-limit 1.5
