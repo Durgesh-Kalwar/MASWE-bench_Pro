@@ -145,9 +145,29 @@ each round: every agent in that round is handed the identical snapshot, and ever
 during the round is published only at the round barrier. So an agent reads peers' messages
 from **previous rounds only** — turn order within a round confers no information advantage
 (previously the board was merged after *each* agent's turn, so later agents saw earlier ones'
-same-round messages). `read_messages` is peer-only and incremental: it never shows an agent
-its own messages and never repeats one it has already delivered, tracked by the per-agent
-cursor `/root/comm/.read_<AGENT_ID>`.
+same-round messages).
+
+**Delivery is push, not pull — there is no read tool.** At the barrier the host computes, per
+agent, which of the round's new messages that agent is entitled to (`visible_to`: peer-authored
+and addressed to it or broadcast) and injects them into its model context before its next turn,
+as part of the round notice (`orchestrate.py::build_notice` / `_notify_round`). Because the
+barrier already partitions messages by round, each one is delivered exactly once to each
+eligible recipient **by construction** — no read cursor exists any more. Two consequences:
+receiving costs no step, so what differs between communication harnesses (§2.7) is topology
+rather than tool-call discipline; and the injected turn is `message_type: "user"`, which
+`last_n_observations` never elides, so the loss described in §2.6 can no longer happen to a
+peer's message.
+
+**Contracts are state, messages are events.** The notice therefore has two parts. Messages are
+new-only. Interface contracts are re-rendered in FULL every round — an always-current registry
+(`interface_registry`, newest-wins per author+symbol) listing every contract anyone has
+published, the agent's own marked `<- yours`. Retention was never the problem here (an agent's
+own actions and pushed deliveries are both elision-exempt); *salience* was: a contract announced
+in round 1 sits dozens of turns back by round 4, which is exactly the state §9.4 recorded when an
+agent that held an interface invented its own anyway. Re-publishing a corrected signature
+supersedes the old row, so peers see one current contract instead of two contradictory messages.
+An interface still arrives as an ordinary message the round it is published, so the transcript
+keeps showing *when* each contract appeared.
 
 Every agent gets a turn **every round, including agents that already submitted**, so a peer's
 later question can still be answered; the run stops once every still-active agent submits
@@ -172,22 +192,19 @@ problem-statement content.
 `scoped_submit` runs `scoped_fs/lib/submit_gate.py` before any git work and REFUSES (prints
 the reason, exits 0, emits **no** submission markers and **no** `/root/model.patch`, so the
 episode continues) until:
-1. **Read-gate** — the agent has itself run `read_messages` at least ONCE, ever.
-   `read_messages` writes a per-agent read cursor (`/root/comm/.read_<AGENT_ID>`) and the gate
-   only asks whether that file exists. Reading an empty board satisfies it (no round-1
-   deadlock), and the agent is never asked to re-read. *Superseded design:* the gate used to
-   compare a content hash of the whole board, but the agent's own `send_message`/
-   `publish_interface` mutate the board without marking it read — so publishing an interface
-   re-blocked your own submission until you re-read. Existence-only removes that by
-   construction.
-2. **Publish-check** — any public `def`/`class` deleted by the agent's edits (HEAD vs
+**Publish-check** — any public `def`/`class` deleted by the agent's edits (HEAD vs
    worktree, `ast`-parsed, `_`-prefixed names exempt) has been announced in one of the
    agent's own board messages (name match against its `publish_interface`/`send_message`
    texts). Deleting a whole class also flags its public methods — one message naming all of
    them satisfies the check. Targets the observed contract-break failures (`HostState`,
    `_is_fqcn`).
 
-Both checks are pure refusals — the harness never calls a comm tool on the agent's behalf;
+*Superseded:* the gate also used to require that the agent had run `read_messages` (once ever,
+then once per round). Push delivery leaves nothing for an agent to fail to check and no tool it
+could run to satisfy such a gate, so that half was deleted rather than relaxed — keyed on
+sidecar files only `read_messages` wrote, it would have become an unconditional block.
+
+The check is a pure refusal — the harness never calls a comm tool on the agent's behalf;
 the refusal text says exactly what to run. Internal gate errors fail OPEN (submission
 proceeds) so the gate can never strand an agent. Escape hatch: `exit_forfeit`.
 
@@ -213,24 +230,64 @@ omitted)`. Three properties matter here:
   `--steps-per-round 25` means an agent starts round 2 having lost every observation from
   round 1 but the first.
 
-**Why the single-agent default is a hazard here.** In a single-agent loop, stale file dumps are
-pure noise and N=5 is well tuned. In this ACI the same window also elides `read_messages`
-output — and because `read_messages` is **unread-only** (§3.3, per-agent content-digest
-cursor), a peer's message that scrolls out of the window can **never be retrieved again**.
-Observed directly on `b748edea` at N=5: `agent_4` received `agent_3`'s `prepare_multipart`
-interface, lost it to elision mid-round, and re-invented a competing
-`prepare_multipart_payload` (CHECKPOINT §9.4).
+**Historical hazard, now structural.** Under the old *pull* design this window also elided
+`read_messages` output — and because `read_messages` was **unread-only** (per-agent
+content-digest cursor), a peer's message that scrolled out could **never be retrieved again**.
+Observed on `b748edea` at N=5: `agent_4` received `agent_3`'s `prepare_multipart` interface,
+lost it to elision mid-round, and re-invented a competing `prepare_multipart_payload`
+(CHECKPOINT §9.4). Push delivery removes this by construction — peer messages arrive as
+`message_type: "user"`, and `_get_omit_indices` only ever selects entries typed `"observation"`.
 
-**Rule of thumb: N ≥ `--steps-per-round`,** so a full previous round always survives into the
-next one. Verified at N=25 / 25 steps: no agent had a single `read_messages` observation
-elided. Note that N does not fix *adoption* — an agent that has the interface in context may
-still invent its own (also §9.4) — and that a large N is not free: it raises per-step prompt
-size, so per-agent `--per-instance-cost-limit` must rise with it.
+N therefore now bounds only the agent's **own** file views. **Rule of thumb: N ≥
+`--steps-per-round`,** so a full previous round of them survives. Note that N never fixed
+*adoption* — an agent holding an interface may still invent its own (§9.4) — and that a large N
+is not free: it raises per-step prompt size, so `--per-instance-cost-limit` must rise with it.
 
-The default stays 5 so every reproduce command recorded in `CHECKPOINT.md` still reproduces
-what it claims; pass the flag explicitly for new runs.
+The default stays 5.
 
 ---
+
+### 2.7 Communication harnesses — the study variable
+
+Coordination behaviour is what this scaffold exists to measure, so the *shape* of the
+communication channel is a selectable cell rather than a fixed design (`gen_solver_config.py
+--comm-mode {broadcast,p2p} [--beliefs]`). Three cells are currently studied:
+
+| cell | `send_message` reaches | `publish_interface` | private peer notes |
+| --- | --- | --- | --- |
+| `broadcast` | every peer; the tool has **no recipient argument** | every peer | — |
+| `p2p` | one named peer (that agent alone) or `all` | every peer | — |
+| `p2p --beliefs` | as p2p | every peer | `update_belief`, replayed each round |
+
+**Why the affordance is withheld, not just refused.** In broadcast mode the model must not see
+a `to` parameter at all — a declared-but-rejected argument still tells the model that addressing
+is a thing, which is precisely the variable under test. SWE-agent builds function schemas from
+`<bundle>/config.yaml` at a fixed path, so the bundle cannot be switched at run time; instead
+`gen_solver_config.py` **materializes** `<id>/_comm_bundle/` per instance, containing only that
+cell's declarations (selected from `comm/tool_defs.yaml`) and only the matching bins. Bin
+selection and declaration selection have to move together: a tool declared with no bin
+hard-fails at `agent.setup()` (`tools.py::_check_available_commands`). `send_message` still
+re-forces `to = "all"` from `COMM_MODE` in broadcast mode, so the topology holds even if a model
+somehow supplies one. Materializing also archives the exact harness beside the run, and
+`<id>/comm_mode.json` records the cell so `orchestrate.py` reads it from one source of truth
+rather than a flag that could disagree with the bundle the agents are running.
+
+**Beliefs are a mechanism, not a prompt.** `update_belief <peer> --note` writes
+`/root/comm/.beliefs_<AGENT_ID>.json` — never merged into the board, never shown to a peer. The
+host replays the current table into each round notice (consistent with there being no read tool)
+and archives it as `<id>/<agent>/beliefs_round_N.json`, keeping every revision, so belief
+accuracy and drift are scoreable against ground truth afterwards. The no-belief cell must infer
+whom to address from the message stream itself.
+
+**Known confound.** Broadcast and p2p differ in *context volume* as well as topology: a
+broadcast agent receives every message, a p2p agent only what is addressed to it plus
+interfaces. `<id>/comm_stats.json` records per agent per round the messages received, sent
+(directed vs broadcast), interfaces published and **refused**, `no_op`s and belief updates —
+report those alongside the grade rather than the grade alone.
+
+**Not a property of the cells:** peer *identity*. `list_agents` is present in every cell, so a
+broadcast agent can still write "agent_3: I need X" into a message body. Broadcast means no
+addressed *delivery*, not anonymity.
 
 ## 3. Communication interface design decisions
 
@@ -247,17 +304,25 @@ the canonical board** and syncs it in/out each round (§4). A coordinator-agent 
 rejected as overkill for a prototype; directed sockets were rejected because agents live in
 separate containers with no shared network namespace.
 
+Agents only ever **write** to their local copy. The host does all the reading, computing each
+recipient's mail at the barrier and pushing it into that agent's context (§2.5) — which is what
+lets the delivery *topology* be varied per cell (§2.7) without changing the transport. The board
+in the container is still written back in each round because the bins append to it and
+`--submit-gate`'s publish-check needs the agent's own past announcements.
+
 ### 3.2 Message content — structured, not just freeform
 
-Four tools, deliberately including a *structured* contract primitive so the most important
-cross-file fact (a signature) is first-class rather than buried in prose:
+Deliberately including a *structured* contract primitive, so the most important cross-file fact
+(a signature) is first-class rather than buried in prose. There is **no read tool** — messages
+are pushed (§2.5) — and the exact tool set depends on the communication harness (§2.7):
 
-| Tool | Purpose |
-| --- | --- |
-| `list_agents` | see every peer and the file it owns (whom to ask) |
-| `read_messages` | read messages addressed to you or broadcast (+ your own, for context) |
-| `send_message <to> <message>` | addressed or `all`-broadcast freeform message |
-| `publish_interface <signature> <description>` | **broadcast a contract** you own — a signature peers must code against |
+| Tool | Cells | Purpose |
+| --- | --- | --- |
+| `list_agents` | all | see every peer and the file it owns (whom to ask) |
+| `send_message <message>` | broadcast | freeform message to every peer; no recipient argument exists |
+| `send_message <to> <message>` | p2p | freeform message to ONE peer by id, or `all` |
+| `publish_interface <signature> <description>` | all | **broadcast a contract** you own — a signature peers must code against. Refused if the symbol does not exist in a file you own. Unlike a message, it is re-listed in every later round notice |
+| `update_belief <about> <note>` | `--beliefs` | PRIVATE per-peer note, never posted; replayed to you each round |
 
 `publish_interface` is the dynamic counterpart to the static `interface` field: when the Pro
 dataset declares a new public interface, `--include-interface` seeds the board / coordination
@@ -268,8 +333,10 @@ note with it; agents can also negotiate/announce one at runtime when the dataset
 Messages propagate at a **round barrier**, not instantly. Within a round each agent runs a
 bounded number of `step()`s against the board **frozen at the start of that round** — every
 agent in the round gets byte-identical state — and the orchestrator only merges everyone's new
-messages into the canonical board once the round ends. So a message is readable exactly one
-round after it is posted, regardless of who posted it or in what order agents run. This gives
+messages into the canonical board once the round ends. So a message is delivered exactly one
+round after it is posted, regardless of who posted it or in what order agents run — and exactly
+once, since the barrier itself partitions messages by round (there is no read cursor). This
+gives
 deterministic, debuggable turn-taking, removes any turn-order information advantage, and avoids
 racing on a shared file. The merge de-duplicates by `(from, ts, to, text, signature)`.
 
@@ -291,24 +358,33 @@ the host.
 
 ```
 for each agent: start SWEEnv from its solver.yaml (env.start)            # one container each
-board = []
+board, deliveries = [], []                        # `deliveries` = last round's new messages
 for round in 1..R:
     frozen = board                                # FROZEN: identical for every agent
     submitted, pending = {}, []
     for each agent not permanently retired:       # includes agents that already submitted
-        env.write_file(COMM_BOARD, frozen)        # same bytes for everyone
-        notify_round(agent)                       # "round N began, board updated"
+        env.write_file(COMM_BOARD, frozen)        # bins append here; publish-gate reads it
+        mine = [m for m in deliveries if visible_to(m, aid)]    # THIS agent's mail
+        beliefs = read_beliefs(env, aid)                        # --beliefs cell only
+        notify_round(agent, mine, beliefs)        # PUSHED into context -- there is no read tool
         run up to `steps_per_round` of agent.step()
             # turn ends on: no_op marker (pass, returns next round)
             #             | done + exit_status "submitted*"  -> submitted[aid]
             #             | done otherwise (exit_cost/context/format/...) -> retire agent
         pending += messages this container added on top of `frozen`
+        archive <agent>/beliefs_round_N.json       # --beliefs cell only
+        comm_stats row: received / sent_directed / sent_broadcast / published / refused / no_op
     board = merge(board, pending)                 # PUBLISH once, at the round barrier
+    deliveries = board[len(frozen):]              # exactly this round's new messages
     stop if every still-active agent submitted THIS round
 for each agent: agent.patch = env.communicate("git diff ... | base64 -w0")   # scoped diff
 # integrate + grade (unchanged):
 build_multiagent_pro.py --mode merge  ->  patches.json  ->  swe_bench_pro_eval.py
 ```
+
+Delivery is **exactly-once by construction**: `deliveries` holds precisely the messages published
+at the previous barrier, so each one is offered to each eligible recipient in exactly one round
+and never again. That is why no read cursor exists — the barrier itself is the cursor.
 
 The per-agent `git diff -- <scope>` guarantees each contribution is scope-clean even if a
 distractor was touched, and the integrate→grade path is byte-for-byte the existing one.
@@ -323,10 +399,21 @@ python multiagent_pro/sample_instances_pro.py --instances <id>
 python multiagent_pro/build_multiagent_pro.py --mode build --instances <id> \
     --distractor-source docker --distractors 3 --include-interface --emit-gold
 
-# 1) Generate one SWE-agent solver config per agent (+ roster.json)
-python multiagent_pro/aci/gen_solver_config.py --instances <id> --model claude-sonnet-4-6
+# 1) Generate one SWE-agent solver config per agent (+ roster.json, comm_mode.json,
+#    _comm_bundle/). The COMMUNICATION HARNESS is chosen HERE, not at run time -- it decides
+#    which comm tools exist in the bundle and what the system prompt says, so switching cells
+#    means regenerating solver.yaml. Give each cell its own --output root (see README 2.1).
+python multiagent_pro/aci/gen_solver_config.py --instances <id> --model claude-sonnet-4-6 \
+    --comm-mode broadcast              # send_message reaches everyone; NO recipient argument
+python multiagent_pro/aci/gen_solver_config.py --instances <id> --model claude-sonnet-4-6 \
+    --comm-mode p2p                    # (default) may address ONE peer by id, or 'all'
+python multiagent_pro/aci/gen_solver_config.py --instances <id> --model claude-sonnet-4-6 \
+    --comm-mode p2p --beliefs          # p2p + private per-peer notes (update_belief)
+#    Full per-cell recipe, incl. keys, grading and how to read comm_stats.json: README 2.1.
 
-# 2a) Validate the configs without starting anything
+# 2a) Validate the configs without starting anything. NOTE this only checks that solver.yaml
+#     parses under RunSingleConfig -- it never reaches agent.setup(), so it does NOT catch a
+#     declared-tool/missing-bin mismatch in the generated bundle.
 python multiagent_pro/aci/orchestrate.py --mode dry --instances <id>
 
 # 2b) Offline end-to-end check (no LLM): apply each agent's gold patch in-image, scope-diff,
@@ -386,11 +473,18 @@ multiagent_pro_out/<id>/
   **deny** out-of-scope paths, including `../` and absolute-path escapes. Verified both on the
   host and **inside the real Pro image** (Python 3.9.5, repo at `/app`): the owned 451-line
   file is viewable; a peer's file is denied.
-- **Communication.** Two simulated agents over one board: `publish_interface` and an addressed
-  `send_message` are both visible to the recipient via `read_messages`; unknown recipients are
-  rejected; `list_agents` shows the roster.
+- **Communication.** Delivery partition over a synthetic multi-round board: peer-only,
+  addressing respected, each message delivered exactly once per recipient, no self-delivery.
+  In the real Pro image: broadcast `send_message` writes `to: "all"` even when handed a peer
+  id; p2p rejects unknown recipients and self-sends; `publish_interface` refuses a symbol
+  absent from the agent's files and accepts one present (and fails open on a non-Python scope
+  or an unparseable signature); `update_belief` round-trips with per-round history;
+  `list_agents` shows the roster.
 - **Config validity.** Every generated `solver.yaml` parses under SWE-agent's own
-  `RunSingleConfig`: bash disabled, 11 tools exposed (7 `scoped_fs` + 4 `comm`), bundles
+  `RunSingleConfig`: bash disabled, `scoped_fs` plus the selected `comm` tools exposed (the
+  model-visible function schemas were asserted per cell: no `read_messages` anywhere,
+  `send_message` carries a `to` property only in p2p, `update_belief` only with `--beliefs`),
+  every declared tool has a matching bin, bundles
   resolved by absolute path, `submit_command: scoped_submit`.
 - **End-to-end integrate→grade (gold mode).** Per-agent scoped diffs are captured **inside the
   real container** (`git diff -- <scope>` after applying the gold hunks at `base_commit`),

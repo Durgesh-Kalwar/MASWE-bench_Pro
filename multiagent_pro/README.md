@@ -73,7 +73,7 @@ M(x) = (A, scope, local, integrate, grade)
   symbol overlap and each goes to exactly ONE agent, with **definer priority** — a unit
   mentioning a name some agent's gold diff *introduces* (new `def`/`class`/enum members)
   routes to that definer, so a consumer genuinely never sees the definer's chosen names and
-  must `send_message`/`read_messages` to learn them. Symbol-free units (repro steps, error
+  must `send_message` to ask for them. Symbol-free units (repro steps, error
   text) are shared with everyone; there is no "Key symbols" hint (it would leak names right
   back). Incompatible with `--include-interface`; `--include-requirements` is routed through
   the same partition rather than given in full. Per-agent slice sizes land in `spec.json`
@@ -147,30 +147,50 @@ python multiagent_pro/aci/gen_solver_config.py --instances <instance_id> \
 #   automatically on every later run with that model name. Omitting them for an unregistered
 #   model raises an error telling you exactly what to supply.
 
+# COMMUNICATION HARNESS -- the study variable (add to either gen_solver_config call above).
+# Delivery is always PUSH: there is no read tool. Whatever an agent posts in a round is
+# injected straight into its recipients' context at the start of the next one, so receiving
+# costs no step and what differs between cells is topology, not tool-call discipline.
+#   --comm-mode p2p        (default) send_message may be addressed to ONE peer by id --
+#                    delivered to that agent alone -- or to 'all'.
+#   --comm-mode broadcast  send_message has NO recipient argument at all (the model never
+#                    sees one) and always reaches every peer. There is no private channel.
+#   --beliefs        adds `update_belief <peer> --note ...`: a PRIVATE per-peer note store no
+#                    other agent ever sees, replayed to the agent at the start of every round
+#                    and archived as <id>/<agent>/beliefs_round_N.json. Without it agents must
+#                    infer whom to address from the messages themselves.
+# publish_interface broadcasts in every cell, and REFUSES to announce a symbol that does not
+# yet exist in a file the agent owns. The three cells studied are: broadcast / p2p /
+# p2p --beliefs. Per-round communication counts land in <id>/comm_stats.json.
+#
+# The bundle is materialized per instance into <id>/_comm_bundle/ with only that cell's tools,
+# so the harness a run used is archived beside it. REGENERATE solver.yaml after changing cell.
+
 # Context window per agent (add to either gen_solver_config call above):
 #   --last-n-observations N   keep the full text of only the last N tool observations; older
 #                    ones become "Old environment output: (K lines omitted)". Actions and
 #                    thoughts are never elided, and the window spans the WHOLE run, not a
-#                    round -- SWE-agent has no round concept. Default 5 (the SWE-agent
-#                    default) also elides read_messages output, which is UNRECOVERABLE here
-#                    because read_messages is unread-only: a peer's interface that scrolls
-#                    out is gone for good. Use N >= --steps-per-round so a full previous
-#                    round always survives. Costs more per step -- raise
-#                    --per-instance-cost-limit with it. See multiagent_aci.md §2.6.
+#                    round -- SWE-agent has no round concept. Peer messages are EXEMPT: they
+#                    are pushed in as message_type "user" and this processor only ever elides
+#                    "observation", so an interface can no longer scroll irrecoverably out of
+#                    context (it could under the old pull design). N now only bounds the
+#                    agent's own file views; use N >= --steps-per-round to keep a full round
+#                    of them. Costs more per step -- raise --per-instance-cost-limit with it.
+#                    See multiagent_aci.md 2.6.
 
 # Optional coordination gate (OFF by default; add to either gen_solver_config call above):
 #   --submit-gate    scoped_submit REFUSES (pure refusal -- the harness never calls comm
-#                    tools for the agent) until the agent has itself (1) run read_messages
-#                    ONCE (ever -- it is never asked to re-read) and (2) announced on the
-#                    board any public def/class its edits delete (publish_interface). The
-#                    default -- no gate -- measures whether models coordinate unprompted
-#                    under --partition-issue.
+#                    tools for the agent) until the agent has announced on the board any
+#                    public def/class its edits delete (publish_interface / send_message).
+#                    It used to also require reading the board each round; push delivery
+#                    removed anything for an agent to fail to check, so that half is gone.
 
 # Rounds are LOCKSTEP: the board is frozen at the start of each round, so every agent sees the
-# same state and reads peers' messages from PREVIOUS rounds only. Every agent gets a turn every
-# round (including ones that already submitted, so late questions can be answered); the run
-# stops once every still-active agent submits in the SAME round. An agent that lacks
-# information a peer must supply can end its turn early with `no_op` and return next round.
+# same state and receives peers' messages from PREVIOUS rounds only -- turn order within a
+# round carries no information advantage. Every agent gets a turn every round (including ones
+# that already submitted, so late questions can be answered); the run stops once every
+# still-active agent submits in the SAME round. An agent that lacks information a peer must
+# supply can end its turn early with `no_op` and return next round.
 python multiagent_pro/aci/orchestrate.py --mode agents --instances <instance_id> --grade
 #   ...or drive the agents yourself, write each agent_<k>.patch, then merge directly:
 python multiagent_pro/build_multiagent_pro.py --mode merge --instances <instance_id>
@@ -184,6 +204,104 @@ python swe_bench_pro_eval.py \
 `--emit-gold` additionally writes each agent's `agent_<k>/gold.patch` (the oracle solution for
 its scope); `orchestrate.py --mode gold` then verifies the whole integrate→grade path offline.
 
+### 2.1 Running each communication harness
+
+The harness is fixed at **`gen_solver_config.py`** time, not at run time: it decides which comm
+tools exist in the materialized bundle and what the system prompt says. So a cell is a
+*build+generate+run* triple, and **switching cells means regenerating `solver.yaml`.**
+
+**Give each cell its own `--output` root.** All per-run artifacts (`solver.yaml`, `board.json`,
+`comm_stats.json`, the agent patches, `eval_out/`) live under `<root>/<instance_id>/`, so three
+cells sharing one root overwrite each other and you end up grading whichever ran last.
+
+```bash
+# --- once: keys (bashrc has a non-interactive guard, so source explicitly) ----------------
+eval "$(grep -m1 '^export CREATEAI_API_KEY=' ~/.bashrc)"; export OPENAI_API_KEY="$CREATEAI_API_KEY"
+eval "$(grep -m1 '^export CREATAI_BASE_URL=' ~/.bashrc)"
+
+export INST=instance_ansible__ansible-b748edea457a4576847a10275678127895d2f02f-v1055803c3a812189a1133297f7f5468579283f86
+MODEL="--model openai/gpt4o_mini --api-base $CREATAI_BASE_URL \
+       --price-per-million-tokens 0.375 --context-window 128000 --per-instance-cost-limit 1.5"
+
+# --- run one cell: $1 = output root, $2.. = the harness flags -----------------------------
+run_cell () {
+  ROOT=$1; shift
+  python multiagent_pro/build_multiagent_pro.py --mode build --distractors -1 \
+      --instances $INST --output $ROOT --include-requirements --partition-issue
+  python multiagent_pro/aci/gen_solver_config.py --output $ROOT --instances $INST \
+      $MODEL --last-n-observations 10 "$@"
+  rm -rf $ROOT/eval_out/$INST          # or the evaluator re-reports the STALE grade
+  python multiagent_pro/aci/orchestrate.py --mode agents --output $ROOT \
+      --instances $INST --rounds 3 --steps-per-round 6 --grade
+}
+
+# --- the three cells ----------------------------------------------------------------------
+run_cell out_broadcast  --comm-mode broadcast     # send_message reaches everyone; no recipient arg
+run_cell out_p2p        --comm-mode p2p           # send_message may target ONE peer, or 'all'
+run_cell out_p2p_belief --comm-mode p2p --beliefs # p2p + private per-peer notes (update_belief)
+```
+
+`--comm-mode p2p` is the default, so the middle cell needs no flag; it is written out here so the
+three commands read as one comparison. Add `--submit-gate` to all three or to none — it is a
+separate variable (and now means only the publish-check, see below).
+
+**Confirm the cell actually took effect** before spending a run on it:
+
+```bash
+cat $ROOT/$INST/comm_mode.json                       # {"mode": "...", "beliefs": ...}
+ls  $ROOT/$INST/_comm_bundle/bin/                    # exactly this cell's tools; no read_messages
+grep -c 'to:' $ROOT/$INST/_comm_bundle/config.yaml   # broadcast: send_message has no `to` argument
+grep COMM_MODE $ROOT/$INST/agent_1/solver.yaml
+```
+
+`orchestrate.py` prints the harness it read from `comm_mode.json` at startup and in `--mode dry`.
+Note **`--mode dry` only validates that `solver.yaml` parses** — it stops at `RunSingleConfig` and
+never reaches `agent.setup()`, so it will *not* catch a declared-tool/missing-bin mismatch.
+
+**What each cell writes, beyond the usual artifacts:**
+
+| file | cells | content |
+| --- | --- | --- |
+| `<id>/comm_mode.json` | all | the cell, so `orchestrate.py` reads it from one source of truth |
+| `<id>/_comm_bundle/` | all | the exact tool bundle the agents ran — archived beside the run |
+| `<id>/comm_stats.json` | all | per agent per round: `received`, `sent_directed`, `sent_broadcast`, `interfaces_published`, `refused_interfaces`, `belief_updates`, `no_op`, `submitted`, `steps` |
+| `<id>/<agent>/beliefs_round_N.json` | `--beliefs` | that agent's private per-peer notes at the end of round N, with every revision |
+
+**Capturing exactly what each agent saw** (`orchestrate.py --dump-context`, off by default).
+Before EVERY step it appends `agent.messages` — the post-history-processor list, i.e. literally
+the payload sent to the API — to `<id>/<agent>/context/messages.jsonl`, one JSON object per line
+(`round`, `step_in_round`, `global_step`, `n_messages`, `chars`, `messages`). This is the only
+record of what the model *saw*: the trajectory stores what the tools *returned*, the board stores
+what was *sent*, and an elided observation shows here as its `Old environment output: (K lines
+omitted)` placeholder. It writes the whole conversation once per step, so the file grows
+quadratically over a run — leave it off unless you intend to analyse decisions.
+
+**Interface contracts are pinned, in every cell.** A `publish_interface` contract arrives as a
+normal message the round it is published, and is then re-listed at the top of every subsequent
+round notice as an always-current registry (newest-wins per author+symbol, the agent's own marked
+`<- yours`). Messages are events and stay new-only; contracts are state and stay in view. This is
+on in all three cells — interfaces broadcast everywhere, so holding it constant keeps a
+broadcast-vs-p2p difference from being confounded by it.
+
+**Reading the results.** Report `comm_stats.json` next to the grade, not after it — broadcast and
+p2p differ in *context volume* as well as topology (a broadcast agent receives every message; a
+p2p agent only its own mail plus interfaces), so messages-received is a covariate, not a
+footnote. And score **FAIL_TO_PASS and PASS_TO_PASS separately**: on `b748edea` they are 5 and 41,
+and 41/41 PASS_TO_PASS is what an *empty* patch earns. See `CHECKPOINT.md` §9.5 and §10.
+
+```bash
+python - <<'PY'   # per-cell totals  (INST must be exported, as above)
+import json, os
+inst = os.environ["INST"]
+for root in ("out_broadcast", "out_p2p", "out_p2p_belief"):
+    rows = json.load(open(f"{root}/{inst}/comm_stats.json"))
+    k = lambda f: sum(r[f] for r in rows)
+    print(f"{root:15s} recv={k('received'):3d} directed={k('sent_directed'):2d} "
+          f"bcast={k('sent_broadcast'):2d} iface={k('interfaces_published'):2d} "
+          f"refused={k('refused_interfaces'):2d} beliefs={k('belief_updates'):2d}")
+PY
+```
+
 ### Per-instance artifact tree
 
 ```
@@ -194,10 +312,19 @@ multiagent_pro_out/
     ├── README.md                       # human summary + table + merge/eval commands
     ├── shared/coordination.md          # interface contract — only if --include-interface
     ├── roster.json                     # [{id, gold_file}] (after gen_solver_config)
+    ├── comm_mode.json                  # the communication harness this run used (2.1)
+    ├── _comm_bundle/                   # the EXACT comm tools that cell ran (materialized here,
+    │                                   #   so the harness is archived beside the run)
+    ├── board.json                      # every message posted, in publication order
+    ├── board_after_round_<n>.json      # the board as frozen at each barrier
+    ├── comm_stats.json                 # per agent per round: received / sent_directed /
+    │                                   #   sent_broadcast / published / refused / no_op
     └── agent_<k>/
         ├── SCOPE.txt                    # gold file + K distractors (read/write allowlist)
         ├── local_issue.md              # FULL problem_statement [+ requirements] + focus highlight
         ├── solver.yaml                  # generated SWE-agent config (after gen_solver_config)
+        ├── traj/round_<n>.json         # this agent's steps in each round
+        ├── beliefs_round_<n>.json      # only with --beliefs: its PRIVATE per-peer notes
         ├── gold.patch                  # only if --emit-gold (oracle for this scope)
         └── agent_<k>.patch             # the agent's scoped diff -> input to merge
 ```
