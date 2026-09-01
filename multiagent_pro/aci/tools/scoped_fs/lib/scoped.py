@@ -104,15 +104,16 @@ def require_scope(path: str) -> Path:
                 print("Files owned by peers (off-limits to you):")
                 for f in sorted(deny_files()):
                     print(f"  {f}")
-                print("To have one of these changed, coordinate with send_message / "
-                      "read_messages.")
+                print("To have one of these changed, ask its owner with send_message; "
+                      "the reply reaches you next round.")
         else:
             print(f"DENIED: '{path}' is outside your file scope — you cannot read or edit it.")
             print("Your scope (the only files you may touch):")
             for f in sorted(scope_files()):
                 print(f"  {f}")
             print("To use anything outside your scope (e.g. an interface another agent "
-                  "owns), coordinate with send_message / read_messages.")
+                  "owns), ask its owner with send_message; the reply reaches you next "
+                  "round.")
         sys.exit(1)
     return _resolve(path)
 
