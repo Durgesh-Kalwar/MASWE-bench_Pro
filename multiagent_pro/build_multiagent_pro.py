@@ -331,9 +331,10 @@ def build_local_info(meta, agents, include_requirements, partition=False):
                 "given only the passages about its own file; your peers hold the rest. "
                 "Anything you need that is not written here — especially the names and "
                 "signatures of functions/classes/enums another agent introduces — must be "
-                "obtained by coordinating: `send_message` to ask a peer, `read_messages` to "
-                "receive, `publish_interface` to announce anything you define that peers "
-                "must call.",
+                "obtained by coordinating: `send_message` to ask a peer, and "
+                "`publish_interface` to announce anything you define that peers must call. "
+                "You never have to fetch replies — whatever your peers post reaches you "
+                "automatically at the start of the next round.",
                 "", "## Your part of the issue", "",
             ]
             if mine:
@@ -714,6 +715,14 @@ def render_readme(instance_id, repo, agents, interface,
          "- `agent_<k>/local_issue.md` — full issue text + this agent's per-file focus highlight"),
         "- `shared/coordination.md` — the interface contract (only if --include-interface)",
         "- `spec.json` — machine-readable spec (scopes, symbols, integration, grade command)",
+        "",
+        "After `gen_solver_config.py` / a solve run, this directory also holds:",
+        "- `comm_mode.json` — the communication harness used (`broadcast` / `p2p` / `+ beliefs`)",
+        "- `_comm_bundle/` — the exact comm tools that harness gave the agents",
+        "- `board.json`, `board_after_round_<n>.json` — every message posted, per round",
+        "- `comm_stats.json` — per agent per round: messages received/sent, interfaces "
+        "published and refused, no_ops",
+        "- `agent_<k>/beliefs_round_<n>.json` — private per-peer notes (only with `--beliefs`)",
         "",
         "## Solve & grade",
         "Each agent writes its diff to `agent_<k>.patch` (scoped to its files), then:",

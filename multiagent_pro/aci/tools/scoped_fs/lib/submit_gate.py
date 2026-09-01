@@ -1,27 +1,27 @@
 """Optional coordination gate for scoped_submit (enabled by the SUBMIT_GATE env var, wired
 from `gen_solver_config.py --submit-gate`; OFF by default).
 
-Both checks are pure REFUSALS: the gate never calls a comm tool on the agent's behalf — it
-blocks the submission and tells the model exactly which tool to run itself, so comm-tool
+One check remains, a pure REFUSAL: the gate never calls a comm tool on the agent's behalf —
+it blocks the submission and tells the model exactly which tool to run itself, so comm-tool
 usage remains the model's own decision/action.
 
-  1. Read-gate  — the agent must have checked the board at least ONCE, ever: `read_messages`
-     writes a per-agent cursor file next to the board (comm/lib/board.py mark_read), and this
-     gate only asks whether that file exists. Deliberately not "has read the CURRENT board":
-     an earlier version compared a content hash of the whole board, which the agent's OWN
-     send_message/publish_interface silently invalidated (they mutate the board and never
-     mark_read), so publishing an interface forced a redundant re-read before every submit.
-     Reading an empty board counts -- the point is that the agent looked, not what it found.
-  2. Publish-check — if the agent's edits DELETE a public def/class (present at HEAD =
-     base_commit, absent in the worktree, name not starting with "_"), it must first have
-     posted a board message naming that symbol (publish_interface / send_message). Targets
-     the observed cross-module contract breaks (deleted `HostState`, dangling `_is_fqcn`).
+  Publish-check — if the agent's edits DELETE a public def/class (present at HEAD =
+  base_commit, absent in the worktree, name not starting with "_"), it must first have posted
+  a board message naming that symbol (publish_interface / send_message). Targets the observed
+  cross-module contract breaks (deleted `HostState`, dangling `_is_fqcn`).
+
+There used to be a second, read-gate check: the agent had to run `read_messages` in the
+current round before it could submit. Delivery is push now — the host injects each agent's
+messages into its context at the start of every round, including agents that already
+submitted — so there is nothing left for an agent to fail to check, and no tool it could run
+to satisfy such a gate. It was deleted rather than relaxed: keyed on sidecar files only
+`read_messages` wrote, it would have become an unconditional block.
 
 Exit status: 0 = submission may proceed; 1 = blocked (message already printed to stdout,
 which is the model-visible tool observation). Any internal error fails OPEN (exit 0) — the
 gate must never be able to strand an agent that cannot satisfy it through no fault of its
-own. The marker PATH formula is intentionally duplicated with comm/lib/board.py: the two tool
-bundles are deliberately self-contained (precedent: the COMM_BOARD default path).
+own. The COMM_BOARD path formula is intentionally duplicated with comm/lib/board.py: the two
+tool bundles are deliberately self-contained.
 """
 # Tool bins run on the Pro images' Python 3.9 -- keep annotations deferred (PEP 563).
 from __future__ import annotations
@@ -50,44 +50,6 @@ def _load_board() -> list:
     except Exception:
         pass
     return []
-
-
-def check_read_gate(msgs: list) -> str | None:
-    """Blocked until the agent has run `read_messages` in the CURRENT round.
-
-    Round-scoped, not once-ever: an agent that finished early would otherwise submit straight
-    past a board holding a peer's question for it (observed -- the definer re-submitted in one
-    step for two rounds while two peers sat blocked asking for its enum names). Still NOT a
-    content comparison, so the agent's own send_message/publish_interface can never re-block
-    its submission the way the old board-hash gate did -- reading once per round is enough.
-
-    Falls back to read-once-ever when the host writes no `.round` file (offline tooling, gold
-    mode). Mirrors comm/lib/board.py's path formulas; the two bundles are deliberately
-    self-contained, so those formulas live in both files."""
-    comm = board_path().parent
-    try:
-        cur = (comm / ".round").read_text().strip()
-    except Exception:
-        cur = ""
-    if cur:
-        try:
-            seen = (comm / f".read_round_{agent_id()}").read_text().strip()
-        except Exception:
-            seen = ""
-        if seen == cur:
-            return None
-        return (
-            "SUBMISSION BLOCKED (coordination gate): you have not read the message board in "
-            f"this round (round {cur}).\n"
-            "Run `read_messages` now -- a peer may be blocked waiting on an answer only you "
-            "can give -- then run `scoped_submit` again."
-        )
-    if (comm / f".read_{agent_id()}").exists():
-        return None
-    return (
-        "SUBMISSION BLOCKED (coordination gate): you have not checked the message board yet.\n"
-        "Run `read_messages`, act on anything relevant, then run `scoped_submit` again."
-    )
 
 
 def _public_symbols(source: str) -> set:
@@ -156,11 +118,10 @@ def check_publish_gate(msgs: list) -> str | None:
 def main() -> int:
     try:
         msgs = _load_board()
-        for check in (check_read_gate, check_publish_gate):
-            problem = check(msgs)
-            if problem:
-                print(problem)
-                return 1
+        problem = check_publish_gate(msgs)
+        if problem:
+            print(problem)
+            return 1
         return 0
     except Exception:
         return 0                                      # fail open: never strand the agent
