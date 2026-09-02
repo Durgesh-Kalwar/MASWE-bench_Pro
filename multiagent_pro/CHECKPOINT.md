@@ -1488,3 +1488,233 @@ have looked like it completed fine having silently skipped instance 20. Killed a
 newline added, and the loop hardened to `done < <(grep . "$BASE/ids20.txt")` so it cannot
 recur. **Whenever a count is derivable, print it and check it** — `wc -l` said 19 where
 `grep -c .` said 20.
+
+## 12. 2026-09-01 — the reciprocity confound, coupling stratification, and the coupled-20 set
+
+The 60-run sweep from §11.4 finished clean: **60/60, 0 failures**, 6h36m, ~$15. Results below.
+Analysing *how the agents actually talked* then turned up a confound that made the harness
+comparison unsafe to interpret, and a coworker's coupling metric turned up a second problem with
+the instance set itself. Both are fixed here.
+
+### 12.1 The 60-run sweep result (v1 baseline)
+
+```
+                       broadcast             p2p     p2p+beliefs
+RESOLVED               0/20 (0%)       0/20 (0%)       0/20 (0%)
+F2P macro                  14.4%            8.3%           11.2%
+F2P micro                  12.9%            6.5%            8.6%
+P2P macro                  75.6%           69.7%           58.9%
+F2P tests                 18/139           9/139          12/139
+```
+
+Nothing RESOLVED under Pro's all-or-nothing rule — expected, since gpt-4o-mini solved 0/1 on
+every earlier single-instance run. The normalized rates carry the signal.
+
+**PASS_TO_PASS is bimodal, not diffuse.** Of 20 instances, 9 are at 1.000 and all 127 broken
+tests come from 4 instances — 91 of them from two where *zero* tests passed. A whole suite going
+to zero is a patch that breaks import or collection, not a subtly wrong fix. So the P2P column
+mostly measures *how often an agent bricked the suite*. It also runs opposite to F2P: a
+do-nothing agent scores P2P 100% / F2P 0%, so P2P is a damage gauge with a 100% ceiling, and the
+two sets must never be averaged together.
+
+### 12.2 The confound: answering was gated behind having submitted
+
+Every communication instruction in the system prompt was **egocentric** — *ask* for what you
+need, *publish* what you define. The one instruction that said "a peer asked you for something
+-> answer with `send_message`" lived in `NOTICE_SUBMITTED`, delivered **only to agents that had
+already submitted**. `NOTICE_WORKING`, delivered to everyone else, had three bullets of which
+two said *submit*, and it advertised "the run ends once every agent submits in the same round".
+
+Responsiveness was therefore a function of **when an agent happened to submit**, not of the
+topology under study. Measured: 88% / 30% / 50% of answer-shaped messages came from agents that
+had already submitted (69% / 62% on coupled instances for the two p2p cells). A real board
+timeline: `agent_2` sat on three questions about a file only it could see for two full rounds,
+two peers re-asked, and the answers landed in round 4 of 5.
+
+Two supporting problems. Agents submit after a median of **2 steps** and runs end after a median
+of **3 rounds** (the 25-step cap was hit in only 11% of agent-rounds), so there was barely any
+interaction left to measure. And `update_belief` was called **0 times in 1,547 actions** — the
+tool is correctly wired (bin present, valid signature, `argument_format: --note {{value}}`
+resolves the apparent positional mismatch, archives written every round); the model simply never
+chose it. The beliefs cell was plain p2p plus an unused tool.
+
+**Measurement caveat that must not be lost:** the answer *rate* is criterion-dependent and the
+ranking flips. Counting a reply as "addressed to the asker via the `to` field OR by naming them
+in the text" gives 14% / 42% / 41%; counting only text-naming gives 14% / 2% / 3%. p2p addresses
+with the `to` field and has no reason to name anyone; broadcast has no `to` field and compensates
+by writing "@agent_2". Each criterion is unfair to one harness, so `answer_analysis.py` reports
+both and neither is called "the" answer rate.
+
+### 12.3 What changed in the prompts
+
+Answering now applies to working agents, not just submitted ones. All sites are elision-immune
+(system prompt; instance template = observation index 0, protected by the `[1:` slice; round
+notices are `message_type: "user"`).
+
+| site | change |
+| --- | --- |
+| `SYSTEM_HEAD_SCOPED` / `SYSTEM_HEAD_FULL` | "Coordination runs BOTH ways" — a question about files you own is one only you can settle |
+| `SYSTEM_BULLETS` | answering bullet; answer from what you have ALREADY written; submitting is NOT final, a re-submit REPLACES |
+| `INSTANCE_TAIL` | matching reminder line |
+| `NOTICE_WORKING` + new `NOTICE_ANSWER` | answer bullet FIRST, gated on `delivered` being non-empty via a `{answer}` slot; submit-fast inducement removed |
+| `NOTICE_SUBMITTED` | reframed two-way; states plainly that a re-submit replaces the earlier patch |
+
+The re-submit fact was already true (`scoped_submit` is only a signal; `orchestrate.py`
+recomputes the final patch from the worktree — verified in run 7) but nothing told the agent, so
+the "edit it and submit again" bullet read as riskier than it was.
+
+### 12.4 Coupling stratification changes how everything is read
+
+`metrics/tag_coupling.py` (pulled from a coworker, commit `c96051b`) labels an instance
+`coupled` when at least one cross-agent def-use edge exists — agents provably must coordinate on
+a symbol. Re-analysing the v1 sweep against that split:
+
+| F2P macro | broadcast | p2p | p2p+beliefs | spread |
+| --- | --- | --- | --- | --- |
+| **coupled** (n=12) | **24.1%** | 11.0% | 18.7% | **13.1pp** |
+| **decomposable** (n=8) | 0.0% | 4.2% | 0.0% | 4.2pp |
+
+The harness effect lives where coordination is actually required; the headline 14.4/8.3/11.2 was
+diluted by 8 instances where the harness cannot matter by construction. Honest caveat: the
+decomposable instances scored ~0 in every cell, so they are *uninformative* rather than proof of
+moderation — "coordination not needed" and "these were harder" are not separable at n=8. Either
+way they are dilution. **Every report is now stratified.**
+
+Also notable: nearly all the suite-bricking damage is in the *decomposable* stratum (P2P micro
+22.9 / 14.4 / 9.3) versus the coupled one (88.7 / 88.7 / 72.3).
+
+### 12.5 The coupled-20 set (`multiagent_pro_bench20_coupled/`)
+
+From the 121 `coupled` instances in `coupling_index.json`, filtered to `4 <= num_agents <= 8`,
+ranked by `num_edges` desc.
+
+The agent band is the one judgment call. **Lower bound 4:** at 3 agents (v1's median) broadcast
+and p2p barely differ — broadcast reaches 2 peers, a directed message reaches 1 — so the
+manipulation is nearly degenerate. **Upper bound 8:** ranking on raw edges alone pulls in 11-14
+agent instances and pushes the sweep to ~14h / ~$31 with most of those agents isolated bystanders.
+
+| | v1 set | coupled-20 |
+| --- | --- | --- |
+| coupled / decomposable | 12 / 8 | **20 / 0** |
+| cross-agent edges | 42 | **142** (97 DEF-USE + 45 USE-USE-ON-CHANGED) |
+| agents (total / median) | 71 / 3 | 110 / 6 |
+
+4 instances carry over from v1, so those are directly comparable. Verified: all 20 images exist
+(`docker manifest inspect`, no pulls); 20/20 built with 110 agents matching the index; every
+agent has `SCOPE.txt` / `local_issue.md` / `gold.patch`; re-tagging the built set reproduces
+20 coupled / 0 decomposable / 142 edges; and the one overlapping instance built **byte-identical**
+to its v1 spec, so the build config is provably unchanged.
+
+### 12.6 The trap: `sample_instances_pro.py` overwrites `raw_sample.jsonl`
+
+`write_raw_sample` opens the file with `"w"`, so sampling a new instance set **replaces** the
+index rather than extending it — which would have silently broken grading and reporting for the
+entire v1 sweep. Backed up first, then merged: `sampled_pro/raw_sample.jsonl` now holds **36**
+instances (both sets, 4 overlapping) and both sweeps grade correctly against it. Re-confirmed
+afterwards that v1 still reproduces 14.4 / 8.3 / 11.2.
+
+Related: only **12 of the 121** coupled instances were runnable before this. `run_scripts/`
+covers all 121, but `raw_sample.jsonl` and `sampled_pro/` held only the current benchmark — the
+coupling index covers the full 266-instance dataset, but nothing else had been sampled locally.
+A new instance set therefore needs re-sample + re-build, not just a new ids file.
+
+Two other things not to move: **v1 must stay at `/media/data/dkalwar/maswe_bench20/`** (its
+generated `solver.yaml` files embed absolute paths, so relocating it breaks re-evaluation), and
+the ` M SWE-agent` submodule pointer stays unbumped.
+
+### 12.7 New and changed tooling
+
+- `metrics/answer_analysis.py` (**new**) — questions asked, replies under both criteria, median
+  rounds-to-answer, re-ask rate, the before/after-submit split (the confound metric), and answer
+  rate by the responder's coupling role. Stratified by coupling label.
+- `report.py` — parameterized (`--base` / `--model` / `--compare` / `--raw-sample-path`) and
+  stratified into coupled / decomposable / pooled blocks. Metric definitions unchanged so v1 and
+  v2 stay comparable.
+- `bench20.sh` — takes a `<model_label>` and writes to `<base>/<label>/`, so several models can
+  be swept without overwriting each other. A `case` block maps label -> (model id, price, context
+  window) and an **unknown label is rejected rather than guessed**: a wrong price silently
+  corrupts the per-agent cost limit. `BENCH_BASE` and `BENCH_SRC` override root and instance set.
+  The doubled `openai/openai/` prefix is retained (see §10.4).
+
+### 12.8 Verification performed
+
+1. 8/8 `build_notice` assertions — answer bullet present with mail and when submitted, absent on
+   an empty-mail working turn; submit-fast inducement gone from the working notice, kept in the
+   submitted one; `{answer}` filled, not literal.
+2. All three cells carry identical answering language; the only broadcast-vs-p2p diff in the
+   rendered system prompt is the addressing paragraph. Confirmed both from `system_template()`
+   and from a generated `solver.yaml`.
+3. `report.py` reproduces v1 exactly (pooled 14.4/8.3/11.2, 18/139, 309/436) — before and after
+   the `raw_sample.jsonl` merge.
+4. `answer_analysis.py` reproduces the ad-hoc v1 numbers exactly (59/59/75 questions, 8/25/31
+   addressed, 88%/30%/50% before-submit).
+5. Smoke run, 1 coupled instance x 3 cells, on the instance whose v1 board showed the pathology.
+   Observed mid-work answering at step 17 — `agent_2` answering `agent_4` about `find_similar`,
+   the same question ignored for two rounds in v1.
+
+### 12.9 v1 baseline the fix must move (coupled, n=12)
+
+| | broadcast | p2p | p2p+beliefs |
+| --- | --- | --- | --- |
+| answer-shaped msgs sent AFTER submitting | 4% | 69% | 62% |
+| definer answer rate | 23% | 42% | 60% |
+
+Success is the **first row collapsing** — answering stops depending on having submitted — and the
+definer answer rate rising. A change in F2P is not required for the fix to have worked; the point
+is removing the confound so the coupled-block comparison means what it claims.
+
+### 12.10 Still open
+
+- `update_belief` deferred, not fixed. Forcing it with a refusal gate would test a different
+  construct than the specified one (agents *implicitly inferring* from interaction), and 0 usage
+  is itself a finding. gpt-4o-mini is the weakest model that will be run — re-check on a stronger
+  one before adding machinery.
+- The §10.5 / §11 defects are untouched: the structural edit bug, edit-failure recovery, and
+  false attestation via free-text `send_message`.
+
+### 12.11 Smoke validation of the prompt fix (n=1, directional)
+
+One coupled instance (`qutebrowser a84ecfb8` — the one whose v1 board showed the pathology) x 3
+cells, old prompts vs new:
+
+| same instance | v1 (old) | smoke (new) |
+| --- | --- | --- |
+| answer-shaped messages | 0 / 2 / 1 | **8 / 5 / 7** |
+| answered [addressed] | 17% / 75% / 25% | 0% / **100%** / **83%** |
+| median rounds to answer | 2.0 / 2.5 / 1.5 | — / **1.0** / **1.0** |
+| questions asked | 6 / 8 / 8 | 3 / 5 / 6 |
+
+Substantive non-question messages rose ~4x and answer latency halved to the immediately
+following round; fewer questions were asked, consistent with answers arriving before an asker
+needed to repeat itself. Directly observed in the p2p log at step 17 — `agent_2` answering
+`agent_4` about `find_similar` **mid-work**, the same question ignored for two rounds in v1.
+
+Broadcast reads 0% under the `addressed` criterion despite producing 8 answer-shaped messages:
+its replies go to `all` and do not name the asker, which is exactly the criterion asymmetry
+§12.2 warns about. Do not read that cell's 0% as silence.
+
+**The before/after-submit split did NOT collapse** (p2p 0%/100%, beliefs 14%/86%). This is n=1,
+but it also exposes a weakness in the metric itself: agents submit after a median of 2 steps, so
+an agent that submits in round 1 has *every* later message counted as "after submitting" even
+when it answers promptly. The metric conflates "answered only because it had submitted" with
+"happened to have submitted already". A cleaner version — *of questions arriving while the
+responder had not yet submitted, what fraction were answered* — should replace it before the
+split is used as the success criterion in §12.9.
+
+### 12.12 The coupled-20 sweep (IN FLIGHT as of 2026-09-02 11:36 PT)
+
+60 runs (20 coupled instances x 3 harnesses), gpt-4o-mini, same config as §11.4 so results stay
+comparable: cost limit 2.0/agent, `--last-n-observations 10`, `--submit-gate`,
+`--rounds 5 --steps-per-round 25 --dump-context --grade`. Estimated ~10h, ~$23.
+
+```bash
+tmux attach -t bench_coupled20            # Ctrl-b d to detach
+tail -f /media/data/dkalwar/maswe_bench_coupled20/gpt4o_mini/progress.txt
+python /media/data/dkalwar/maswe_bench_coupled20/report.py \
+    --base /media/data/dkalwar/maswe_bench_coupled20 --model gpt4o_mini
+```
+
+Launched with `setsid` deliberately: the smoke run's plain `tmux new-session -d` died when the
+parent session was torn down, killing the tmux **server** along with it. All 20 images were
+confirmed already local first — 16 of these instances are new, and at ~2.8 GB each a cold pull
+would have been ~45 G against 42 G free on `/`.

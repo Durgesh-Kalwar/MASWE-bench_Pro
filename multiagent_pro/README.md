@@ -176,6 +176,30 @@ with its label and edge counts, sorted most→least coupled (full set: **121 cou
 92 decomposable multi-file / 53 single-file degenerate**), and `coupling_summary.json`
 summarizes the last run.
 
+### Stage 4 (optional) — reciprocity: who asks, who answers
+
+[`metrics/answer_analysis.py`](metrics/answer_analysis.py) reads a finished sweep and reports
+whether peers' questions actually get answered. Agents used to be told to answer only in the
+round notice sent to agents that had **already submitted**, which made responsiveness a function
+of submission timing rather than of the communication topology under study; the
+`before/after submitting` split is the direct measurement of that.
+
+```bash
+python multiagent_pro/metrics/answer_analysis.py \
+    --base /media/data/dkalwar/maswe_bench_coupled20 --model gpt4o_mini \
+    --output multiagent_pro_bench20_coupled     # built specs, read for per-agent coupling roles
+```
+
+Two addressing criteria are **always printed side by side**, because they disagree and each is
+unfair to one harness: a reply detected via the `to` field cannot fire in broadcast (where `to`
+is always `all`), while a reply detected by naming the asker in the text under-counts p2p (which
+addresses with `to` and never names anyone). In the first sweep the two orderings were opposite
+— broadcast 14%/14%, p2p 42%/2% — so neither is reported as "the" answer rate.
+
+Every metric is split by the Stage-2b coupling label, and by the responder's coupling role
+(`definer` is the agent peers must ask, so its silence is the costly one). Run `tag_coupling.py`
+against the same built folder first to enable the role breakdown.
+
 ```bash
 # Stage 3 — solve with the multi-agent ACI, then integrate + grade (see multiagent_aci.md)
 python multiagent_pro/aci/gen_solver_config.py --instances <instance_id> --model <lm> \
