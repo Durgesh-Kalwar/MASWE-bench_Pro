@@ -66,6 +66,9 @@ with `publish_interface` — publish the EXACT names you actually wrote, and onl
 you own; publishing a name you have not actually written is REFUSED, because your peers
 will code against whatever you announce. If you need something owned by another file, ask
 for it with `send_message`.
+
+Coordination runs BOTH ways. Your peers cannot see inside the files you own any more than you
+can see inside theirs, so a question about your files is one only YOU can settle -- answer it.
 """
 
 SYSTEM_HEAD_FULL = """\
@@ -82,6 +85,9 @@ you actually wrote, and only for files you own; publishing a name you have not a
 written is REFUSED, because your peers will code against whatever you announce. If a peer
 owns a file you need changed, ask with `send_message`. Avoid clobbering a shared file
 another agent is actively editing.
+
+Coordination runs BOTH ways. Peer-owned files are invisible to you and yours are invisible to
+them, so a question about the files you own is one only YOU can settle -- answer it.
 """
 
 # Common to every harness: rounds, and the fact that receiving costs no action.
@@ -121,9 +127,14 @@ SYSTEM_BULLETS = """
   * Do not guess a name a peer is supposed to define — a wrong guess silently breaks the
     build. Ask with `send_message`, then run `no_op` to end your turn and wait; you get
     another turn next round, with their reply already in front of you.
+  * Answer what your peers ask you. Nobody else can see inside the files you own, so an
+    unanswered question stays unanswered and blocks that peer for a whole round. Answer from
+    what you have ALREADY written -- being unfinished is no reason to withhold a name or
+    signature that exists now; just say so if it may still change.
   * Run `scoped_submit` when your changes are complete. You will still get a turn in later
     rounds so peers can reach you; if nothing has changed for you, simply `scoped_submit`
-    again to confirm you are finished.
+    again to confirm you are finished. Submitting is NOT final: if you later edit your file
+    and run `scoped_submit` again, the new version REPLACES the old one.
 
 Available tools:
 {{command_docs}}
@@ -149,6 +160,8 @@ INSTANCE_TAIL = """\
 - Make the minimal change needed in YOUR file(s); do not try to fix peers' files.
 - Missing something only a peer can tell you? `send_message` to ask, then `no_op` to wait for
   their reply next round — do not guess.
+- A peer asked you something? Answer it from what you have written so far — you do not need to
+  be finished to be useful.
 - Run `scoped_submit` when done.
 """
 

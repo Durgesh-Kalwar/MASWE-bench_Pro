@@ -283,22 +283,34 @@ Your private notes on your peers (nobody else can see these):
 {beliefs}
 """
 
+NOTICE_ANSWER = """\
+  * a peer above asked you something you can already answer -> answer it NOW with
+    `send_message`, even if your own file is unfinished: report what you have ALREADY written
+    (an exact name, a signature, where something lives) and say so if it may still change. You
+    do not have to be finished to be useful, and a question you leave standing blocks that peer
+    for another whole round. If what you wrote is settled, `publish_interface` it as well;
+"""
+
 NOTICE_WORKING = """
 Anything you post from now on reaches your peers in round {next}, not this one. So:
-  * a peer gave you what you were waiting for -> apply it and run `scoped_submit`;
-  * your file is already complete and nothing above changes that -> run `scoped_submit` again
-    to confirm you are finished; the run ends once every agent submits in the same round;
+{answer}  * a peer gave you what you were waiting for -> apply it and run `scoped_submit`;
+  * your file is already complete and nothing above changes that -> answer anything still
+    outstanding above first, then run `scoped_submit` again to confirm you are finished;
   * you are still missing something only a peer can give you -> `send_message` to ask, then
     `no_op` to end your turn and wait for the reply next round.
 """
 
 NOTICE_SUBMITTED = """
-You already submitted your patch in round {submitted_in}. You are being given another turn
-because your peers may need something from you -- they can only reach you while you keep
-taking turns. Decide from what is above:
+You already submitted your patch in round {submitted_in}, but you are not sealed off: you keep
+taking turns because information still flows BOTH ways -- peers can reach you, and what they
+send can change what your file ought to say. Your submission is not frozen: if you edit your
+file and run `scoped_submit` again, the new version REPLACES the one you already sent. Decide
+from what is above:
   * a peer asked you for something (a name, a signature, where something lives) -> answer with
     `send_message`, or `publish_interface` the EXACT names you wrote in your file;
-  * a peer told you something that changes your file -> edit it, then `scoped_submit` again;
+  * a peer told you something that changes your file -- a signature you coded against, a name
+    that turned out different, a contract published after you finished -> apply it and run
+    `scoped_submit` again to replace your earlier patch;
   * nothing above concerns you -> run `scoped_submit` again to confirm you are still finished
     (the run ends once every agent submits in the same round).
 """
@@ -327,7 +339,8 @@ def build_notice(r, aid, delivered, beliefs, submitted_in, registry=()):
     if submitted_in:
         parts.append(NOTICE_SUBMITTED.format(submitted_in=submitted_in))
     else:
-        parts.append(NOTICE_WORKING.format(next=r + 2))
+        parts.append(NOTICE_WORKING.format(
+            next=r + 2, answer=(NOTICE_ANSWER if delivered else "")))
     return "".join(parts)
 
 
