@@ -291,10 +291,131 @@ def partition_units(text, agents):
     return slices, shared
 
 
-def build_local_info(meta, agents, include_requirements, partition=False):
+# --------------------------------------------------------------------------- #
+# Redacted-share split (--redact-names): distribute generously, hide names exactly
+# --------------------------------------------------------------------------- #
+_BULLET = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
+
+# Names introduced on ADDED lines, for redaction. Broader than `defined_symbols` (which
+# only sees def/class/UPPER_CASE and is left alone so --partition-issue keeps its current
+# behaviour): also catches annotated attributes and lower-case class fields, which are just
+# as much a contract -- `pinned_changed = pyqtSignal(bool)`, `remote_ids: dict[str, str] =
+# field(...)`, `qt_version: Optional[str]`, `SeedSubjectString = str`.
+# Indentation is capped at 4 spaces so module-level (0) and class-body (4) definitions are
+# captured while ordinary locals inside a method body (8+) are not -- over-redaction would
+# blank out names the agent legitimately owns.
+_ANY_DEF = re.compile(
+    r"^\+ {0,4}(?:async\s+def|def|class)\s+([A-Za-z_]\w*)"      # def / class
+    r"|^\+ {0,4}([A-Za-z_]\w*)\s*:\s*[^=\n]+$"                   # annotated, no value
+    r"|^\+ {0,4}([A-Za-z_]\w*)\s*(?::[^=\n]+)?=(?!=)",           # assignment, annotated or not
+    re.MULTILINE)
+
+
+def introduced_symbols(file_diff_text):
+    """Every name this diff introduces on added lines — the set --redact-names must hide
+    from peers. Deliberately does NOT include names the diff merely *modifies*: those
+    already exist in the repo at base_commit, so a consumer knows them anyway and masking
+    them would only obscure text it could already read in its own file."""
+    out = set()
+    for m in _ANY_DEF.finditer(file_diff_text):
+        out.add(next(g for g in m.groups() if g))
+    return {s for s in out if s not in _NOISE and len(s) > 2}
+
+
+def segment_blocks(text):
+    """Segment into WHOLE thoughts: fenced code blocks, list items (with their
+    continuation lines), and paragraphs. Never splits a sentence.
+
+    This is the deliberate difference from `segment_issue`, which splits prose down to
+    sentences: sentence-level units let the two halves of one bullet land on different
+    agents, so an agent can receive "When dumped, such entries must appear ..." while the
+    sentence defining "such entries" goes to a peer. Keeping bullets intact removes that
+    whole class of dangling reference."""
+    blocks, buf, in_fence = [], [], False
+    def flush():
+        if buf:
+            blocks.append("\n".join(buf))
+            buf.clear()
+    for line in (text or "").splitlines():
+        if line.lstrip().startswith("```"):
+            if in_fence:
+                buf.append(line); flush()
+            else:
+                flush(); buf.append(line)
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            buf.append(line); continue
+        if not line.strip():
+            flush(); continue
+        if _BULLET.match(line):          # a new list item starts a new unit
+            flush()
+        buf.append(line)
+    flush()
+    return [b for b in blocks if b.strip()]
+
+
+def alias_map(agents):
+    """{symbol: alias} over every name ANY agent introduces, stable within the instance.
+    Keyed on `introduced_symbols` (the redaction set), not `defined_symbols`.
+
+    Distinct hidden names must stay distinguishable: if every peer symbol collapsed to one
+    generic <REDACTED>, an agent could not tell whether two masked mentions refer to the
+    same thing, and could not ask a precise question about either. A stable per-symbol tag
+    reveals only *that* a peer owns a name and where it occurs -- never the name."""
+    syms = sorted({s for ag in agents for s in ag.get("introduced_symbols", ())})
+    return {s: f"<PEER-SYMBOL-{i + 1}>" for i, s in enumerate(syms)}
+
+
+def redact(text, hidden, aliases):
+    """Replace each hidden symbol with its stable alias (longest first, so a name that is
+    a prefix of another cannot be partially masked). Word-boundary matched, so a symbol
+    embedded in a longer identifier is left alone."""
+    for s in sorted(hidden, key=len, reverse=True):
+        text = re.sub(rf"\b{re.escape(s)}\b", aliases[s], text)
+    return text
+
+
+def redacted_shares(text, agents, aliases):
+    """Non-exclusive distribution + per-agent redaction. Returns [per-agent [units]].
+
+    A unit goes to EVERY agent whose file it mentions (not to exactly one), so no agent is
+    starved of the text describing its own responsibility -- 91% of requirement bullets
+    mention two or more agents' symbols, which is why exclusive assignment has to take the
+    text away from someone. Units mentioning nobody's symbols are general context and go to
+    all. Secrecy is then enforced token-by-token rather than by withholding whole units."""
+    units = segment_blocks(text)
+    hidden_for = {}
+    for i, ag in enumerate(agents):
+        peers = set()
+        for j, other in enumerate(agents):
+            if j != i:
+                peers |= set(other.get("introduced_symbols", ()))
+        hidden_for[i] = peers - set(ag.get("introduced_symbols", ()))
+
+    shares = [[] for _ in agents]
+    for u in units:
+        tokens = set(_IDENT.findall(u))
+        owners = [i for i, ag in enumerate(agents) if tokens & ag["symbols"]]
+        if not owners:                       # mentions no agent's symbols -> general
+            owners = list(range(len(agents)))
+        for i in owners:
+            shares[i].append(redact(u, hidden_for[i] & tokens, aliases))
+    return shares
+
+
+def build_local_info(meta, agents, include_requirements, partition=False, redact_names=False):
     """Assemble each agent's local_issue.md body. Returns (bodies, unit_counts) where
-    bodies = {agent_idx0: markdown} and unit_counts = {agent_idx0: n_units} (counts are only
-    meaningful in partition mode; {} otherwise).
+    bodies = {agent_idx0: markdown} and unit_counts = {agent_idx0: n_units} (counts are
+    meaningful in partition and redact modes; {} otherwise).
+
+    Redact (redact_names=True, --redact-names) — coordination is forced by hiding NAMES,
+    not by withholding text. Every agent receives every whole bullet/paragraph that mentions
+    its own file, plus all general context; then any identifier a PEER introduces is
+    replaced by a stable `<PEER-SYMBOL-n>` alias. Compared with `partition`, this splits
+    relevance generously (nothing is taken from an agent that needs it) while enforcing
+    secrecy exactly (the token is gone, so it cannot be misrouted). Because the contract is
+    protected token-by-token, `--include-interface` is compatible with this mode.
 
     Default (partition=False) — limited information is enforced by file *scope*, not by
     withholding issue text: EVERY agent receives the FULL problem statement (and full
@@ -311,6 +432,42 @@ def build_local_info(meta, agents, include_requirements, partition=False):
     problem = decode_text(meta.get("problem_statement")).strip()
     requirements = (decode_text(meta.get("requirements")).strip()
                     if include_requirements else "")
+
+    if redact_names:
+        aliases = alias_map(agents)
+        text = problem + (("\n\n" + requirements) if requirements else "")
+        shares = redacted_shares(text, agents, aliases)
+        bodies, unit_counts = {}, {}
+        for i, ag in enumerate(agents):
+            mine = shares[i]
+            unit_counts[i] = len(mine)
+            n_hidden = sum(1 for s, a in aliases.items()
+                           if s not in ag.get("introduced_symbols", ())
+                           and any(a in u for u in mine))
+            sections = [
+                f"## Your responsibility (file: {ag['gold_file']})", "",
+                f"You are responsible for **`{ag['gold_file']}`**.",
+                "",
+                "IMPORTANT: the text below is complete for your file — every passage that "
+                "concerns it is here, unedited except for one thing. Names that ANOTHER "
+                "agent invents have been replaced by placeholders such as "
+                "`<PEER-SYMBOL-1>`. The same placeholder always stands for the same name, "
+                "and a placeholder always marks a real identifier you will have to use "
+                "verbatim. You cannot guess these — ask the agent who owns them with "
+                "`send_message`, and announce your own new public names with "
+                "`publish_interface` so peers can call them.",
+                "",
+                (f"There {'is' if n_hidden == 1 else 'are'} **{n_hidden}** such hidden "
+                 f"name(s) in your text." if n_hidden else
+                 "No peer-owned names appear in your text; your file may still need to be "
+                 "consistent with peers, so coordinate if in doubt."),
+                "", "## The issue, as it concerns your file", "",
+            ]
+            sections += _render_focus_units(mine) if mine else [
+                "(No passage mentions your file's symbols. Coordinate with your peers to "
+                "learn what your file must provide.)"]
+            bodies[i] = "\n".join(sections)
+        return bodies, unit_counts
 
     if partition:
         p_slices, p_shared = partition_units(problem, agents)
@@ -499,7 +656,10 @@ def fetch_distractors(repo, base_commit, gold_files, k, gold_set,
 def build_instance(meta, out_dir, k_distractors, include_requirements,
                    include_interface, emit_gold=False,
                    distractor_source="docker", dockerhub_username="jefzda",
-                   partition_issue=False):
+                   partition_issue=False, redact_names=False):
+    if partition_issue and redact_names:
+        raise SystemExit("--partition-issue and --redact-names are two different splits of "
+                         "the same text; pick one.")
     if partition_issue and include_interface:
         raise SystemExit("--partition-issue and --include-interface are incompatible: the "
                          "shared interface would leak the exact cross-file contract the "
@@ -551,10 +711,12 @@ def build_instance(meta, out_dir, k_distractors, include_requirements,
             "code_symbols": csyms,
             "symbols": anchor_symbols(csyms, gf),
             "defined_symbols": defined_symbols(diff_text),
+            "introduced_symbols": introduced_symbols(diff_text),
         })
 
     local, local_units = build_local_info(meta, agents, include_requirements,
-                                          partition=partition_issue)
+                                          partition=partition_issue,
+                                          redact_names=redact_names)
     interface = parse_interface(meta.get("interface"))
 
     # ---- write folders ----
@@ -570,6 +732,7 @@ def build_instance(meta, out_dir, k_distractors, include_requirements,
         "include_requirements": include_requirements,
         "include_interface": include_interface,
         "partition_issue": partition_issue,
+        "redact_names": redact_names,
         "shared_contract": interface["raw"] if (include_interface and interface["has_contract"]) else None,
         "agents": [],
         "integration": "concatenate agent_<k>.patch in agent index order -> single model_patch",
@@ -601,7 +764,11 @@ def build_instance(meta, out_dir, k_distractors, include_requirements,
                 f"# Target (gold) file is hidden among {len(ag['distractors'])} distractor(s).\n"
                 + "\n".join(ag["scope"]) + "\n"
             )
-        if partition_issue:
+        if redact_names:
+            issue_header = (f"# Issue context for agent_{ag['idx']}\n"
+                            f"# (REDACTED-SHARE: full text for your file, but names other "
+                            f"agents invent are masked as <PEER-SYMBOL-n> — ask for them)\n\n")
+        elif partition_issue:
             issue_header = (f"# Issue context for agent_{ag['idx']}\n"
                             f"# (PARTITIONED: you hold only your slice of the issue — peers "
                             f"hold the rest; coordinate via the message board)\n\n")
@@ -626,7 +793,8 @@ def build_instance(meta, out_dir, k_distractors, include_requirements,
             "gold_changed_lines": ag["gold_lines"],
             # partition mode only: how many issue units were routed exclusively to this
             # agent (0 = it must learn its task entirely over the message board).
-            "local_units": local_units.get(ag["idx"] - 1, None) if partition_issue else None,
+            "local_units": (local_units.get(ag["idx"] - 1, None)
+                            if (partition_issue or redact_names) else None),
         })
 
     # Shared contract: emitted only when --include-interface (else agents discover coupling).
@@ -810,6 +978,13 @@ def main():
                          "rest; symbol-free passages are shared), so cross-file contracts "
                          "must be negotiated over the message board. No full issue text, "
                          "no Key-symbols hint.")
+    ap.add_argument("--redact-names", action="store_true",
+                    help="Redacted-share mode: every agent gets EVERY whole bullet/paragraph "
+                         "mentioning its own file (nothing is taken away), but identifiers a "
+                         "PEER introduces are masked as <PEER-SYMBOL-n>. Coordination is "
+                         "forced by hiding names, not by withholding text. Unlike "
+                         "--partition-issue it never fragments a bullet or starves an agent, "
+                         "and it is compatible with --include-interface.")
     ap.add_argument("--emit-gold", action="store_true",
                     help="Also write each agent's gold.patch (oracle solution) for grade sanity-checks")
     ap.add_argument("--prefix", default="multiagent", help="Prefix namespacing eval output (merge mode)")
@@ -833,7 +1008,8 @@ def main():
                                   emit_gold=args.emit_gold,
                                   distractor_source=args.distractor_source,
                                   dockerhub_username=args.dockerhub_username,
-                                  partition_issue=args.partition_issue)
+                                  partition_issue=args.partition_issue,
+                                  redact_names=args.redact_names)
             tag = "N=1 (degenerate)" if spec["degenerate"] else f"N={spec['num_agents']}"
             contract = "yes" if spec["shared_contract"] else "no"
             print(f"  {spec[KEY_INSTANCE_ID]:<70} {tag:<16} contract={contract}")
