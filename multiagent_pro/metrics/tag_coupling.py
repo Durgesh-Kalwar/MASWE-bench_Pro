@@ -528,6 +528,12 @@ def coupling_for_instance(meta, spec, cache_dir, pre_source, dockerhub_username,
         "method": "static def-use over per-agent gold slices (ClusterChanges/SmartCommit-style)",
         "edges": [{"from": f, "to": t, "kind": k, "symbol": s} for f, t, k, s in edges],
         "label": "coupled" if edges else "decomposable",
+        # BREADTH of coupling, as opposed to len(edges) (its symbol-level volume): how many
+        # distinct agent PAIRS are linked, and how many agents take part at all. One pair
+        # sharing 8 symbols counts once here -- this is the honest "how many agents must
+        # actually talk to each other" measure for ranking instances.
+        "agent_pairs": len({(f, t) for f, t, _, _ in edges}),
+        "coupled_agents": len({f for f, _, _, _ in edges} | {t for _, t, _, _ in edges}),
         "per_agent": per_agent,
         "notes": notes,
         "per_agent_defs": {
@@ -623,6 +629,135 @@ def render_graph_svg(coupling, gold_files):
     return "\n".join(svg) + "\n"
 
 
+
+
+# --------------------------------------------------------------------------- #
+# Prune mode: emit a reduced instance holding only the USEFUL agents
+# --------------------------------------------------------------------------- #
+# Files that cannot affect a test run: prose docs, changelog fragments, CI/build
+# definitions, and front-end style assets. Deliberately an explicit DENYLIST rather than a
+# ".py only" ALLOWLIST -- a non-.py file can still be program input (ansible reads
+# `lib/ansible/config/ansible_builtin_runtime.yml` for module routing, openlibrary renders
+# `templates/*.html` and creates tables from `core/schema.sql`), so extension alone is not
+# evidence a file is inert. Anything not matched here is KEPT.
+_NON_FUNCTIONAL = re.compile(
+    r"(^|/)(changelogs|docs|\.azure-pipelines|\.github|static)/"      # doc & CI trees
+    r"|(^|/)(Makefile|Jenkinsfile|docker-compose\.ya?ml|Dockerfile[^/]*)$"
+    r"|^docker/"                                                      # image build helpers
+    r"|\.(md|rst|less|scss|css)$"                                     # prose & styling
+)
+
+
+def is_non_functional(path):
+    """True if `path` is documentation / changelog / CI / styling — droppable without
+    changing what any test can observe. Everything else is treated as functional."""
+    return bool(_NON_FUNCTIONAL.search(path))
+
+
+# Line-comment syntax we can recognise UNAMBIGUOUSLY. Formats with block comments only
+# (HTML, XML, RST) are deliberately absent: a `<!--` can open a comment that spans lines
+# the hunk never shows, so we would be guessing. Guessing wrong here silently deletes a
+# real change, so an unrecognised format is always treated as substantive.
+_LINE_COMMENT = {".py": "#", ".yml": "#", ".yaml": "#", ".sh": "#", ".toml": "#",
+                 ".cfg": "#", ".ini": "#", ".conf": "#", ".sql": "--", ".less": "//",
+                 ".js": "//", ".go": "//"}
+_HASH_BASENAMES = {"Makefile", "Jenkinsfile", "Dockerfile"}
+
+
+def is_cosmetic_diff(path, diff_text):
+    """True if this slice changes nothing a running program can observe — only comments,
+    blank lines, or reindentation. Used to retire "agents" whose entire task is a typo in
+    a comment (a real case: an ansible slice whose whole diff is `# test entry` ->
+    `# test entries`). Conservative by construction: any changed line that is not
+    provably a comment, and any file whose comment syntax is not unambiguous, makes this
+    return False."""
+    # Creating or deleting a file is NEVER cosmetic, even with zero content lines: an
+    # empty `__init__.py` is what makes a directory an importable package, so dropping
+    # that slice breaks every import beneath it. (Two such slices exist in this dataset.)
+    if re.search(r"^(new|deleted) file mode ", diff_text, re.M):
+        return False
+
+    added, removed = [], []
+    for line in diff_text.splitlines():
+        if line.startswith(("+++", "---")):
+            continue
+        if line.startswith("+"):
+            added.append(line[1:])
+        elif line.startswith("-"):
+            removed.append(line[1:])
+    if not added and not removed:
+        return True
+
+    # Pure reindent / whitespace churn: identical content, in the same order, once
+    # leading and trailing space is ignored.
+    if [s.strip() for s in added if s.strip()] == [s.strip() for s in removed if s.strip()]:
+        return True
+
+    p = Path(path)
+    prefix = _LINE_COMMENT.get(p.suffix) or ("#" if p.name in _HASH_BASENAMES else None)
+    if prefix is None:
+        return False
+    return all(not s.strip() or s.strip().startswith(prefix) for s in added + removed)
+
+
+def prune_instance(meta, coupling, gold_files_by_agent, keep_policy, drop_cosmetic=False):
+    """Return (pruned_meta, kept, dropped) — a metadata.json whose `patch` contains only
+    the gold-file slices worth giving an agent, so `build_multiagent_pro.py --input <dir>`
+    then builds a multi-agent instance with ONLY those agents (N shrinks accordingly).
+
+    keep_policy:
+      docs     [default, safest] drop ONLY provably non-functional files -- documentation,
+               changelog fragments, CI/build definitions, style assets (see
+               is_non_functional). Runtime data a program reads (ansible's
+               ansible_builtin_runtime.yml, openlibrary templates/*.html, core/schema.sql)
+               is KEPT, because extension is not evidence of inertness.
+      python   keep every .py agent, drop everything else. Cruder than `docs`: it also
+               removes template/config/schema files that ARE read at runtime, so the
+               pruned patch is more likely to stop grading as gold.
+      coupled  keep only agents with >= 1 cross-agent def-use edge -- also drops
+               independently-editing Python files. "No coupling" is not "not required",
+               so this is the aggressive setting; validate before trusting it.
+
+    CAUTION: the pruned patch is NO LONGER the graded gold patch. Dropping a file the
+    hidden tests exercise makes the instance ungradable-as-gold; only `--validate`
+    (leave-one-out grading) can prove a file is dispensable. Non-code files are safe by
+    inspection; isolated *Python* files are not. The report records exactly what was
+    dropped so this stays auditable."""
+    gold_by_file = split_gold_by_file(meta["patch"])
+    keep_files, drop_files, cosmetic = [], [], []
+    for aid, gf in gold_files_by_agent.items():
+        if keep_policy == "docs":
+            useful = not is_non_functional(gf)
+        elif keep_policy == "python":
+            useful = gf.endswith(".py")
+        else:
+            useful = coupling["per_agent"].get(aid, {}).get("role") != "isolated"
+        # Regardless of policy, a slice that only edits comments/whitespace cannot change
+        # any observable behaviour -- it is an agent with nothing to do.
+        if useful and drop_cosmetic and is_cosmetic_diff(gf, gold_by_file.get(gf, "")):
+            useful = False
+            cosmetic.append(gf)
+        (keep_files if useful else drop_files).append(gf)
+
+    # Preserve the gold patch's own file order so the pruned patch reads like a subset.
+    ordered = [f for f in gold_by_file if f in set(keep_files)]
+    pruned_patch = "".join(
+        gold_by_file[f] if gold_by_file[f].endswith("\n") else gold_by_file[f] + "\n"
+        for f in ordered)
+
+    pruned = dict(meta)
+    pruned["patch"] = pruned_patch
+    pruned["pruned_from_full_gold"] = {
+        "policy": keep_policy,
+        "drop_cosmetic": drop_cosmetic,
+        "kept_files": ordered,
+        "dropped_files": sorted(drop_files),
+        "dropped_as_cosmetic": sorted(cosmetic),
+        "original_num_files": len(gold_by_file),
+        "warning": "patch is a SUBSET of the dataset gold patch; grade-as-gold is not "
+                   "guaranteed -- confirm with tag_coupling.py --validate",
+    }
+    return pruned, ordered, sorted(drop_files), sorted(cosmetic)
 
 
 # --------------------------------------------------------------------------- #
@@ -745,6 +880,28 @@ def main():
                     help="Also collect every instance's dependency-graph SVG into this "
                          "flat folder as <instance_id>.svg (pushable without the "
                          "per-instance data/caches)")
+    ap.add_argument("--prune-to", default=None, metavar="DIR",
+                    help="Emit REDUCED instances holding only the useful agents: writes "
+                         "DIR/<instance_id>/metadata.json with the gold patch pruned to "
+                         "the kept files, ready for `build_multiagent_pro.py --input DIR`. "
+                         "Selection is controlled by --prune-keep / --prune-min-coupled. "
+                         "The pruned patch is a SUBSET of gold -- verify with --validate.")
+    ap.add_argument("--prune-keep", choices=["docs", "python", "coupled"], default="docs",
+                    help="What counts as a useful agent when pruning. 'docs' (default, "
+                         "safest) drops ONLY documentation/changelog/CI/style files and "
+                         "keeps every file a program can read at runtime; 'python' keeps "
+                         "only .py files (also drops templates/schemas that ARE read at "
+                         "runtime); 'coupled' keeps only agents with >=1 def-use edge "
+                         "(also drops independent Python fixes -- validate before use)")
+    ap.add_argument("--prune-drop-cosmetic", action="store_true",
+                    help="When pruning, ALSO drop any file whose slice only edits "
+                         "comments, blank lines, or indentation (an agent with nothing "
+                         "observable to do). Only applied where the comment syntax is "
+                         "unambiguous; HTML/XML/RST are never judged cosmetic.")
+    ap.add_argument("--prune-min-coupled", type=int, default=0, metavar="N",
+                    help="Only prune instances whose graph links MORE THAN N agents "
+                         "(e.g. 3 -> the >3-coupled-agent set). Default 0 = every "
+                         "instance with at least one edge.")
     ap.add_argument("--validate", action="store_true",
                     help="ALSO grade gold with one agent slice removed at a time through the "
                          "unmodified Pro evaluator and compare against the static edges. "
@@ -763,7 +920,7 @@ def main():
     if not metas:
         raise SystemExit(f"No metadata.json found under {in_dir}/")
 
-    review_entries, targets, rows = [], [], []
+    review_entries, targets, rows, prune_inputs = [], [], [], []
     for m in metas:
         meta = json.loads(m.read_text())
         iid = meta[KEY_INSTANCE_ID]
@@ -792,6 +949,7 @@ def main():
         else:
             gold_files = {f"agent_{i}": gf
                           for i, gf in enumerate(split_gold_by_file(meta["patch"]), start=1)}
+        prune_inputs.append((meta, coupling, gold_files))
         svg = render_graph_svg(coupling, gold_files)
         (inst_dir / "coupling_graph.svg").write_text(svg)
         # PNG twin: VS Code (and most viewers) preview PNGs natively, while .svg files
@@ -831,6 +989,50 @@ def main():
             for e in review_entries:
                 f.write(json.dumps(e) + "\n")
         print(f"\n{len(review_entries)} ambiguous match(es) logged to {review_path} (NOT linked)")
+
+    if args.prune_to:
+        pdir = Path(args.prune_to)
+        pdir.mkdir(parents=True, exist_ok=True)
+        pruned_rows = []
+        for meta, coupling, gold_files in prune_inputs:
+            if coupling["coupled_agents"] <= args.prune_min_coupled:
+                continue
+            pruned, kept, dropped, cosmetic = prune_instance(
+                meta, coupling, gold_files, args.prune_keep, args.prune_drop_cosmetic)
+            d = pdir / meta[KEY_INSTANCE_ID]
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "metadata.json").write_text(json.dumps(pruned, indent=2, ensure_ascii=False))
+            pruned_rows.append({
+                "instance_id": meta[KEY_INSTANCE_ID],
+                # Ranking key: distinct agent PAIRS linked (breadth), not symbol-edge
+                # volume -- one pair sharing many symbols must not outrank a graph that
+                # genuinely spans more agents.
+                "agent_pairs": coupling["agent_pairs"],
+                "coupled_agents": coupling["coupled_agents"],
+                "symbol_edges": len(coupling["edges"]),
+                "agents_before": len(gold_files), "agents_after": len(kept),
+                "kept_files": kept, "dropped_files": dropped,
+                "dropped_as_cosmetic": cosmetic,
+            })
+        pruned_rows.sort(key=lambda r: (-r["agent_pairs"], -r["coupled_agents"],
+                                        -r["symbol_edges"], r["instance_id"]))
+        report = {
+            "policy": args.prune_keep,
+            "min_coupled_agents_exclusive": args.prune_min_coupled,
+            "note": "Pruned patches are SUBSETS of the dataset gold patch. Build with "
+                    f"`python multiagent_pro/build_multiagent_pro.py --mode build --input "
+                    f"{pdir} ...`; confirm gradability with tag_coupling.py --validate.",
+            "instances": pruned_rows,
+        }
+        (pdir / "prune_report.json").write_text(json.dumps(report, indent=2))
+        print(f"\nPruned {len(pruned_rows)} instance(s) -> {pdir}/ (policy={args.prune_keep}, "
+              f"coupled_agents > {args.prune_min_coupled})")
+        print("\n| pairs | coupled | sym.edges | agents before->after | instance |")
+        print("| --- | --- | --- | --- | --- |")
+        for r in pruned_rows:
+            print(f"| {r['agent_pairs']} | {r['coupled_agents']} | {r['symbol_edges']} | "
+                  f"{r['agents_before']}->{r['agents_after']} | {r['instance_id'][:52]} |")
+        print(f"\nreport -> {pdir / 'prune_report.json'}")
 
     validation = {}
     if args.validate:
