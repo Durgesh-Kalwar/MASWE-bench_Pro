@@ -14,9 +14,10 @@ Round model (strict lockstep): at the start of a round the board is FROZEN, and 
 in that round is handed the identical snapshot. Whatever the agents post is collected but
 published only once the round ends -- turn order within a round carries no information
 advantage. Every agent gets a turn every round, including agents that already submitted (so
-a peer's later question can still be answered); the run stops once every agent submits within
-the SAME round. An agent ends its turn by submitting, by `no_op` (a pass: "I'm missing
-information a peer must give me" -- it returns next round), or by exhausting its step budget.
+a peer's later question can still be answered); every one of the --rounds rounds runs, since
+submitting does not end the run (unless --stop-when-all-submitted). An agent ends its turn by
+submitting, by `no_op` (a pass: "I'm missing information a peer must give me" -- it returns
+next round), or by exhausting its step budget.
 
 Delivery is PUSH: there is no read tool. At the round barrier this host computes, per agent,
 which of the round's new messages that agent is entitled to, and INJECTS them into its model
@@ -287,7 +288,8 @@ NOTICE_WORKING = """
 Anything you post from now on reaches your peers in round {next}, not this one. So:
   * a peer gave you what you were waiting for -> apply it and run `scoped_submit`;
   * your file is already complete and nothing above changes that -> run `scoped_submit` again
-    to confirm you are finished; the run ends once every agent submits in the same round;
+    to confirm you are finished (the run continues to the final round regardless, and your
+    patch as it stands then is what gets graded);
   * you are still missing something only a peer can give you -> `send_message` to ask, then
     `no_op` to end your turn and wait for the reply next round.
 """
@@ -299,9 +301,75 @@ taking turns. Decide from what is above:
   * a peer asked you for something (a name, a signature, where something lives) -> answer with
     `send_message`, or `publish_interface` the EXACT names you wrote in your file;
   * a peer told you something that changes your file -> edit it, then `scoped_submit` again;
-  * nothing above concerns you -> run `scoped_submit` again to confirm you are still finished
-    (the run ends once every agent submits in the same round).
+  * nothing above concerns you -> run `scoped_submit` again to confirm you are still finished.
 """
+
+
+# Substrings that identify a host-injected round notice (incoming peer mail) and an agent's
+# own outgoing message. Both are EPHEMERAL: visible for the round they belong to, gone
+# afterwards. Published interfaces are exempt -- the registry reprints them every round, so
+# a contract survives while the chatter that carried it does not.
+_NOTICE_MARK = "--- Round "
+# Exactly what tools/comm/bin/send_message prints on success. Matched on the tool's OWN
+# output rather than on the message text, so an agent quoting its message elsewhere is
+# untouched, and a failed send (unknown recipient, self-addressed) is left in view as the
+# error it is.
+_SENT_MARKS = ("] message sent.", "receive it at the start of the next round")
+
+
+def _is_notice(entry):
+    """A host-injected round notice: the peer mail delivered at the start of some round."""
+    return (entry.get("message_type") == "user"
+            and _NOTICE_MARK in str(entry.get("content") or "")[:40])
+
+
+def _is_own_send(entry):
+    """The result of THIS agent's own successful `send_message`."""
+    if entry.get("message_type") != "observation":
+        return False
+    content = str(entry.get("content") or "")
+    return all(mark in content for mark in _SENT_MARKS)
+
+
+# aid -> index in the (already pruned) history at which the PREVIOUS round's entries begin.
+_prev_round_start = {}
+
+
+def prune_expired_messages(agent, aid):
+    """Expire mail older than one round, leaving every tool call and result untouched.
+
+    Retention is deliberately asymmetric, because the two kinds of message expire for
+    different reasons:
+
+      * a round NOTICE is superseded -- the notice about to be injected carries this round's
+        mail, so every earlier one is stale by construction and all of them go;
+      * an agent's OWN outgoing message survives one extra round, because the reply to a
+        question asked in round N-1 only arrives at the start of round N. Dropping it on the
+        same boundary would show the agent an answer with no memory of what it asked.
+
+    So during round N an agent sees peers' round-(N-1) messages and its own round-(N-1)
+    sends, and nothing older. Everything survives all 6 episodes of the round; only the round
+    boundary expires anything.
+
+    Best-effort and non-fatal: a pruning failure must never take down a paid run.
+    """
+    try:
+        hist = getattr(agent, "history", None)
+        if not isinstance(hist, list):
+            return 0
+        cutoff = _prev_round_start.get(aid, 0)      # where round N-1 began
+        keep = [e for i, e in enumerate(hist)
+                if not (_is_notice(e) or (_is_own_send(e) and i < cutoff))]
+        dropped = len(hist) - len(keep)
+        if dropped:
+            hist[:] = keep
+        # This round's entries start here; next call uses it as the cutoff, which is what
+        # makes an outgoing message live exactly one round longer than a notice.
+        _prev_round_start[aid] = len(hist)
+        return dropped
+    except Exception as e:
+        print(f"    (message pruning skipped: {type(e).__name__}: {e})")
+        return 0
 
 
 def build_notice(r, aid, delivered, beliefs, submitted_in, registry=()):
@@ -344,6 +412,10 @@ def _notify_round(agent, r, aid, delivered, beliefs, submitted_in=None, registry
 
     Best-effort: the round loop must never die over a prompt nicety.
     """
+    # Last round's mail expires now -- both what arrived and what this agent sent.
+    dropped = prune_expired_messages(agent, aid)
+    if dropped:
+        print(f"    [{aid}] pruned {dropped} expired message entry(ies) from context")
     if r == 0:
         return                    # round 1: empty board, nothing to deliver
     try:
@@ -408,7 +480,8 @@ def run_gold(inst_dir, spec):
 # --------------------------------------------------------------------------- #
 # agents mode (real LLM, round-based)
 # --------------------------------------------------------------------------- #
-def run_agents(inst_dir, spec, rounds, steps_per_round, dump_context_enabled=False):
+def run_agents(inst_dir, spec, rounds, steps_per_round, dump_context_enabled=False,
+               stop_when_all_submitted=False):
     import yaml
     sys.path.insert(0, str(Path(__file__).resolve().parent))     # for build_runtime_image
     sys.path.insert(0, str(REPO_DIR / "SWE-agent"))
@@ -540,8 +613,12 @@ def run_agents(inst_dir, spec, rounds, steps_per_round, dump_context_enabled=Fal
         # usable communication counts behind.
         (inst_dir / "comm_stats.json").write_text(json.dumps(stats, indent=2))
         active = [a["id"] for a in spec["agents"] if not retired[a["id"]]]
-        if active and all(submitted.get(aid) for aid in active):
-            print("  all agents submitted in the same round")
+        # Submitting no longer ends the run. An agent that finishes in round 2 keeps taking
+        # turns, because it is the ONLY way a peer can still reach it -- and its patch stays
+        # editable, so a late answer can still change what its file does. The whole round
+        # budget is spent unless --stop-when-all-submitted restores the old behaviour.
+        if stop_when_all_submitted and active and all(submitted.get(aid) for aid in active):
+            print("  all agents submitted in the same round -- stopping early")
             break
         if not active:
             print("  no agents left to run")
@@ -610,7 +687,11 @@ def main():
     ap.add_argument("--output", default="multiagent_pro_out",
                     help="Build-output root with <id>/spec.json + solver.yaml")
     ap.add_argument("--instances", nargs="*", help="Restrict to these instance ids")
-    ap.add_argument("--rounds", type=int, default=4, help="(agents mode) coordination rounds")
+    ap.add_argument("--rounds", type=int, default=10, help="(agents mode) coordination rounds")
+    ap.add_argument("--stop-when-all-submitted", action="store_true",
+                    help="End the run early once every active agent submits in the same "
+                         "round (the old default). Off by default: all --rounds rounds now "
+                         "run, so a peer can still reach an agent that finished early.")
     ap.add_argument("--steps-per-round", type=int, default=6,
                     help="(agents mode) agent.step() calls per agent per round")
     ap.add_argument("--prefix", default="multiagent")

@@ -355,6 +355,126 @@ def segment_blocks(text):
     return [b for b in blocks if b.strip()]
 
 
+# A repo-relative path: at least one "/" and a plausible file/dir tail. Matches both
+# "openlibrary/plugins/worksearch/code.py" and the directory "…/worksearch/schemes/".
+_PATH_RE = re.compile(r"(?:[A-Za-z0-9_.\-]+/)+[A-Za-z0-9_.\-]*")
+
+PATH_MASK = "<A FILE OWNED BY A PEER>"
+
+
+def redact_paths(text, own_file, gold_files, mask=PATH_MASK):
+    """Mask the paths that locate a PEER's gold file. Everything else is left alone.
+
+    What an agent must not be handed is *localization* -- which file implements what, and
+    therefore who owns it. Symbols stay visible (knowing a method is called
+    `process_user_query` does not tell you where it lives or who writes it).
+
+    Masking is keyed on the gold-file list, NOT on "looks like a path": the text is full of
+    slash-bearing tokens that belong to nobody -- prose ("duplicated/skipped"), user-agent
+    strings ("Chrome/"), interpreter paths ("/usr/bin/python3"), and reproduction steps on
+    the reporter's own machine ("/home/user/.ansible.cfg"). Masking those would delete real
+    information and train the agent to read placeholders as noise. Measured over the 50-
+    instance set, a shape-based rule masked 112 such tokens against only 39 genuine ones.
+
+    Matching is on the EXACT file path only -- never on directories. A directory routinely
+    holds several agents' files (four of instance 1's agents live in
+    `openlibrary/plugins/worksearch/schemes/`), so it identifies no single owner: masking it
+    would hide a location from agents who partly own it, and keeping it "because it contains
+    my file" would equally keep it for its co-owners. Directories, the agent's own file, and
+    any path that is not a gold file are all left as written."""
+    others = {g for g in gold_files if g != own_file}
+    return _PATH_RE.sub(
+        lambda m: mask if m.group(0).rstrip("/") in others else m.group(0), text)
+
+
+# One declared interface entry starts at a Name/Class/Function/Method/Type line. Text before
+# the first such line (a preamble like "The golden patch introduces:") stays its own block and
+# is shared, since it attributes nothing to anyone.
+_ITF_SPLIT = re.compile(r"\n(?=\s*(?:Name|Class|Function|Method|Type)\s*[:=])")
+_ITF_PATH = re.compile(r"(?:Path|Location|File)\s*:\s*`?([^`\n,(]+)")
+_ITF_NAME = re.compile(r"(?:Name|Class|Function|Method)\s*[:=]\s*`?([A-Za-z_]\w*)")
+_ITF_STRUCTURED = re.compile(r"^\s*(?:Name|Class|Function|Method|Type)\s*[:=]", re.MULTILINE)
+
+
+def route_interface_blocks(interface_raw, agents):
+    """Give each declared interface entry to the agent whose file it belongs to.
+
+    Returns the entries IN DOCUMENT ORDER as (text, owner_index_or_None); order matters
+    because a lead-in sentence has to stay in front of what it introduces. An entry is owned
+    when it names a gold file
+    (`Path:`/`Location:`/`File:`), else when its declared symbol is introduced by exactly one
+    agent's diff. An entry naming neither is general -- measured here, 71 of 174 blocks name
+    no file, so withholding them would lose the information rather than redistribute it, and
+    they go to everyone.
+
+    This is what makes a consumer ask: the signature a peer invents is listed only in that
+    peer's copy, so the consumer sees the requirement it must satisfy without being told the
+    name to call."""
+    by_file = {a["gold_file"]: i for i, a in enumerate(agents)}
+    return [(b, _itf_owner(b, agents, by_file)) for b in _itf_blocks(interface_raw)]
+
+
+def _is_leadin(text):
+    """A bare lead-in ("The patch introduces a new interface:") rather than an entry.
+
+    It belongs with the entries it introduces, so an agent that owns one still sees it. An
+    agent that owns none must NOT get it alone: a section consisting only of "The patch
+    introduces a new interface:" promises content that was withheld, which is worse than
+    saying nothing. Short and with no backticked symbol -- a real entry names something."""
+    return len(text) < 200 and "`" not in text
+
+
+def _itf_blocks(text):
+    """One block per declared interface entry.
+
+    The dataset writes this field in two shapes and both have to split: structured records
+    that begin at a `Name:`/`Class:`/... line, and free prose where each PARAGRAPH describes
+    one new API ("The `get_with_context` method is introduced in `lib/ansible/plugins/
+    loader.py`. It takes..."). Treating prose as a single block is what made routing a no-op:
+    one giant unattributable entry that went to everyone."""
+    if _ITF_STRUCTURED.search(text):
+        return [b.strip() for b in _ITF_SPLIT.split(text) if b.strip()]
+    return [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+
+
+def _itf_owner(block, agents, by_file):
+    """The agent an entry belongs to, or None when it names nobody.
+
+    Tried in order of how explicit the evidence is: a declared `Path:` field, then a gold
+    file named inline in the prose, then a symbol that exactly one agent's diff introduces.
+    An entry pointing at two different agents' files is ambiguous and stays shared rather
+    than being guessed at."""
+    pm = _ITF_PATH.search(block)
+    if pm:
+        owner = by_file.get(pm.group(1).strip().rstrip("/"))
+        if owner is not None:
+            return owner
+    named = {i for f, i in by_file.items() if f in block}
+    if len(named) == 1:
+        return next(iter(named))
+    nm = _ITF_NAME.search(block)
+    candidates = [nm.group(1)] if nm else re.findall(r"`([A-Za-z_]\w*)`", block)
+    owners = set()
+    for name in candidates:
+        hit = [i for i, a in enumerate(agents) if name in a.get("introduced_symbols", ())]
+        if len(hit) == 1:
+            owners.add(hit[0])
+    return next(iter(owners)) if len(owners) == 1 else None
+
+
+def _render_blocks(units):
+    """Render whole-block units. Unlike `_render_focus_units` (written for one-sentence
+    units), this quotes EVERY line of a multi-line paragraph or list item -- otherwise a
+    block's continuation lines fall out of the blockquote and read as body text."""
+    out = []
+    for u in units:
+        if u.lstrip().startswith("```"):
+            out += ["", u]
+        else:
+            out.append("> " + u.replace("\n", "\n> "))
+    return out
+
+
 def alias_map(agents):
     """{symbol: alias} over every name ANY agent introduces, stable within the instance.
     Keyed on `introduced_symbols` (the redaction set), not `defined_symbols`.
@@ -376,15 +496,30 @@ def redact(text, hidden, aliases):
     return text
 
 
-def redacted_shares(text, agents, aliases):
+def redacted_shares(text, agents, aliases, everyone=False):
     """Non-exclusive distribution + per-agent redaction. Returns [per-agent [units]].
 
     A unit goes to EVERY agent whose file it mentions (not to exactly one), so no agent is
     starved of the text describing its own responsibility -- 91% of requirement bullets
     mention two or more agents' symbols, which is why exclusive assignment has to take the
     text away from someone. Units mentioning nobody's symbols are general context and go to
-    all. Secrecy is then enforced token-by-token rather than by withholding whole units."""
+    all. Secrecy is then enforced token-by-token rather than by withholding whole units.
+
+    `everyone=True` skips relevance filtering and gives every unit to every agent. Used for
+    the `problem_statement`: it is the bug report, which a whole team would read, and it
+    names only ~14% of contract symbols (vs ~60% for `requirements`), so filtering it costs
+    shared context and buys almost no secrecy. Redaction still applies, so the few contract
+    names it does mention stay hidden."""
     units = segment_blocks(text)
+
+    # A token every agent carries cannot discriminate between them, so matching on it sends
+    # the unit to everybody. `anchor_symbols` adds each path component, which means the
+    # top-level package -- "openlibrary", or "lib"/"ansible" -- lands in EVERY agent's set;
+    # one mention of any file path then matched all agents at once and made the relevance
+    # test a no-op. Drop the common core and match on what is actually distinctive.
+    common = set.intersection(*[set(ag["symbols"]) for ag in agents]) if agents else set()
+    distinct = [set(ag["symbols"]) - common for ag in agents]
+
     hidden_for = {}
     for i, ag in enumerate(agents):
         peers = set()
@@ -396,15 +531,20 @@ def redacted_shares(text, agents, aliases):
     shares = [[] for _ in agents]
     for u in units:
         tokens = set(_IDENT.findall(u))
-        owners = [i for i, ag in enumerate(agents) if tokens & ag["symbols"]]
-        if not owners:                       # mentions no agent's symbols -> general
+        if everyone:
             owners = list(range(len(agents)))
+        else:
+            owners = [i for i in range(len(agents)) if tokens & distinct[i]]
+            if not owners:                   # mentions no agent's symbols -> general
+                owners = list(range(len(agents)))
         for i in owners:
             shares[i].append(redact(u, hidden_for[i] & tokens, aliases))
     return shares
 
 
-def build_local_info(meta, agents, include_requirements, partition=False, redact_names=False):
+def build_local_info(meta, agents, include_requirements, partition=False,
+                     redact_names=False, redact_paths_mode=False,
+                     include_interface=False, route_interface=False):
     """Assemble each agent's local_issue.md body. Returns (bodies, unit_counts) where
     bodies = {agent_idx0: markdown} and unit_counts = {agent_idx0: n_units} (counts are
     meaningful in partition and redact modes; {} otherwise).
@@ -433,14 +573,99 @@ def build_local_info(meta, agents, include_requirements, partition=False, redact
     requirements = (decode_text(meta.get("requirements")).strip()
                     if include_requirements else "")
 
-    if redact_names:
-        aliases = alias_map(agents)
-        text = problem + (("\n\n" + requirements) if requirements else "")
-        shares = redacted_shares(text, agents, aliases)
+    if route_interface:
+        # Complete issue and complete requirements, verbatim and identical for everyone. The
+        # ONLY thing an agent does not get is the interface entries belonging to its peers.
+        itf_raw = decode_text(meta.get("interface")).strip()
+        has_itf = bool(itf_raw) and itf_raw != NO_INTERFACE_SENTINEL
+        entries = route_interface_blocks(itf_raw, agents) if has_itf else []
         bodies, unit_counts = {}, {}
         for i, ag in enumerate(agents):
-            mine = shares[i]
-            unit_counts[i] = len(mine)
+            owned = [t for t, o in entries if o == i]
+            unit_counts[i] = len(owned)
+            sections = [
+                f"## Your responsibility (file: {ag['gold_file']})", "",
+                f"You are responsible for **`{ag['gold_file']}`**.",
+                "",
+                "IMPORTANT: the problem statement and the requirements below are COMPLETE "
+                "and unedited \u2014 nothing about the task has been withheld, shortened or "
+                "reworded. What you are NOT given is the new interfaces your PEERS "
+                "introduce: the last section lists only the entries for your own file, plus "
+                "any that name no file. A name a peer invents cannot be guessed \u2014 ask "
+                "for it with `send_message`, and announce the names you write with "
+                "`publish_interface` so peers can call them.",
+                "", "## Problem statement", "", problem or "(none provided)",
+            ]
+            if requirements:
+                sections += ["", "## Requirements", "", requirements]
+            if has_itf:
+                # Document order, so a lead-in still precedes the entry it introduces.
+                mine = [t for t, o in entries if o in (i, None)]
+                if not owned:
+                    mine = [t for t in mine if not _is_leadin(t)]
+                if mine:
+                    shared_here = any(o is None for t, o in entries if t in mine)
+                    sections += ["", "## New interfaces introduced ("
+                                 + ("yours and unattributed entries" if owned and shared_here
+                                    else "yours" if owned else "unattributed entries") + ")",
+                                 "", "\n\n".join(mine)]
+                # Nothing routed here: no interface section at all. An agent that is told
+                # "none of these are yours" learns that peers introduced something; silence
+                # says only that its own file introduces nothing, which is all it should know.
+            bodies[i] = "\n".join(sections)
+        return bodies, unit_counts
+
+    if redact_paths_mode:
+        # Everyone gets the WHOLE issue and the WHOLE requirements -- no relevance filtering
+        # at all, so no agent can be starved and no bullet can be fragmented. The only thing
+        # withheld is localization: repo paths other than the agent's own are masked, so an
+        # agent knows what the system must do but not which peer's file does which part.
+        bodies, unit_counts = {}, {}
+        full = problem + (("\n\n## Requirements\n\n" + requirements) if requirements else "")
+        # The interface can safely be shared here: it is protected by the SAME path masking,
+        # so an agent reads the signatures it must honour while the `Path:`/`Location:` line
+        # of a peer's entry is blanked -- it learns the contract without learning who owns it.
+        itf_raw = decode_text(meta.get("interface")).strip()
+        if include_interface and itf_raw and itf_raw != NO_INTERFACE_SENTINEL:
+            full += "\n\n## New interfaces introduced\n\n" + itf_raw
+        for i, ag in enumerate(agents):
+            masked = redact_paths(full, ag["gold_file"],
+                                  [a["gold_file"] for a in agents])
+            n_masked = masked.count(PATH_MASK)
+            unit_counts[i] = n_masked
+            sections = [
+                f"## Your responsibility (file: {ag['gold_file']})", "",
+                f"You are responsible for **`{ag['gold_file']}`**.",
+                "",
+                "IMPORTANT: you have the COMPLETE issue and requirements below — nothing "
+                "about the task has been withheld or shortened. The only redaction is "
+                f"**file locations**: paths belonging to your peers appear as "
+                f"`{PATH_MASK}`. Your own file's path is shown normally, so a requirement "
+                "naming it is yours to implement. For any requirement whose location is "
+                "masked, a peer owns it — use `send_message` to agree on who does "
+                "what and on the exact signatures you must share, and `publish_interface` "
+                "to announce anything you define that peers must call.",
+                "",
+                (f"There are **{n_masked}** masked location(s) in your text."
+                 if n_masked else
+                 "No peer-owned file is named in your text."),
+                "", "---", "", masked,
+            ]
+            bodies[i] = "\n".join(sections)
+        return bodies, unit_counts
+
+    if redact_names:
+        aliases = alias_map(agents)
+        # The bug report goes to everyone in full (a whole team reads the ticket, and it
+        # names few contract symbols); only the implementation-specific `requirements` are
+        # distributed by relevance. Both are redacted.
+        prob_shares = redacted_shares(problem, agents, aliases, everyone=True)
+        req_shares = (redacted_shares(requirements, agents, aliases)
+                      if requirements else [[] for _ in agents])
+        bodies, unit_counts = {}, {}
+        for i, ag in enumerate(agents):
+            mine = prob_shares[i] + req_shares[i]
+            unit_counts[i] = len(req_shares[i])
             n_hidden = sum(1 for s, a in aliases.items()
                            if s not in ag.get("introduced_symbols", ())
                            and any(a in u for u in mine))
@@ -461,11 +686,14 @@ def build_local_info(meta, agents, include_requirements, partition=False, redact
                  f"name(s) in your text." if n_hidden else
                  "No peer-owned names appear in your text; your file may still need to be "
                  "consistent with peers, so coordinate if in doubt."),
-                "", "## The issue, as it concerns your file", "",
+                "", "## Problem statement (every agent sees this in full)", "",
             ]
-            sections += _render_focus_units(mine) if mine else [
-                "(No passage mentions your file's symbols. Coordinate with your peers to "
-                "learn what your file must provide.)"]
+            sections += _render_blocks(prob_shares[i])
+            if requirements:
+                sections += ["", "## Requirements that concern your file", ""]
+                sections += (_render_blocks(req_shares[i]) if req_shares[i] else
+                             ["(No requirement mentions your file's symbols. Coordinate "
+                              "with your peers to learn what your file must provide.)"])
             bodies[i] = "\n".join(sections)
         return bodies, unit_counts
 
@@ -656,7 +884,13 @@ def fetch_distractors(repo, base_commit, gold_files, k, gold_set,
 def build_instance(meta, out_dir, k_distractors, include_requirements,
                    include_interface, emit_gold=False,
                    distractor_source="docker", dockerhub_username="jefzda",
-                   partition_issue=False, redact_names=False):
+                   partition_issue=False, redact_names=False,
+                   redact_paths_mode=False, route_interface=False):
+    if sum(bool(x) for x in (partition_issue, redact_names, redact_paths_mode,
+                             route_interface)) > 1:
+        raise SystemExit("--partition-issue, --redact-names, --redact-paths and "
+                         "--route-interface are four different splits of the same text; "
+                         "pick one.")
     if partition_issue and redact_names:
         raise SystemExit("--partition-issue and --redact-names are two different splits of "
                          "the same text; pick one.")
@@ -672,6 +906,14 @@ def build_instance(meta, out_dir, k_distractors, include_requirements,
     gold_by_file = split_gold_by_file(gold)
     gold_files = list(gold_by_file.keys())
     gold_set = set(gold_files)
+    # Files pruned away from the agents but still part of the fix (tag_coupling.py
+    # --prune-to keeps their gold diffs as `fixed_patch`). No agent owns them: they are
+    # off-limits to EVERY agent and merged into the graded patch as-is. Off-limits matters in
+    # full-access mode, where an agent may otherwise edit any file -- one touching a fixed
+    # file would put two diffs for it into the merge, and `git apply` would reject the lot.
+    fixed_patch = meta.get("fixed_patch") or ""
+    fixed_files = list(split_gold_by_file(fixed_patch)) if fixed_patch.strip() else []
+    off_limits = gold_set | set(fixed_files)
     # k == -1 => "full" mode: each agent gets read/write to the ENTIRE repo EXCEPT the gold
     # files owned by the OTHER agents (its own gold file stays editable). Enforcement inverts
     # from an allowlist to a denylist (see aci/tools/scoped_fs/lib/scoped.py), so no distractor
@@ -686,7 +928,7 @@ def build_instance(meta, out_dir, k_distractors, include_requirements,
     if full_access:
         distractors = {gf: [] for gf in gold_files}
     else:
-        distractors = fetch_distractors(repo, base_commit, gold_files, k_distractors, gold_set,
+        distractors = fetch_distractors(repo, base_commit, gold_files, k_distractors, off_limits,
                                         source=distractor_source, image=image)
 
     agents = []
@@ -705,9 +947,10 @@ def build_instance(meta, out_dir, k_distractors, include_requirements,
             "distractors": distractors.get(gf, []),
             "scope": [gf] + distractors.get(gf, []),
             # allow = the classic allowlist (gold + distractors); full = whole repo minus the
-            # deny set below. deny is every OTHER agent's gold file (never this agent's own gf).
+            # deny set below: every OTHER agent's gold file plus every fixed file (never this
+            # agent's own gf).
             "scope_mode": "full" if full_access else "allow",
-            "deny": sorted(gold_set - {gf}) if full_access else [],
+            "deny": sorted(off_limits - {gf}) if full_access else [],
             "code_symbols": csyms,
             "symbols": anchor_symbols(csyms, gf),
             "defined_symbols": defined_symbols(diff_text),
@@ -716,12 +959,20 @@ def build_instance(meta, out_dir, k_distractors, include_requirements,
 
     local, local_units = build_local_info(meta, agents, include_requirements,
                                           partition=partition_issue,
-                                          redact_names=redact_names)
+                                          redact_names=redact_names,
+                                          redact_paths_mode=redact_paths_mode,
+                                          include_interface=include_interface,
+                                          route_interface=route_interface)
     interface = parse_interface(meta.get("interface"))
 
     # ---- write folders ----
     inst_dir = out_dir / instance_id
     inst_dir.mkdir(parents=True, exist_ok=True)
+    fixed_path = inst_dir / "fixed.patch"
+    if fixed_files:
+        fixed_path.write_text(fixed_patch if fixed_patch.endswith("\n") else fixed_patch + "\n")
+    elif fixed_path.exists():
+        fixed_path.unlink()               # a rebuild without fixed files must not keep a stale one
 
     spec = {
         KEY_INSTANCE_ID: instance_id,
@@ -729,13 +980,17 @@ def build_instance(meta, out_dir, k_distractors, include_requirements,
         "base_commit": base_commit,
         "num_agents": len(agents),
         "degenerate": len(agents) == 1,
+        "fixed_files": fixed_files,
         "include_requirements": include_requirements,
         "include_interface": include_interface,
         "partition_issue": partition_issue,
         "redact_names": redact_names,
+        "redact_paths": redact_paths_mode,
+        "route_interface": route_interface,
         "shared_contract": interface["raw"] if (include_interface and interface["has_contract"]) else None,
         "agents": [],
-        "integration": "concatenate agent_<k>.patch in agent index order -> single model_patch",
+        "integration": ("concatenate agent_<k>.patch in agent index order, then fixed.patch "
+                        "(files no agent owns) -> single model_patch"),
         "grade_cmd": (
             f"python multiagent_pro/build_multiagent_pro.py --mode merge --instances {instance_id} "
             f"--output {out_dir} && "
@@ -756,7 +1011,9 @@ def build_instance(meta, out_dir, k_distractors, include_requirements,
                 "# EXCEPT the gold files owned by peers (listed below). Its assigned/primary\n"
                 f"# file is {ag['gold_file']}.\n"
                 "# --- denied (owned by other agents) ---\n"
-                + ("\n".join(ag["deny"]) if ag["deny"] else "(none)") + "\n"
+                + ("\n".join(d for d in ag["deny"] if d in gold_set) or "(none)") + "\n"
+                + ("# --- denied (already fixed: merged into the final patch as-is) ---\n"
+                   + "\n".join(fixed_files) + "\n" if fixed_files else "")
             )
         else:
             (adir / "SCOPE.txt").write_text(
@@ -764,7 +1021,14 @@ def build_instance(meta, out_dir, k_distractors, include_requirements,
                 f"# Target (gold) file is hidden among {len(ag['distractors'])} distractor(s).\n"
                 + "\n".join(ag["scope"]) + "\n"
             )
-        if redact_names:
+        if route_interface:
+            issue_header = (f"# Issue context for agent_{ag['idx']}\n"
+                            f"# (COMPLETE issue + requirements; only the interface entries "
+                            f"owned by PEERS are withheld)\n\n")
+        elif redact_paths_mode:
+            issue_header = (f"# Issue context for agent_{ag['idx']}\n"
+                            f"# (FULL text; only PEER-owned file locations are masked)\n\n")
+        elif redact_names:
             issue_header = (f"# Issue context for agent_{ag['idx']}\n"
                             f"# (REDACTED-SHARE: full text for your file, but names other "
                             f"agents invent are masked as <PEER-SYMBOL-n> — ask for them)\n\n")
@@ -794,11 +1058,12 @@ def build_instance(meta, out_dir, k_distractors, include_requirements,
             # partition mode only: how many issue units were routed exclusively to this
             # agent (0 = it must learn its task entirely over the message board).
             "local_units": (local_units.get(ag["idx"] - 1, None)
-                            if (partition_issue or redact_names) else None),
+                            if (partition_issue or redact_names or redact_paths_mode
+                                or route_interface) else None),
         })
 
     # Shared contract: emitted only when --include-interface (else agents discover coupling).
-    if include_interface:
+    if include_interface and not route_interface:
         (inst_dir / "shared").mkdir(parents=True, exist_ok=True)
         (inst_dir / "shared" / "coordination.md").write_text(
             render_coordination(instance_id, agents, interface))
@@ -940,6 +1205,20 @@ def merge_instance(inst_dir, prefix="multiagent"):
                       "duplicate hunks; the merged patch will likely fail to apply.")
             else:
                 seen_files[f] = p
+    # Files pruned away from the agents are still part of the fix: append their gold diffs,
+    # which no agent owned or was allowed to edit.
+    fixed = inst_dir / "fixed.patch"
+    fixed_text = fixed.read_text() if fixed.exists() else ""
+    if fixed_text.strip():
+        if not fixed_text.endswith("\n"):
+            fixed_text += "\n"
+        for m in re.finditer(r'^diff --git a/(\S+) b/\S+', fixed_text, re.MULTILINE):
+            if m.group(1) in seen_files:
+                print(f"  WARNING: {instance_id}: fixed file '{m.group(1)}' was ALSO modified "
+                      f"by {seen_files[m.group(1)].name} -- the merged patch will likely fail "
+                      "to apply.")
+        merged += fixed_text
+        print(f"  + fixed.patch: {fixed_text.count('diff --git ')} file(s) no agent owns")
     print(f"  merged {len(parts)} patch(es) for {instance_id}")
     return {KEY_INSTANCE_ID: instance_id, KEY_MODEL_PATCH: merged, KEY_PREFIX: prefix}
 
@@ -985,6 +1264,18 @@ def main():
                          "forced by hiding names, not by withholding text. Unlike "
                          "--partition-issue it never fragments a bullet or starves an agent, "
                          "and it is compatible with --include-interface.")
+    ap.add_argument("--route-interface", action="store_true",
+                    help="Give EVERY agent the complete problem statement and complete "
+                         "requirements, verbatim, and route the `interface` field: each "
+                         "declared entry goes to the agent whose file it names (or whose "
+                         "diff introduces its symbol); entries naming no file go to "
+                         "everyone. A peer's new API is the only thing withheld.")
+    ap.add_argument("--redact-paths", action="store_true",
+                    help="Give EVERY agent the complete problem statement and complete "
+                         "requirements, redacting only FILE LOCATIONS that belong to other "
+                         "agents (the agent's own path, and directories containing it, stay "
+                         "visible). Symbols are never masked. Coordination is forced by "
+                         "hiding who owns what, not by withholding text or names.")
     ap.add_argument("--emit-gold", action="store_true",
                     help="Also write each agent's gold.patch (oracle solution) for grade sanity-checks")
     ap.add_argument("--prefix", default="multiagent", help="Prefix namespacing eval output (merge mode)")
@@ -1009,7 +1300,9 @@ def main():
                                   distractor_source=args.distractor_source,
                                   dockerhub_username=args.dockerhub_username,
                                   partition_issue=args.partition_issue,
-                                  redact_names=args.redact_names)
+                                  redact_names=args.redact_names,
+                                  redact_paths_mode=args.redact_paths,
+                                  route_interface=args.route_interface)
             tag = "N=1 (degenerate)" if spec["degenerate"] else f"N={spec['num_agents']}"
             contract = "yes" if spec["shared_contract"] else "no"
             print(f"  {spec[KEY_INSTANCE_ID]:<70} {tag:<16} contract={contract}")

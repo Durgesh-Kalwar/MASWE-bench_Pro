@@ -745,17 +745,30 @@ def prune_instance(meta, coupling, gold_files_by_agent, keep_policy, drop_cosmet
         gold_by_file[f] if gold_by_file[f].endswith("\n") else gold_by_file[f] + "\n"
         for f in ordered)
 
+    # A dropped file stops being an AGENT, not part of the fix. Its gold diff is kept as
+    # `fixed_patch`: no agent owns or edits it, and the builder merges it into every graded
+    # patch. So pruning can never cost a test -- measured, one dropped file in 50 was
+    # load-bearing (openlibrary's docker-compose.yml, read by tests/test_docker_compose.py),
+    # and discarding its diff failed that instance. pruned patch + fixed_patch == gold.
+    fixed = [f for f in gold_by_file if f in set(drop_files)]
+    fixed_patch = "".join(
+        gold_by_file[f] if gold_by_file[f].endswith("\n") else gold_by_file[f] + "\n"
+        for f in fixed)
+
     pruned = dict(meta)
     pruned["patch"] = pruned_patch
+    pruned["fixed_patch"] = fixed_patch
     pruned["pruned_from_full_gold"] = {
         "policy": keep_policy,
         "drop_cosmetic": drop_cosmetic,
         "kept_files": ordered,
         "dropped_files": sorted(drop_files),
+        "fixed_files": fixed,
         "dropped_as_cosmetic": sorted(cosmetic),
         "original_num_files": len(gold_by_file),
-        "warning": "patch is a SUBSET of the dataset gold patch; grade-as-gold is not "
-                   "guaranteed -- confirm with tag_coupling.py --validate",
+        "note": "`patch` holds only the files given to agents. `fixed_patch` holds the "
+                "dropped files' gold diffs; the builder writes it as fixed.patch and the "
+                "merge appends it, so the graded patch still covers every gold file.",
     }
     return pruned, ordered, sorted(drop_files), sorted(cosmetic)
 

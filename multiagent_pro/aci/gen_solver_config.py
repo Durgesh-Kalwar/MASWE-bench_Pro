@@ -54,113 +54,59 @@ COMM_MODES = ("broadcast", "p2p")
 # lines three times is how they drift apart. Note these strings reach SWE-agent as Jinja
 # templates ({{command_docs}} is rendered there), so they are concatenated, never .format()ed.
 # --------------------------------------------------------------------------- #
-SYSTEM_HEAD_SCOPED = """\
-You are ONE of several software-engineering agents collaborating to resolve a GitHub issue
-in a shared repository. The work has been split by file: you OWN exactly one file and may
-read and edit ONLY the files in your scope (run `scoped_list` to see them). Every other
-file in the repo is invisible to you — there is no `bash` tool and no general file access.
+# ONE system prompt, not a set of fragments. The harness cells (broadcast/p2p, scoped/full,
+# beliefs) used to each swap a paragraph in; that made the prompt hard to read and easy to
+# drift. The tool list below is rendered by SWE-agent from the bundle actually installed, so
+# a cell that has `update_belief` documents it there without a paragraph here. NOTE: the text
+# describes BROADCAST delivery and repo-wide access minus peer files -- i.e.
+# `--comm-mode broadcast` with `--distractors -1`. Other cells need it adjusted.
+SYSTEM_PROMPT = """\
+You are one of several software-engineering agents fixing the same GitHub issue in a shared
+repository. You own one file in the repository and you may read and edit anything in this file.
 
-Because each agent sees only its own files, you must COORDINATE. If you define or change
-something a peer depends on (a function, class, or signature they must call), announce it
-with `publish_interface` — publish the EXACT names you actually wrote, and only for files
-you own; publishing a name you have not actually written is REFUSED, because your peers
-will code against whatever you announce. If you need something owned by another file, ask
-for it with `send_message`.
-"""
+Each agent owns one file. You may read and edit anything in the repository except the files
+your peers own; those are invisible to you, and your own file is invisible to them. Run
+`scoped_list` to see both lists.
 
-SYSTEM_HEAD_FULL = """\
-You are ONE of several software-engineering agents collaborating to resolve a GitHub issue
-in a shared repository. Each agent is primarily responsible for one file, but in THIS setting
-you have FULL read/write access to the entire repository — you may read and edit ANY file —
-EXCEPT the files owned by your peers (run `scoped_list` to see your primary file and the
-peer-owned files you may not touch). Those peer files are the only ones off-limits.
+Because your peers cannot read your code, they will not discover the names you choose — you
+have to tell them, and they have to tell you. Ask for whatever you need.
 
-Focus on your assigned file, but edit any other file you need to make the fix complete and
-consistent. Because peers can also edit shared (non-owned) files, COORDINATE: if you change
-something a peer depends on, announce it with `publish_interface` — publish the EXACT names
-you actually wrote, and only for files you own; publishing a name you have not actually
-written is REFUSED, because your peers will code against whatever you announce. If a peer
-owns a file you need changed, ask with `send_message`. Avoid clobbering a shared file
-another agent is actively editing.
-"""
+The problem statement and requirements below are complete and unedited. What you are not
+given is the new interfaces your peers introduce: the interface section lists only the entries
+for your own file, plus any that name no file. The names a peer invents are not there.
 
-# Common to every harness: rounds, and the fact that receiving costs no action.
-DELIVERY_COMMON = """
-WORK PROCEEDS IN ROUNDS, and messages travel one round at a time. You never have to fetch
-them: everything your peers post during a round is DELIVERED to you automatically at the
-start of the next one, and appears in front of you before your turn begins. Likewise,
-anything you post now reaches them next round, not this one — so ask early.
+The run lasts 10 rounds. Each round you get up to 6 steps (tool calls). Messages you send
+during a round arrive at your peers at the start of the next one, and theirs arrive the same
+way. A message goes to every peer at once; you cannot address only one agent.
 
-Interface contracts are different from messages: a message is an event, a contract is
-standing state. Every contract anyone has published — including your own — is listed again
-at the start of EVERY round, so you never have to remember or re-derive a signature. Code
-against the names in that list exactly as written; do not invent your own name for something
-already published there, and do not silently change a signature you published (republish it
-if it must change).
-"""
+When you write a name a peer must call — a function, class, or signature — announce it with
+`publish_interface`, using the exact name you actually wrote. Publishing a name you have not
+written is refused by the tool. Published interfaces persist and are reprinted to everyone at
+the start of every round. Messages are not — they arrive once at the beginning of the round
+and then they are gone.
 
-COORD_BROADCAST = """
-Every message you send goes to ALL of your peers. There is no way to write to just one of
-them, and no way to overhear less than everything: whatever anyone says, everyone gets.
-"""
-
-COORD_P2P = """
-`send_message` may be addressed to ONE peer by id, or to 'all'. A message addressed to a
-single agent is delivered to that agent alone — no one else sees it, so choose the recipient
-who can actually act on it. `publish_interface` always reaches everyone.
-"""
-
-COORD_BELIEFS = """
-You also keep PRIVATE notes on your peers with `update_belief`: what each one owns, what they
-have promised you, what they still owe you, and whether a claim of theirs has actually shown
-up in the code. No peer ever sees your notes, and they are shown back to you at the start of
-every round. Keep them current and use them to decide whom to ask for what.
-"""
-
-SYSTEM_BULLETS = """
-  * Do not guess a name a peer is supposed to define — a wrong guess silently breaks the
-    build. Ask with `send_message`, then run `no_op` to end your turn and wait; you get
-    another turn next round, with their reply already in front of you.
-  * Run `scoped_submit` when your changes are complete. You will still get a turn in later
-    rounds so peers can reach you; if nothing has changed for you, simply `scoped_submit`
-    again to confirm you are finished.
+Your team has 10 rounds to fix the issue. You can submit your patch multiple times. Your patch
+as it stands at the end of the final round is what gets graded to resolve the issue.
 
 Available tools:
 {{command_docs}}
 """
 
-INSTANCE_HEAD = """\
+INSTANCE_PROMPT = """\
 You are working in the repository checked out at {{working_dir}}.
 
 {{problem_statement}}
-
-Reminders:
-- Run `scoped_list` first to see the file(s) you may edit, and `list_agents` to see peers.
-- You never fetch messages: whatever your peers post reaches you automatically at the start
-  of the next round.
-- `publish_interface` anything peers must code against — the exact name you actually wrote.
 """
-
-INSTANCE_BELIEFS = """\
-- `update_belief` to keep private notes on what each peer owns, owes you, and has claimed.
-"""
-
-INSTANCE_TAIL = """\
-- Make the minimal change needed in YOUR file(s); do not try to fix peers' files.
-- Missing something only a peer can tell you? `send_message` to ask, then `no_op` to wait for
-  their reply next round — do not guess.
-- Run `scoped_submit` when done.
-"""
-
 
 def system_template(scope_mode: str, comm_mode: str, beliefs: bool) -> str:
-    head = SYSTEM_HEAD_FULL if scope_mode == "full" else SYSTEM_HEAD_SCOPED
-    coord = COORD_BROADCAST if comm_mode == "broadcast" else COORD_P2P
-    return head + DELIVERY_COMMON + coord + (COORD_BELIEFS if beliefs else "") + SYSTEM_BULLETS
+    """The single system prompt. Arguments are kept so callers need no change, and so a cell
+    that needs different wording has one obvious place to branch."""
+    return SYSTEM_PROMPT
 
 
 def instance_template(beliefs: bool) -> str:
-    return INSTANCE_HEAD + (INSTANCE_BELIEFS if beliefs else "") + INSTANCE_TAIL
+    """The task hand-off: where the repo is, and this agent's (redacted) issue text."""
+    return INSTANCE_PROMPT
 
 
 # --------------------------------------------------------------------------- #
@@ -201,7 +147,7 @@ def materialize_comm_bundle(inst_dir: Path, *, comm_mode: str, beliefs: bool) ->
 
 
 def build_agent_config(spec, agent, inst_dir, *, model, cost_limit, roster, comm_bundle,
-                       api_base=None, call_limit=0, submit_gate=False, last_n_observations=5,
+                       api_base=None, call_limit=0, submit_gate=False, last_n_observations=6,
                        comm_mode="p2p", beliefs=False):
     inst_id = spec["instance_id"]
     aid = agent["id"]
@@ -301,7 +247,7 @@ def build_agent_config(spec, agent, inst_dir, *, model, cost_limit, roster, comm
 
 
 def generate(inst_dir: Path, *, model, cost_limit, dockerhub_username, api_base=None,
-             call_limit=0, submit_gate=False, last_n_observations=5, comm_mode="p2p",
+             call_limit=0, submit_gate=False, last_n_observations=6, comm_mode="p2p",
              beliefs=False):
     spec = json.loads((inst_dir / "spec.json").read_text())
     inst_id = spec["instance_id"]
@@ -371,7 +317,7 @@ def main():
                          "note store no other agent ever sees, shown back to the agent at the "
                          "start of every round and archived per round for analysis. Without "
                          "it, agents must infer whom to address from the messages themselves.")
-    ap.add_argument("--last-n-observations", type=int, default=5, metavar="N",
+    ap.add_argument("--last-n-observations", type=int, default=6, metavar="N",
                     help="Keep the full text of only the last N tool observations per agent; "
                          "older ones are replaced by 'Old environment output: (K lines "
                          "omitted)'. The window spans ALL rounds (SWE-agent has no round "
