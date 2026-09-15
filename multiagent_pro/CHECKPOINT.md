@@ -1488,3 +1488,271 @@ have looked like it completed fine having silently skipped instance 20. Killed a
 newline added, and the loop hardened to `done < <(grep . "$BASE/ids20.txt")` so it cannot
 recur. **Whenever a count is derivable, print it and check it** — `wc -l` said 19 where
 `grep -c .` said 20.
+
+## 12. 2026-09-10/11 — the 50-instance coordination benchmark (upasana27, `multiagent-50-split`)
+
+> **NUMBERING CLASH — read before merging.** `main` also has a §12, describing different work
+> (the reciprocity confound and the coupled-20 set, commits `8202896`..`555b32b`). This branch
+> forked from `31bf83c`, before that landed, so the two §12s are unrelated. Renumber one side
+> when the branches are reconciled; do not assume a §12 reference means the same thing on both.
+
+Four commits (`cb386e4`, `377a1e4`, `a730fe9`, `40366c3`) replacing how the issue text is split
+across agents, plus a new 50-instance benchmark built on it.
+
+### 12.1 The problem with `--partition-issue`
+
+The original split assigned each issue/requirement unit to exactly ONE agent, which forces one
+mechanism to do two incompatible jobs: decide who NEEDS a passage (wants to be generous) and who
+may not SEE a name (must be exact). Measured over 50 instances, that conflict costs both ways:
+
+- **91%** of requirement bullets mention two or more agents' symbols, so exclusive assignment
+  **starves 21% of agent-slots** of text about their own file;
+- sentence-level segmentation **fragments 10%** of bullets, handing an agent *"When dumped, such
+  entries must appear with the origin marked as REQUIRED"* while the sentence defining *"such
+  entries"* goes to a peer;
+- and giving requirements to everybody instead leaves the consumer already holding the contract
+  name in **64%** of dependencies — no coordination pressure at all.
+
+### 12.2 Three new split modes
+
+| mode | what it withholds | added in |
+| --- | --- | --- |
+| `--redact-names` | nothing; peer-introduced identifiers are masked as stable `<PEER-SYMBOL-n>` aliases | `377a1e4` |
+| `--redact-paths` | only FILE LOCATIONS belonging to other agents | `40366c3` |
+| `--route-interface` | only the dataset `interface` entries a peer owns | `40366c3` |
+
+All four splits (including `--partition-issue`) are **mutually exclusive**, enforced by a
+`sum(...) > 1` guard at the top of `build_instance` — verified by running two together and
+getting the hard exit. Passing none is legal and gives the old default.
+
+`--redact-names` uses stable aliases deliberately: collapsing distinct names to one blank would
+leave an agent unable to tell two hidden names apart or ask a precise question about either.
+Names the diff merely MODIFIES stay visible — they exist at `base_commit`, so the consumer
+already knows them; only the new parameter is secret. It scores 302/302 agents with a non-empty
+slice, 0 fragmented bullets, and 1/184 contract-name leaks versus ~10% under the partition.
+
+### 12.3 `--route-interface` is what the benchmark actually uses
+
+Every agent gets the **complete, verbatim, identical** problem statement and requirements —
+nothing split, nothing masked. Only the dataset's `interface` field is divided: each entry goes
+to the agent whose file it names (`Path:`/`Location:`/`File:`), else to the agent whose diff
+introduces its symbol; entries naming nobody go to everyone. An agent owning no entry gets no
+interface section at all. `shared/coordination.md` is never written in this mode, since
+publishing the whole contract to everyone is exactly what it prevents.
+
+**195 of 448 entries route to a single owner; 73 of 184 DEF-USE dependencies leave the consumer
+with no way to learn the name except to ask.**
+
+Independently re-verified here, not taken on trust: problem_statement + requirements are
+**byte-identical across agents in 50/50 instances**; 101 of 269 agents have a
+`## New interfaces introduced (...)` section and **168 have none**; `shared/` is absent.
+
+Two bugs she found while verifying, either of which would have produced a benchmark with no
+asymmetry at all: the `interface` field comes in two shapes (structured `Name:`/`Path:` records
+AND free prose), and the splitter understood only the first, so prose collapsed into one
+unattributable block routed to everyone; and concatenating owned-then-shared entries put a
+lead-in sentence AFTER what it introduced.
+
+### 12.4 Pruning, and `fixed.patch`
+
+`tag_coupling.py` gained `agent_pairs`/`coupled_agents` metrics and `--prune-to` /
+`--prune-keep` / `--prune-drop-cosmetic`, which drop provably non-functional files (docs,
+changelogs, CI, stylesheets, comment-or-whitespace-only slices). File *creation* is never
+treated as cosmetic — an empty `__init__.py` is a package marker.
+
+The key correction: a file dropped from the agents stops being an **agent**, not part of the
+fix. Its gold diff is kept as `fixed_patch`, written as `fixed.patch`, denied to every agent,
+and appended at merge. That was forced by measurement — grading all 50 pruned gold patches on
+Modal, 49 passed and `openlibrary-92db3454` failed because `tests/test_docker_compose.py` reads
+the `docker-compose.yml` the denylist had called non-functional. With `fixed.patch` the 22
+instances that have one grade 22/22, and agent gold patches + `fixed.patch` reassemble the
+dataset gold file-for-file for all 50.
+
+**Final set (`multiagent_pro_bench50/`): 50 instances, 269 agents, 22 with a `fixed.patch`**,
+3–13 agents each.
+
+### 12.5 Runtime changes that affect every future run
+
+- **10 rounds by default, no early stop.** Submitting no longer ends the run;
+  `--stop-when-all-submitted` restores the old behaviour. `--rounds` default 4 → **10**,
+  `--steps-per-round` → **6**.
+- **Messages expire one round after delivery** (`prune_expired_messages`, now
+  `Scaffold.prune_expired`). Retention is asymmetric on purpose: a round NOTICE is superseded by
+  the next one, so all of them go; an agent's OWN outgoing message survives one extra round,
+  because the reply to a question asked in round N-1 only arrives at the start of round N, and
+  dropping it on the same boundary would show the agent an answer with no memory of what it
+  asked. Published interfaces are exempt — the registry reprints them every round.
+- **A single flat system prompt** replaced the modular `SYSTEM_HEAD_*` / `DELIVERY_COMMON` /
+  `COORD_*` / `SYSTEM_BULLETS` fragments.
+- `run_eval_modal.py` restores Modal grading by shimming the Sandbox filesystem API Modal
+  removed server-side; `swe_bench_pro_eval.py` is imported, never edited.
+
+The removal of the `COORD_*` fragments is the one change with a study-level consequence: it
+collapsed broadcast, p2p and p2p+beliefs to an **identical** system prompt (`system_template()`
+ignored all three of its arguments, and the flat prompt hardcoded *"A message goes to every peer
+at once; you cannot address only one agent"*). They are restored in §13.3 — without them the
+harness comparison cannot run on this branch at all.
+
+## 13. 2026-09-12 — mini-swe-agent as a second scaffold (`comm-harness-50`)
+
+Branched from `multiagent-50-split` at `40366c3`. Goal: run the same three harness cells, on the
+same bench50 instances, under **two agent frameworks**, so "scaffold" becomes a second study
+variable measured against an otherwise identical harness.
+
+Motivation: SWE-agent's fixed tool surface is restrictive, and the first broadcast run on this
+branch showed exactly why — `agent_2` issued **20 `scoped_insert` calls, all 20 rejected** with
+the identical `IndentationError at line 713`, never adjusted the indentation, and finished with
+a 0-byte patch. mini-swe-agent gives the model raw bash and a ~190-line agent loop.
+
+### 13.1 The scaffold adapter (`aci/scaffolds.py`)
+
+One round loop, two backends. The barrier, board, notices, registry, beliefs and `comm_stats`
+stay in `orchestrate.py` and are shared; only framework mechanics live behind the protocol:
+
+```python
+class Scaffold(Protocol):
+    start() / inject(text) / step() -> StepResult / read_file / write_file
+    collect_diff(pathspec) / prune_expired() / close()
+    messages, n_steps
+```
+
+That sharing IS the point: anything the two backends do not share silently confounds the
+comparison. `StepResult` normalizes the three genuine differences — how a step is reported
+(StepOutput with tool_calls vs a dict of raw bash output), how submission is signalled
+(`exit_status "submitted (...)"` vs a `Submitted` exception), and what "done" means (SWE-agent's
+`done` covers ~10 outcomes of which only one is a real submission, so `done` and `submitted` are
+separate fields).
+
+`orchestrate.py` picks the backend from `comm_mode.json`'s new `scaffold` key — the same
+single-source-of-truth rule the harness already used, since the artifacts on disk
+(`solver.yaml` vs `mini.yaml`) have already committed to it.
+
+**No SWE-agent behaviour changed**, and that was verified rather than assumed: `build_notice`
+output is **byte-identical** pre/post refactor across all six notice shapes, and message expiry
+drops the same 3 entries with identical survivors.
+
+### 13.2 Scope enforcement (`aci/mini_scaffold.py`)
+
+The one hard problem. SWE-agent enforces file scope by WITHHOLDING TOOLS — with raw bash that is
+gone, and **reads matter more than writes**: an agent that can `cat` a peer's file never needs to
+ask, so every harness would look identical and the comparison would measure nothing.
+
+`ScopedDockerEnvironment` subclasses mini's `DockerEnvironment` and refuses commands naming a
+peer-owned path, returning a refusal in the same shape as a normal result so the model can
+recover. Matching uses three spellings per denied file (relative, absolute, last-two-components)
+plus a **split-reference rule** requiring the parent dir and basename to both appear — that last
+one exists because `cd lib/ansible/config && cat manager.py` contains no single matching needle.
+Two components, never one: basenames like `__init__.py` recur repo-wide and would refuse an agent
+its OWN files.
+
+Measured, both directions:
+
+```
+peer read / peer write / split ref   ->  REFUSED, not executed, logged
+own file, own tests, dir listing     ->  allowed
+obfuscated reads                     ->  3/3 GOT THROUGH
+```
+
+The leaks are `find -exec`, a `python -c` assembling the path from `chr()`, and shell-variable
+splicing. **This is a guard, not a sandbox**, and the number is published rather than assumed.
+In the real run agents made **zero** violation attempts, so it is not binding in practice.
+Every refusal lands in `<agent>/scope_violations.jsonl` — attempted violations per harness is a
+new metric.
+
+### 13.3 Restoring the harness fragments
+
+`COORD_BROADCAST` / `COORD_P2P` / `COORD_BELIEFS` are back (see §12.5) and are now **shared by
+both scaffolds**, so the paragraph defining the study variable is identical in substance
+whichever framework is driving; only the tool-mechanics wording differs. `system_template()`
+splices them with `str.replace`, never `str.format` — the prompt also carries the jinja literal
+`{{command_docs}}`, which `.format()` would silently collapse to `{command_docs}` and break tool
+documentation for every agent.
+
+Also wired `--rounds` / `--steps-per-round` into the prompt text. The flat prompt hardcoded
+"10 rounds" and "6 steps" as prose while the real values came from flags, so any override made
+the prompt lie to the agent.
+
+### 13.4 Four bugs found while wiring mini up
+
+Each is a silent failure, not a crash, which is why they are worth recording:
+
+1. **`ENTRYPOINT` vs `sleep`.** Pro images set `ENTRYPOINT ["/bin/bash"]`; mini runs
+   `docker run -d <image> sleep N`, which becomes `/bin/bash sleep N` → `cannot execute binary
+   file` → exit 126. The container is dead and **every** later command returns `No such
+   container`. In a bare single-agent run the model burned 38 of 40 steps echoing *"Unable to
+   complete the task due to container access issues."* Fix: `run_args: ["--entrypoint", ""]`.
+2. **`cwd`.** mini defaults to `/`; the images check out at `/app`, so the agent was told the
+   repo lived somewhere empty. Fix: `cwd: /app`.
+3. **Login shell eats `PATH`.** `docker exec ... bash -lc` re-sources `/etc/profile` and
+   discards the `-e PATH`, so the installed comm bins were present in `/root/tools/bin` and
+   still `command not found`. Fix: write `/etc/profile.d/maswe_tools.sh` and symlink into
+   `/usr/local/bin`.
+4. **Half-built object.** `DockerEnvironment.__init__` calls `self.execute("pwd")` before the
+   subclass body runs, so the scope guard must be safe on a partially constructed instance.
+   Fix: class-level empty defaults (denying nothing — that probe is the harness's, not an
+   agent's).
+
+Plus two template bugs: `MINI_INSTANCE` had quadruple braces, and `problem_statement` was never
+seeded into jinja (`StrictUndefined` makes that a hard error, not a blank prompt).
+
+**Cost tracking is inert under mini.** litellm has no price for the gateway's model ids and mini
+*raises* rather than warns, so `MSWEA_COST_TRACKING=ignore_errors` is required — after which
+cost reports **$0.00** and `--per-instance-cost-limit` does nothing. The real ceiling is
+`step_limit` (defaulted to `rounds x steps_per_round`).
+
+### 13.5 Three mini runs on `ansible-949c503f`, and two prompt bugs I caused
+
+Same instance, harness and model as the SWE-agent baseline; broadcast, gpt-4o-mini,
+10 rounds x 6 steps.
+
+| | SWE-agent | mini v1 | mini v2 | mini v3 |
+| --- | --- | --- | --- | --- |
+| FAIL_TO_PASS | 0/4 | 0/4 | 0/4 | 0/4 |
+| PASS_TO_PASS | 66/66 | 66/66 | **0/66** | 31/66 |
+| non-empty patches | 2/4 | 1/4 | 3/4 | **4/4** |
+| patch bytes | 1,245 | 692 | 28,720 | 5,417 |
+| board messages | 15 | 13 | 18 | 19 |
+
+**v1 — the plumbing worked, the prompt did not.** Tools installed, the board filled with real
+question/answer traffic, `scoped_submit` passed the gate, the run graded. But three of four
+agents never edited a file: not one `sed`, `python` or heredoc. `MINI_SYSTEM` listed the comm
+tools under "These commands are on your PATH" and said nothing about editing, while SWE-agent's
+prompt gets `{{command_docs}}` full of `scoped_insert`/`scoped_str_replace`. Coordination was
+salient, editing invisible, and the agents dutifully coordinated. agent_4's only "edit" was
+`echo "class ...: pass" >> file` run five times, producing a patch with the same class appended
+four times.
+
+**v2 — editing appeared, and destroyed a module.** Adding an explicit editing section worked on
+its own terms (`sed` became the top action, `git diff` verification appeared), but PASS_TO_PASS
+went to **0/66**. Cause: `agent_3` hit three consecutive `sed -i` failures
+(`Invalid preceding regular expression`), then fell back to
+`echo "..." > lib/ansible/config/manager.py` -- a **single** `>`, which truncated a 619-line
+core module to 25 lines. Nothing could import it, so the entire suite failed. My v2 prompt
+warned that `>>` appends blindly but never said that `>` DELETES.
+
+**v3 — after warning about truncation.** 4/4 agents produced patches, total 5,417 bytes,
+**zero** truncating redirects, and all four touched files parse cleanly under `ast.parse`
+after the merge. PASS_TO_PASS recovered to 31/66.
+
+The remaining 35 failures are **semantic, not structural**: the merged patch is valid Python
+that does the wrong thing (e.g. `config.py` rewrites `output` handling and dedents a comment
+out of its block without breaking the parse). That is the same class of outcome SWE-agent runs
+produce -- gpt-4o-mini writing incorrect code -- not a scaffold or harness defect. The
+structural edit bug of CHECKPOINT 10.5 is now reachable through a second tool surface: `sed`
+and shell redirection instead of `scoped_insert`.
+
+**Lesson worth keeping:** both v1 and v2 were failures of MY prompt, not of mini-swe-agent, and
+each was invisible in the aggregate score -- v1 and the SWE-agent baseline both read
+"F2P 0/4, P2P 66/66" while one team had done no work at all, and v2 looked like a huge patch
+until you noticed it was a deletion. Read the action histogram and the patch shape before
+reading the grade.
+
+### 13.6 Still open
+
+- The mini prompt now has an editing section and a `>`-truncation warning (§13.5); the
+  remaining gap is model capability on structural Python edits via `sed`, not the prompt.
+- p2p and p2p+beliefs are a flag away on both scaffolds but untested end-to-end.
+- Scope guard leaks 3/3 obfuscated reads (§13.2) — acceptable for non-adversarial agents,
+  but it should be quoted as best-effort in any writeup.
+- The §10.5 / §11 defects are untouched: structural edit bug, edit-failure recovery, false
+  attestation via free-text `send_message`.

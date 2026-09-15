@@ -188,6 +188,17 @@ definer, so consumers must ask over the board for the names), plus symbol-free s
 Pure build-time change — no runtime env var; the solver sees it only as different
 problem-statement content.
 
+**Superseded by three newer splits** (`--redact-names`, `--redact-paths`, `--route-interface`;
+upasana27, CHECKPOINT 12). The ACI-relevant point is that all four are build-time and mutually
+exclusive, and they differ in *what* is withheld rather than in any runtime mechanism:
+`--partition-issue` withholds TEXT (and so starves 21% of agent-slots and fragments 10% of
+bullets), `--redact-names` withholds NAMES via stable `<PEER-SYMBOL-n>` aliases,
+`--redact-paths` withholds LOCATIONS, and `--route-interface` — what `multiagent_pro_bench50/`
+uses — gives every agent the complete, identical problem statement and requirements and divides
+only the dataset `interface` field, so a peer's new API is the sole secret. Under
+`--route-interface` the asymmetry lives entirely in `local_issue.md`; `shared/coordination.md`
+is not written, since publishing the whole contract is what the mode exists to prevent.
+
 **Submit gate (`--submit-gate` at config-gen, OFF by default).** When `SUBMIT_GATE` is set,
 `scoped_submit` runs `scoped_fs/lib/submit_gate.py` before any git work and REFUSES (prints
 the reason, exits 0, emits **no** submission markers and **no** `/root/model.patch`, so the
@@ -391,6 +402,72 @@ distractor was touched, and the integrate→grade path is byte-for-byte the exis
 
 ---
 
+## 4.5 Agent scaffolds — SWE-agent and mini-swe-agent
+
+The harness (round barrier, board, pushed notices, interface registry, beliefs, `comm_stats`)
+is independent of how an individual agent thinks and edits. `aci/scaffolds.py` isolates the
+parts that are not, so the **framework is a second study variable** alongside the
+communication harness:
+
+| | SWE-agent | mini-swe-agent |
+| --- | --- | --- |
+| action surface | declared tools, no bash (`scoped_view`, `scoped_insert`, ...) | **raw bash**, no tool schema |
+| config written | `agent_<k>/solver.yaml` | `agent_<k>/mini.yaml` |
+| notice injection | `agent._append_history({...})` | `agent.add_message("user", ...)` |
+| submission | `exit_status` starts with `"submitted"` | `Submitted` raised when a command's FIRST output line is the sentinel |
+| history elision | `last_n_observations` | none — context grows unbounded |
+| file scope | enforced by WITHHOLDING tools | enforced by `ScopedDockerEnvironment` (below) |
+
+Selected with `gen_solver_config.py --scaffold {swe-agent,mini}` and recorded in
+`comm_mode.json`, which `orchestrate.py` reads back — the artifacts on disk have already
+committed to a framework, so re-specifying it at run time could only disagree.
+
+The `Scaffold` protocol is deliberately small: `start` / `inject` / `step` / `read_file` /
+`write_file` / `collect_diff` / `prune_expired` / `close`, plus `messages` and `n_steps`.
+`StepResult` normalizes the reporting differences; `done` and `submitted` are separate fields
+because SWE-agent's `done` covers ~10 outcomes of which only one is a real submission.
+
+**Keep harness logic in `orchestrate.py` and framework logic in the scaffolds.** Anything the
+two backends do not share confounds the scaffold comparison with an implementation difference.
+The `COORD_BROADCAST` / `COORD_P2P` / `COORD_BELIEFS` fragments are shared for exactly this
+reason: the paragraph defining the communication harness must be identical in substance under
+either framework, and only the tool-mechanics wording around it differs.
+
+### Scope enforcement under raw bash
+
+SWE-agent makes a peer's file unreachable by simply not providing a tool that could open it.
+mini has bash, so that guarantee is gone — and **reads matter more than writes**: an agent that
+can `cat` a peer's file never needs to ask, which would make every communication harness look
+identical and the comparison measure nothing.
+
+`mini_scaffold.ScopedDockerEnvironment` refuses commands naming a peer-owned path before running
+them, returning a refusal in the shape of a normal result so the model can recover, and logging
+every attempt to `<agent>/scope_violations.jsonl`. Matching covers the relative path, the
+absolute path, the last two components, and a split reference (`cd <peer dir> && cat <base>`).
+
+It is a **guard, not a sandbox**. Measured: obvious reads, writes and split references are all
+refused, own files are untouched, and **3 of 3 obfuscated reads get through** (`find -exec`, a
+`python -c` assembling the path from `chr()`, shell-variable splicing). Agents in practice
+attempted zero violations. Quote it as best-effort, never as isolation.
+
+### Operational notes for mini
+
+Three settings are mandatory on Pro images, and each fails **silently** without them:
+
+- `run_args: ["--entrypoint", ""]` — the images set `ENTRYPOINT ["/bin/bash"]`, so mini's
+  `docker run <image> sleep N` becomes `/bin/bash sleep N`, exits 126, and every later command
+  returns `No such container`;
+- `cwd: /app` — mini defaults to `/`, pointing the agent at an empty directory;
+- `MSWEA_COST_TRACKING=ignore_errors` — litellm has no price for the gateway model ids and mini
+  *raises* rather than warns. After this, cost reports **$0.00**, so `--per-instance-cost-limit`
+  is inert and `step_limit` is the real ceiling.
+
+The comm bins are reused **verbatim** across both scaffolds — they are standalone Python reading
+`AGENT_ID` / `COMM_MODE` / `COMM_BOARD` / `AGENTS_ROSTER`, with no framework dependency. Under
+mini they are installed to `/root/tools/bin`, announced through `/etc/profile.d/` and symlinked
+into `/usr/local/bin`, because `docker exec ... bash -lc` is a login shell that re-sources
+`/etc/profile` and discards the `-e PATH`.
+
 ## 5. Usage
 
 ```bash
@@ -410,6 +487,12 @@ python multiagent_pro/aci/gen_solver_config.py --instances <id> --model claude-s
 python multiagent_pro/aci/gen_solver_config.py --instances <id> --model claude-sonnet-4-6 \
     --comm-mode p2p --beliefs          # p2p + private per-peer notes (update_belief)
 #    Full per-cell recipe, incl. keys, grading and how to read comm_stats.json: README 2.1.
+#
+#    The AGENT SCAFFOLD is chosen here too (see 4.5). --scaffold mini writes mini.yaml instead
+#    of solver.yaml and gives the agent raw bash; keep --rounds/--steps-per-round equal to what
+#    orchestrate.py will use, since they are written into the prompt text.
+python multiagent_pro/aci/gen_solver_config.py --instances <id> --model <lm> \
+    --scaffold mini --comm-mode broadcast --rounds 10 --steps-per-round 6
 
 # 2a) Validate the configs without starting anything. NOTE this only checks that solver.yaml
 #     parses under RunSingleConfig -- it never reaches agent.setup(), so it does NOT catch a
@@ -424,7 +507,9 @@ python multiagent_pro/aci/orchestrate.py --mode gold --instances <id> --grade
 #     runtime image automatically on first use; this pre-builds it explicitly if you want.
 python multiagent_pro/aci/build_runtime_image.py <pro_base_image>
 python multiagent_pro/aci/orchestrate.py --mode agents --instances <id> \
-    --rounds 4 --steps-per-round 6 --grade
+    --rounds 10 --steps-per-round 6 --grade
+#     orchestrate reads the scaffold from comm_mode.json; for --scaffold mini also export
+#     MSWEA_COST_TRACKING=ignore_errors (see 4.5) or the run dies at zero API calls.
 ```
 
 ### The swe-rex runtime image (why `agents` mode needs a derived image)

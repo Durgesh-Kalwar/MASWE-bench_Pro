@@ -79,6 +79,37 @@ M(x) = (A, scope, local, integrate, grade)
   the same partition rather than given in full. Per-agent slice sizes land in `spec.json`
   (`local_units`; `0` = that agent must learn its task entirely over the board).
 
+  **Three newer splits supersede it** (upasana27, 2026-09-10/11 — CHECKPOINT 12). The
+  diagnosis: `--partition-issue` forces one mechanism to do two incompatible jobs — decide who
+  NEEDS a passage (wants to be generous) and who may not SEE a name (must be exact). Measured
+  over 50 instances, **91%** of requirement bullets mention two or more agents' symbols, so
+  exclusive assignment **starves 21% of agent-slots** of text about their own file and
+  **fragments 10%** of bullets mid-reference.
+
+  - `--redact-names` — every agent gets every WHOLE bullet mentioning its own file, but
+    identifiers a PEER introduces are masked as stable `<PEER-SYMBOL-n>` aliases (stable, so an
+    agent can still tell two hidden names apart and ask about one). Names the diff merely
+    *modifies* stay visible — they exist at `base_commit` anyway. Scores 302/302 agents with a
+    non-empty slice, 0 fragmented bullets, 1/184 contract leaks vs ~10%.
+  - `--redact-paths` — full text; only FILE LOCATIONS owned by other agents are hidden.
+  - **`--route-interface`** — what `multiagent_pro_bench50/` actually uses. Every agent gets the
+    **complete, verbatim, identical** problem statement and requirements; only the dataset
+    `interface` field is divided, each entry going to the agent whose file it names. An agent
+    owning no entry gets no interface section, and `shared/coordination.md` is never written.
+    195 of 448 entries route to a single owner, and **73 of 184 DEF-USE dependencies leave the
+    consumer with no way to learn the name except to ask.**
+
+  All four are **mutually exclusive** — passing two is a hard exit ("four different splits of
+  the same text; pick one"). Note `--redact-names` is compatible with `--include-interface`
+  (the contract is protected token-by-token) while `--partition-issue` is not.
+
+  **Pruning and `fixed.patch`.** `metrics/tag_coupling.py --prune-to` drops provably
+  non-functional files (docs, changelogs, CI, stylesheets, comment-only slices; file *creation*
+  is never cosmetic — an empty `__init__.py` is a package marker). A dropped file stops being an
+  **agent**, not part of the fix: its gold diff is kept as `fixed.patch`, denied to every agent,
+  and appended at merge. Forced by measurement — grading all 50 pruned gold patches, 49 passed
+  and one failed because a test read the `docker-compose.yml` the denylist called non-functional.
+
 - **`integrate` — patch union.** Because scopes are disjoint, the candidate fix is the plain
   concatenation of each agent's scoped diff (`agent_<k>.patch`) into one `model_patch`.
 
@@ -350,6 +381,42 @@ for root in ("out_broadcast", "out_p2p", "out_p2p_belief"):
 PY
 ```
 
+### 2.2 Choosing the agent scaffold
+
+The same three cells run under either agent framework, selected at generate time alongside the
+harness and recorded in `comm_mode.json`:
+
+```bash
+--scaffold swe-agent     # (default) declared tools, no bash; writes agent_<k>/solver.yaml
+--scaffold mini          # raw bash, ~190-line agent loop; writes agent_<k>/mini.yaml
+```
+
+`orchestrate.py` reads the scaffold back from `comm_mode.json` — the generated configs have
+already committed to one, so there is no run-time flag that could disagree. Design detail and
+the `Scaffold` protocol: `multiagent_aci.md` 4.5.
+
+For mini, two things differ operationally:
+
+```bash
+export MSWEA_COST_TRACKING=ignore_errors    # REQUIRED: litellm has no price for the gateway
+                                            # model ids and mini RAISES rather than warns.
+                                            # Afterwards cost reports $0.00, so
+                                            # --per-instance-cost-limit is inert -- bound the
+                                            # run with --steps-per-round x --rounds instead.
+
+# keep these equal to what orchestrate.py will use: they are written into the prompt text,
+# so an override makes the prompt lie to the agent about its own budget.
+python multiagent_pro/aci/gen_solver_config.py --output $ROOT --instances $INST $MODEL \
+    --scaffold mini --comm-mode broadcast --rounds 10 --steps-per-round 6
+```
+
+**File scope is enforced differently.** SWE-agent withholds any tool that could open a peer's
+file; mini has bash, so `mini_scaffold.ScopedDockerEnvironment` refuses commands that name a
+peer-owned path and logs each attempt to `agent_<k>/scope_violations.jsonl`. It catches the
+obvious forms (`cat`, `sed`, `grep`, `cd <peer dir> && cat <base>`) and **does not** catch
+deliberate obfuscation — measured at 3/3 leaks for `find -exec`, `python -c` with a computed
+path, and shell-variable splicing. Treat it as a guard, not a sandbox.
+
 ### Per-instance artifact tree
 
 ```
@@ -360,7 +427,7 @@ multiagent_pro_out/
     ├── README.md                       # human summary + table + merge/eval commands
     ├── shared/coordination.md          # interface contract — only if --include-interface
     ├── roster.json                     # [{id, gold_file}] (after gen_solver_config)
-    ├── comm_mode.json                  # the communication harness this run used (2.1)
+    ├── comm_mode.json                  # the harness AND scaffold this run used (2.1, 2.2)
     ├── _comm_bundle/                   # the EXACT comm tools that cell ran (materialized here,
     │                                   #   so the harness is archived beside the run)
     ├── board.json                      # every message posted, in publication order
@@ -370,8 +437,11 @@ multiagent_pro_out/
     └── agent_<k>/
         ├── SCOPE.txt                    # gold file + K distractors (read/write allowlist)
         ├── local_issue.md              # FULL problem_statement [+ requirements] + focus highlight
-        ├── solver.yaml                  # generated SWE-agent config (after gen_solver_config)
+        ├── solver.yaml                  # generated SWE-agent config  (--scaffold swe-agent)
+        ├── mini.yaml                    # generated mini-swe-agent config (--scaffold mini)
         ├── traj/round_<n>.json         # this agent's steps in each round
+        ├── context/messages.jsonl      # only with --dump-context: the EXACT prompt per step
+        ├── scope_violations.jsonl      # --scaffold mini: refused attempts to touch a peer file
         ├── beliefs_round_<n>.json      # only with --beliefs: its PRIVATE per-peer notes
         ├── gold.patch                  # only if --emit-gold (oracle for this scope)
         └── agent_<k>.patch             # the agent's scoped diff -> input to merge

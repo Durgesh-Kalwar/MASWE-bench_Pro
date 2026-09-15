@@ -60,6 +60,32 @@ COMM_MODES = ("broadcast", "p2p")
 # a cell that has `update_belief` documents it there without a paragraph here. NOTE: the text
 # describes BROADCAST delivery and repo-wide access minus peer files -- i.e.
 # `--comm-mode broadcast` with `--distractors -1`. Other cells need it adjusted.
+# --------------------------------------------------------------------------- #
+# Communication-harness fragments -- the ONLY text that differs between cells.
+#
+# Shared by both scaffolds on purpose. "Harness" is the study variable, so the paragraph that
+# defines it has to be identical in substance whether the agent is driven by SWE-agent or by
+# mini-swe-agent; anything else would confound the scaffold comparison with a prompt
+# difference. Only the surrounding tool-mechanics wording differs per scaffold.
+# --------------------------------------------------------------------------- #
+COORD_BROADCAST = """
+Every message you send goes to ALL of your peers at once. There is no way to write to just one
+of them, and no way to overhear less than everything: whatever anyone says, everyone gets.
+"""
+
+COORD_P2P = """
+A message may be addressed to ONE peer by id, or to 'all'. A message addressed to a single
+agent is delivered to that agent alone -- no one else sees it, so choose the recipient who can
+actually act on it. A published interface always reaches everyone.
+"""
+
+COORD_BELIEFS = """
+You also keep PRIVATE notes on your peers: what each one owns, what they have promised you,
+what they still owe you, and whether a claim of theirs has actually shown up in the code. No
+peer ever sees your notes, and they are shown back to you at the start of every round. Keep
+them current and use them to decide whom to ask for what.
+"""
+
 SYSTEM_PROMPT = """\
 You are one of several software-engineering agents fixing the same GitHub issue in a shared
 repository. You own one file in the repository and you may read and edit anything in this file.
@@ -75,18 +101,18 @@ The problem statement and requirements below are complete and unedited. What you
 given is the new interfaces your peers introduce: the interface section lists only the entries
 for your own file, plus any that name no file. The names a peer invents are not there.
 
-The run lasts 10 rounds. Each round you get up to 6 steps (tool calls). Messages you send
-during a round arrive at your peers at the start of the next one, and theirs arrive the same
-way. A message goes to every peer at once; you cannot address only one agent.
-
+The run lasts {rounds} rounds. Each round you get up to {steps} steps (tool calls). Messages
+you send during a round arrive at your peers at the start of the next one, and theirs arrive
+the same way.
+{coord}
 When you write a name a peer must call — a function, class, or signature — announce it with
 `publish_interface`, using the exact name you actually wrote. Publishing a name you have not
 written is refused by the tool. Published interfaces persist and are reprinted to everyone at
 the start of every round. Messages are not — they arrive once at the beginning of the round
 and then they are gone.
 
-Your team has 10 rounds to fix the issue. You can submit your patch multiple times. Your patch
-as it stands at the end of the final round is what gets graded to resolve the issue.
+Your team has {rounds} rounds to fix the issue. You can submit your patch multiple times. Your
+patch as it stands at the end of the final round is what gets graded to resolve the issue.
 
 Available tools:
 {{command_docs}}
@@ -98,10 +124,21 @@ You are working in the repository checked out at {{working_dir}}.
 {{problem_statement}}
 """
 
-def system_template(scope_mode: str, comm_mode: str, beliefs: bool) -> str:
-    """The single system prompt. Arguments are kept so callers need no change, and so a cell
-    that needs different wording has one obvious place to branch."""
-    return SYSTEM_PROMPT
+def system_template(scope_mode: str, comm_mode: str, beliefs: bool,
+                    rounds: int = 10, steps_per_round: int = 6) -> str:
+    """The flat system prompt with this cell's coordination paragraph spliced in.
+
+    Substitution is by `str.replace`, never `str.format`: the prompt also carries the jinja
+    literal `{{command_docs}}` that SWE-agent renders later, and `.format()` would silently
+    collapse it to `{command_docs}` and break tool documentation for every agent.
+    """
+    coord = COORD_BROADCAST if comm_mode == "broadcast" else COORD_P2P
+    if beliefs:
+        coord += COORD_BELIEFS
+    return (SYSTEM_PROMPT
+            .replace("{coord}", coord)
+            .replace("{rounds}", str(rounds))
+            .replace("{steps}", str(steps_per_round)))
 
 
 def instance_template(beliefs: bool) -> str:
@@ -147,6 +184,7 @@ def materialize_comm_bundle(inst_dir: Path, *, comm_mode: str, beliefs: bool) ->
 
 
 def build_agent_config(spec, agent, inst_dir, *, model, cost_limit, roster, comm_bundle,
+                      rounds=10, steps_per_round=6,
                        api_base=None, call_limit=0, submit_gate=False, last_n_observations=6,
                        comm_mode="p2p", beliefs=False):
     inst_id = spec["instance_id"]
@@ -191,7 +229,8 @@ def build_agent_config(spec, agent, inst_dir, *, model, cost_limit, roster, comm
             # value, so dropping it is behavior-neutral for models that still accept it.
             "model": model_cfg,
             "templates": {
-                "system_template": system_template(scope_mode, comm_mode, beliefs),
+                "system_template": system_template(scope_mode, comm_mode, beliefs,
+                                                   rounds, steps_per_round),
                 "instance_template": instance_template(beliefs),
                 "next_step_template": "OBSERVATION:\n{{observation}}",
                 "next_step_no_output_template":
@@ -246,9 +285,168 @@ def build_agent_config(spec, agent, inst_dir, *, model, cost_limit, roster, comm
     }
 
 
+# --------------------------------------------------------------------------- #
+# mini-swe-agent config
+# --------------------------------------------------------------------------- #
+MINI_SYSTEM = """\
+You are one of several software-engineering agents fixing the same GitHub issue in a shared
+repository. Each of you owns exactly one file.
+
+YOUR JOB IS TO EDIT YOUR OWN FILE so the issue is resolved. Coordination exists to serve that;
+a round spent only talking is a round wasted. Read your file, work out the change, make it, and
+check that it landed.
+
+You may read and edit anything in the repository EXCEPT the files your peers own -- those are
+invisible to you, and yours are invisible to them. A command touching a peer's file is refused
+without running.
+
+MAKING CHANGES. You have an ordinary shell, so use ordinary tools. Look before you edit and
+verify after:
+
+  sed -n '1,60p' path/to/your_file.py        read a range
+  grep -n "def some_function" path/to/f.py   find the line to change
+  git diff                                   CONFIRM your change is what you meant
+
+NEVER redirect onto a source file with a single `>`. `echo ... > your_file.py` and
+`cat > your_file.py` DELETE the entire file and leave only what you just wrote -- every other
+class and function in it is gone, nothing can import it any more, and the whole test suite
+fails. This is the single most damaging mistake available to you.
+
+`echo ... >>` is not the answer either: it appends to the END of the file, so it cannot put a
+method inside a class and cannot replace anything, and running it twice leaves two copies.
+
+For anything structural, read the file, change it in memory, and write it back in one step:
+
+  python - <<'EOF'
+  import re
+  path = "path/to/your_file.py"
+  src = open(path).read()
+  src = src.replace("old exact text", "new exact text")   # or insert at a located line
+  open(path, "w").write(src)
+  EOF
+
+That is safe because the replacement is computed from the file's real current contents. Quoting
+inside `sed -i` is easy to get wrong -- if a `sed` command fails twice, switch to the heredoc
+above rather than trying a third escaping.
+
+After every edit run `git diff` and read it. If it shows hundreds of REMOVED lines, you have
+destroyed the file: recover immediately with `git checkout -- path/to/your_file.py` and redo the
+change properly. A patch that deletes the module it was meant to extend scores zero.
+
+COORDINATION. Your peers cannot read your code, so they will not discover the names you choose
+-- you have to tell them, and they have to tell you. Ask for what you need, and answer what you
+are asked, even if your own file is unfinished.
+{coord}
+These commands are on your PATH alongside the usual shell tools:
+  list_agents                         who your peers are and which file each owns
+{comm_docs}  no_op                               end your turn early and wait for a reply
+  scoped_submit                       record your patch (you may run it more than once)
+
+Your response must contain exactly ONE bash code block with ONE command (or commands joined by
+&& or ||). Put a THOUGHT section before it explaining your reasoning.
+
+<format_example>
+Your reasoning here.
+
+```bash
+your_command_here
+```
+</format_example>
+
+The run lasts {rounds} rounds. Each round you get up to {steps} steps (commands). Messages you
+send during a round arrive at your peers at the start of the next one, and theirs arrive the
+same way -- so ask early, and keep working while you wait. Published interfaces persist and are
+reprinted to everyone every round; messages are not, they arrive once and are then gone.
+
+Your file as it stands at the end of the final round is what gets graded. Run `scoped_submit`
+whenever your changes are complete; you can edit and submit again if a peer tells you something
+that changes your file.
+"""
+
+MINI_INSTANCE = """\
+The repository is checked out at {{working_dir}}.
+
+{{problem_statement}}
+"""
+
+_MINI_COMM_DOCS = {
+    "broadcast": ("  send_message --message '<text>'      say something to EVERY peer at once\n"
+                  "  publish_interface '<signature>' '<description>'\n"
+                  "                                      announce a name peers must code against\n"),
+    "p2p": ("  send_message <agent_id|all> --message '<text>'\n"
+            "                                      message one peer, or all of them\n"
+            "  publish_interface '<signature>' '<description>'\n"
+            "                                      announce a name peers must code against\n"),
+}
+_MINI_BELIEF_DOC = ("  update_belief <agent_id> --note '<text>'\n"
+                    "                                      private note about a peer; nobody else sees it\n")
+
+
+def build_mini_config(spec, agent, inst_dir, *, model, roster, comm_bundle, api_base,
+                      call_limit, submit_gate, comm_mode, beliefs, rounds, steps_per_round):
+    """mini-swe-agent config for one agent.
+
+    Carries the three fixes the Pro images need, each of which is a silent failure otherwise:
+      * cwd /app        -- mini defaults to "/", so the agent is told the repo is at the wrong
+                           place and finds an empty directory;
+      * --entrypoint "" -- the images set ENTRYPOINT ["/bin/bash"], so mini's
+                           `docker run <image> sleep N` becomes `/bin/bash sleep N`, exits 126,
+                           and EVERY later command returns "No such container";
+      * step_limit      -- litellm has no price for these gateway models and mini reports
+                           $0.00, so cost_limit is inert; the call budget is the real ceiling.
+    """
+    aid = agent["id"]
+    scope_mode = agent.get("scope_mode", "allow")
+    coord = COORD_BROADCAST if comm_mode == "broadcast" else COORD_P2P
+    if beliefs:
+        coord += COORD_BELIEFS
+    docs = _MINI_COMM_DOCS[comm_mode] + (_MINI_BELIEF_DOC if beliefs else "")
+    # MINI_SYSTEM is .format()-safe: unlike SYSTEM_PROMPT it holds no jinja placeholders
+    # (mini renders only the INSTANCE template), so the braces here are all real slots.
+    model_cfg = {"model_name": model, "model_kwargs": {"temperature": 0.0,
+                                                       "drop_params": True}}
+    if api_base:
+        model_cfg["model_kwargs"]["api_base"] = api_base
+    return {
+        "environment": {
+            "environment_class": "mini_scaffold.ScopedDockerEnvironment",
+            "image": spec["image"],
+            "cwd": REPO_ROOT_IN_IMAGE,
+            "run_args": ["--entrypoint", ""],
+            "repo_root": REPO_ROOT_IN_IMAGE,
+            "scope_deny": agent.get("deny", []),
+            "env": {
+                "REPO_ROOT": REPO_ROOT_IN_IMAGE,
+                "SCOPE_FILES": json.dumps(agent["scope"]),
+                "SCOPE_MODE": scope_mode,
+                "SCOPE_DENY": json.dumps(agent.get("deny", [])),
+                "AGENT_ID": aid,
+                "COMM_BOARD": COMM_BOARD_IN_IMAGE,
+                "AGENTS_ROSTER": json.dumps(roster),
+                "COMM_MODE": comm_mode,
+                "SUBMIT_GATE": "1" if submit_gate else "",
+                # The comm bins are installed here by MiniScaffold._install_tools().
+                "PATH": "/root/tools/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:"
+                        "/usr/bin:/sbin:/bin",
+                "PYTHONPATH": "/root/tools/lib",
+            },
+        },
+        "agent": {
+            "system_template": MINI_SYSTEM.format(
+                coord=coord, comm_docs=docs, rounds=rounds, steps=steps_per_round),
+            "instance_template": MINI_INSTANCE,
+            # 0 = unlimited. The orchestrator bounds steps per round itself; this is the
+            # whole-run backstop that replaces the inert cost limit.
+            "step_limit": call_limit or (rounds * steps_per_round),
+            "cost_limit": 0,
+        },
+        "model": model_cfg,
+    }
+
+
 def generate(inst_dir: Path, *, model, cost_limit, dockerhub_username, api_base=None,
              call_limit=0, submit_gate=False, last_n_observations=6, comm_mode="p2p",
-             beliefs=False):
+             beliefs=False, scaffold="swe-agent", rounds=10, steps_per_round=6):
     spec = json.loads((inst_dir / "spec.json").read_text())
     inst_id = spec["instance_id"]
 
@@ -260,21 +458,34 @@ def generate(inst_dir: Path, *, model, cost_limit, dockerhub_username, api_base=
 
     roster = [{"id": a["id"], "gold_file": a["gold_file"]} for a in spec["agents"]]
     (inst_dir / "roster.json").write_text(json.dumps(roster, indent=2))
+    # One source of truth for the cell AND the framework: the artifacts written below
+    # (solver.yaml vs mini.yaml, and which comm bins exist) already commit to both, so
+    # orchestrate.py reads them back rather than taking flags that could disagree.
     (inst_dir / "comm_mode.json").write_text(
-        json.dumps({"mode": comm_mode, "beliefs": bool(beliefs)}, indent=2)
+        json.dumps({"mode": comm_mode, "beliefs": bool(beliefs),
+                    "scaffold": scaffold}, indent=2)
     )
     comm_bundle = materialize_comm_bundle(inst_dir, comm_mode=comm_mode, beliefs=beliefs)
 
     written = []
     for agent in spec["agents"]:
-        cfg = build_agent_config(spec, agent, inst_dir, model=model,
-                                 cost_limit=cost_limit, roster=roster,
-                                 comm_bundle=comm_bundle,
-                                 api_base=api_base, call_limit=call_limit,
-                                 submit_gate=submit_gate,
-                                 last_n_observations=last_n_observations,
-                                 comm_mode=comm_mode, beliefs=beliefs)
-        out = inst_dir / agent["id"] / "solver.yaml"
+        if scaffold == "mini":
+            cfg = build_mini_config(spec, agent, inst_dir, model=model, roster=roster,
+                                    comm_bundle=comm_bundle, api_base=api_base,
+                                    call_limit=call_limit, submit_gate=submit_gate,
+                                    comm_mode=comm_mode, beliefs=beliefs,
+                                    rounds=rounds, steps_per_round=steps_per_round)
+            out = inst_dir / agent["id"] / "mini.yaml"
+        else:
+            cfg = build_agent_config(spec, agent, inst_dir, model=model,
+                                     cost_limit=cost_limit, roster=roster,
+                                     comm_bundle=comm_bundle,
+                                     rounds=rounds, steps_per_round=steps_per_round,
+                                     api_base=api_base, call_limit=call_limit,
+                                     submit_gate=submit_gate,
+                                     last_n_observations=last_n_observations,
+                                     comm_mode=comm_mode, beliefs=beliefs)
+            out = inst_dir / agent["id"] / "solver.yaml"
         out.write_text(yaml.safe_dump(cfg, sort_keys=False, width=100))
         written.append(out)
     return spec["image"], written
@@ -304,6 +515,18 @@ def main():
     ap.add_argument("--per-instance-call-limit", type=int, default=0,
                     help="Hard cap on API calls per agent, independent of $ cost. Extra safety "
                          "net alongside per-instance-cost-limit.")
+    ap.add_argument("--scaffold", choices=("swe-agent", "mini"), default="swe-agent",
+                    help="Agent framework. 'swe-agent' writes agent_<k>/solver.yaml and a "
+                         "function-calling tool surface; 'mini' writes agent_<k>/mini.yaml "
+                         "and gives the agent raw bash, with peer files guarded by "
+                         "mini_scaffold.ScopedDockerEnvironment. Recorded in comm_mode.json "
+                         "so orchestrate.py picks the matching backend automatically.")
+    ap.add_argument("--rounds", type=int, default=10,
+                    help="Rounds the run will use. Only written into the prompt text (the "
+                         "orchestrator owns the real loop) -- keep it equal to "
+                         "orchestrate.py --rounds or the prompt lies to the agent.")
+    ap.add_argument("--steps-per-round", type=int, default=6,
+                    help="Steps per round, same caveat as --rounds.")
     ap.add_argument("--comm-mode", choices=COMM_MODES, default="p2p",
                     help="Communication harness (default: p2p). 'p2p': send_message may be "
                          "addressed to one "
@@ -352,7 +575,9 @@ def main():
                                   call_limit=args.per_instance_call_limit,
                                   submit_gate=args.submit_gate,
                                   last_n_observations=args.last_n_observations,
-                                  comm_mode=args.comm_mode, beliefs=args.beliefs)
+                                  comm_mode=args.comm_mode, beliefs=args.beliefs,
+                                 scaffold=args.scaffold,
+                                 rounds=args.rounds, steps_per_round=args.steps_per_round)
         cell = args.comm_mode + (" + beliefs" if args.beliefs else "")
         print(f"{d.name}: image={image}  harness={cell}  ->  {len(written)} solver config(s)")
 

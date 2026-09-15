@@ -43,7 +43,8 @@ Modes
 gold    No LLM. For each agent, apply its gold.patch inside the image, capture
         `git diff -- <scope>`, write agent_<k>.patch. Verifies the container + scoped-diff
         + integrate + grade path end-to-end, fully offline. (Requires --emit-gold at build.)
-agents  Real LLM solving: start one SWEEnv per agent, drive DefaultAgent.step() in bounded
+agents  Real LLM solving: start one container per agent, drive the configured scaffold's
+        step() (SWE-agent or mini-swe-agent -- see scaffolds.py) in bounded
         rounds with board sync between rounds, then collect scoped diffs. Needs model API
         keys and a working swe-rex boot on the Pro image (see notes at bottom).
 dry     Validate every solver.yaml parses and print the plan; start nothing.
@@ -165,38 +166,7 @@ def merge_board(canonical, incoming):
 # --------------------------------------------------------------------------- #
 # Per-step / per-round trajectory logging (agents mode)
 # --------------------------------------------------------------------------- #
-def _summarize_tool_calls(out):
-    """Pull [{name, args}] out of a StepOutput's tool_calls (litellm's
-    ChatCompletionMessageToolCall.to_dict() shape: {"function": {"name", "arguments"}, ...}).
-    `agent.trajectory` (SWE-agent's own record) drops tool_calls entirely -- this is the only
-    place the structured tool name + args are available, so we capture it here instead.
-    """
-    calls = []
-    for tc in (out.tool_calls or []):
-        fn = tc.get("function", {}) if isinstance(tc, dict) else {}
-        raw_args = fn.get("arguments", "")
-        try:
-            args = json.loads(raw_args) if raw_args else {}
-        except (json.JSONDecodeError, TypeError):
-            args = raw_args
-        calls.append({"name": fn.get("name", ""), "args": args})
-    return calls
-
-
-def _step_record(step_idx, out):
-    return {
-        "step": step_idx,
-        "thought": out.thought,
-        "tool_calls": _summarize_tool_calls(out),
-        "action": out.action,
-        "observation": out.observation,
-        "execution_time": out.execution_time,
-        "done": bool(getattr(out, "done", False)),
-        "exit_status": out.exit_status,
-    }
-
-
-def dump_context(path, agent, r, step_in_round):
+def dump_context(path, sc, r, step_in_round):
     """Append the EXACT prompt the model is about to receive, before this step runs.
 
     `agent.messages` is the post-history-processor view (agents.py:534) -- the same list
@@ -209,12 +179,12 @@ def dump_context(path, agent, r, step_in_round):
     a dump failure must never take down a paid run.
     """
     try:
-        msgs = agent.messages
+        msgs = sc.messages
         path.parent.mkdir(parents=True, exist_ok=True)
         rec = {
             "round": r + 1,
             "step_in_round": step_in_round,
-            "global_step": len(agent.trajectory) + 1,
+            "global_step": sc.n_steps + 1,
             "n_messages": len(msgs),
             "chars": sum(len(str(m.get("content", ""))) for m in msgs),
             "messages": msgs,
@@ -309,69 +279,6 @@ taking turns. Decide from what is above:
 # own outgoing message. Both are EPHEMERAL: visible for the round they belong to, gone
 # afterwards. Published interfaces are exempt -- the registry reprints them every round, so
 # a contract survives while the chatter that carried it does not.
-_NOTICE_MARK = "--- Round "
-# Exactly what tools/comm/bin/send_message prints on success. Matched on the tool's OWN
-# output rather than on the message text, so an agent quoting its message elsewhere is
-# untouched, and a failed send (unknown recipient, self-addressed) is left in view as the
-# error it is.
-_SENT_MARKS = ("] message sent.", "receive it at the start of the next round")
-
-
-def _is_notice(entry):
-    """A host-injected round notice: the peer mail delivered at the start of some round."""
-    return (entry.get("message_type") == "user"
-            and _NOTICE_MARK in str(entry.get("content") or "")[:40])
-
-
-def _is_own_send(entry):
-    """The result of THIS agent's own successful `send_message`."""
-    if entry.get("message_type") != "observation":
-        return False
-    content = str(entry.get("content") or "")
-    return all(mark in content for mark in _SENT_MARKS)
-
-
-# aid -> index in the (already pruned) history at which the PREVIOUS round's entries begin.
-_prev_round_start = {}
-
-
-def prune_expired_messages(agent, aid):
-    """Expire mail older than one round, leaving every tool call and result untouched.
-
-    Retention is deliberately asymmetric, because the two kinds of message expire for
-    different reasons:
-
-      * a round NOTICE is superseded -- the notice about to be injected carries this round's
-        mail, so every earlier one is stale by construction and all of them go;
-      * an agent's OWN outgoing message survives one extra round, because the reply to a
-        question asked in round N-1 only arrives at the start of round N. Dropping it on the
-        same boundary would show the agent an answer with no memory of what it asked.
-
-    So during round N an agent sees peers' round-(N-1) messages and its own round-(N-1)
-    sends, and nothing older. Everything survives all 6 episodes of the round; only the round
-    boundary expires anything.
-
-    Best-effort and non-fatal: a pruning failure must never take down a paid run.
-    """
-    try:
-        hist = getattr(agent, "history", None)
-        if not isinstance(hist, list):
-            return 0
-        cutoff = _prev_round_start.get(aid, 0)      # where round N-1 began
-        keep = [e for i, e in enumerate(hist)
-                if not (_is_notice(e) or (_is_own_send(e) and i < cutoff))]
-        dropped = len(hist) - len(keep)
-        if dropped:
-            hist[:] = keep
-        # This round's entries start here; next call uses it as the cutoff, which is what
-        # makes an outgoing message live exactly one round longer than a notice.
-        _prev_round_start[aid] = len(hist)
-        return dropped
-    except Exception as e:
-        print(f"    (message pruning skipped: {type(e).__name__}: {e})")
-        return 0
-
-
 def build_notice(r, aid, delivered, beliefs, submitted_in, registry=()):
     """The whole of what an agent is told at the start of a round: the standing interface
     contracts, its new mail, its private notes, and what to do next. This IS the delivery
@@ -399,41 +306,33 @@ def build_notice(r, aid, delivered, beliefs, submitted_in, registry=()):
     return "".join(parts)
 
 
-def _notify_round(agent, r, aid, delivered, beliefs, submitted_in=None, registry=()):
-    """Push the round notice into the agent's model context.
+def _notify_round(sc, r, aid, delivered, beliefs, submitted_in=None, registry=()):
+    """Push the round notice into the agent's model context, via whichever scaffold is in use.
 
-    Injected as a plain user turn -- valid after a step because function-calling observations
-    are appended with role "tool" (agents.py _add_templated_messages_to_history). Two SWE-agent
-    constraints pin the dict shape: `_append_history` splats it into
-    `on_query_message_added(**item)`, so no extra keys are allowed, and the `messages` property
-    does an unguarded `entry["agent"]`, so that key is mandatory. message_type "user" (not
-    "observation") is what keeps delivered messages permanently in context -- LastNObservations
-    only ever elides entries typed "observation".
+    This IS the delivery mechanism -- under push there is no tool an agent could call to see
+    any of it -- so both backends must receive byte-identical text; only the injection
+    mechanics differ (see each scaffold's `inject`).
 
-    Best-effort: the round loop must never die over a prompt nicety.
+    Expiry runs FIRST: last round's mail goes before this round's is injected. Best-effort --
+    the round loop must never die over a prompt nicety.
     """
-    # Last round's mail expires now -- both what arrived and what this agent sent.
-    dropped = prune_expired_messages(agent, aid)
+    dropped = sc.prune_expired()
     if dropped:
         print(f"    [{aid}] pruned {dropped} expired message entry(ies) from context")
     if r == 0:
         return                    # round 1: empty board, nothing to deliver
     try:
-        agent._append_history({
-            "role": "user",
-            "content": build_notice(r, aid, delivered, beliefs, submitted_in, registry),
-            "agent": getattr(agent, "name", "primary"),
-            "message_type": "user",
-        })
+        sc.inject(build_notice(r, aid, delivered, beliefs, submitted_in, registry))
     except Exception as e:
         print(f"    (round notice skipped: {type(e).__name__}: {e})")
 
 
-def read_beliefs(env, aid):
+def read_beliefs(sc, aid):
     """This agent's private belief store, or {} if it has written none yet (the file simply
-    does not exist until the first update_belief)."""
+    does not exist until the first update_belief). Takes a scaffold, not an env: both
+    backends expose read_file, so this works unchanged for either."""
     try:
-        data = json.loads(env.read_file(BELIEFS_FILE_IN_IMAGE.format(aid=aid)))
+        data = json.loads(sc.read_file(BELIEFS_FILE_IN_IMAGE.format(aid=aid)))
         return data if isinstance(data, dict) else {}
     except Exception:
         return {}
@@ -486,14 +385,7 @@ def run_agents(inst_dir, spec, rounds, steps_per_round, dump_context_enabled=Fal
     sys.path.insert(0, str(Path(__file__).resolve().parent))     # for build_runtime_image
     sys.path.insert(0, str(REPO_DIR / "SWE-agent"))
     from build_runtime_image import ensure_runtime_image
-    from model_pricing import ensure_registered
-    from sweagent.agent.agents import get_agent_from_config
-    from sweagent.environment.swe_env import SWEEnv
-    from sweagent.run.run_single import RunSingleConfig
-
-    # Bake swe-rex into a derived image once (all agents share the same Pro base). The
-    # solver.yaml files already point at this deterministic tag with pull=never.
-    ensure_runtime_image(spec["image"])
+    from scaffolds import SweAgentScaffold
 
     # The harness is fixed at gen_solver_config time (it decided which comm bins exist in
     # <id>/_comm_bundle), so it is read back rather than re-specified with a flag that could
@@ -503,22 +395,28 @@ def run_agents(inst_dir, spec, rounds, steps_per_round, dump_context_enabled=Fal
     except Exception:
         cell = {"mode": "p2p", "beliefs": False}
     beliefs_on = bool(cell.get("beliefs"))
+    # Which agent framework the configs were generated for. Recorded in comm_mode.json at
+    # generate time for the same reason the harness is: the artifacts on disk (solver.yaml vs
+    # mini.yaml) already committed to it, so re-specifying it here could only disagree.
+    scaffold_name = cell.get("scaffold", "swe-agent")
     print(f"  harness: {cell.get('mode', 'p2p')}"
-          f"{' + beliefs' if beliefs_on else ''}")
+          f"{' + beliefs' if beliefs_on else ''}  |  scaffold: {scaffold_name}")
 
-    envs, agents, retired = {}, {}, {}
+    if scaffold_name == "mini":
+        from mini_scaffold import MiniScaffold as _Scaffold
+    else:
+        _Scaffold = SweAgentScaffold
+        # Bake swe-rex into a derived image once (all agents share the same Pro base). The
+        # solver.yaml files already point at this deterministic tag with pull=never. mini
+        # talks to the Pro image directly and needs no derived runtime.
+        ensure_runtime_image(spec["image"])
+
+    scaffolds, retired = {}, {}
     for a in spec["agents"]:
         aid = a["id"]
-        cfg = RunSingleConfig(**yaml.safe_load((inst_dir / aid / "solver.yaml").read_text()))
-        # Re-register any custom-model pricing gen_solver_config.py saved -- litellm's
-        # model_cost table is process-local, so a fresh orchestrate.py run needs this too.
-        ensure_registered(cfg.agent.model.name)
-        env = SWEEnv.from_config(cfg.env)
-        env.start()
-        agent = get_agent_from_config(cfg.agent)
-        agent.setup(env=env, problem_statement=cfg.problem_statement,
-                    output_dir=Path(cfg.output_dir))
-        envs[aid], agents[aid], retired[aid] = env, agent, False
+        sc = _Scaffold(inst_dir, aid, spec["image"])
+        sc.start()
+        scaffolds[aid], retired[aid] = sc, False
         print(f"  started {aid}")
 
     board = []
@@ -538,14 +436,16 @@ def run_agents(inst_dir, spec, rounds, steps_per_round, dump_context_enabled=Fal
             aid = a["id"]
             if retired[aid]:          # terminal failure only -- NOT "already submitted"
                 continue
-            env, agent = envs[aid], agents[aid]
+            sc = scaffolds[aid]
+            if hasattr(sc, "set_round"):      # mini stamps its scope-violation log
+                sc.set_round(r + 1)
             # The board still goes in even though nothing reads it there: the bins append to
             # it, and --submit-gate's publish check needs the agent's own past announcements.
-            env.write_file(COMM_BOARD_IN_IMAGE, json.dumps(frozen))   # identical for everyone
-            env.write_file(ROUND_FILE_IN_IMAGE, str(r + 1))
+            sc.write_file(COMM_BOARD_IN_IMAGE, json.dumps(frozen))    # identical for everyone
+            sc.write_file(ROUND_FILE_IN_IMAGE, str(r + 1))
             mine = [m for m in deliveries if visible_to(m, aid)]
-            beliefs = read_beliefs(env, aid) if beliefs_on else {}
-            _notify_round(agent, r, aid, mine, beliefs, submitted_round.get(aid), registry)
+            beliefs = read_beliefs(sc, aid) if beliefs_on else {}
+            _notify_round(sc, r, aid, mine, beliefs, submitted_round.get(aid), registry)
             if mine:
                 print(f"    [{aid}] delivered {len(mine)} message(s) from round {r}")
             round_steps = []
@@ -553,9 +453,9 @@ def run_agents(inst_dir, spec, rounds, steps_per_round, dump_context_enabled=Fal
             ctx_path = inst_dir / aid / "context" / "messages.jsonl"
             for k in range(steps_per_round):
                 if dump_context_enabled:      # BEFORE the step: what it sees when deciding
-                    dump_context(ctx_path, agent, r, k + 1)
+                    dump_context(ctx_path, sc, r, k + 1)
                 try:
-                    out = agent.step()
+                    res = sc.step()
                 except Exception as e:
                     # SWE-agent turns most failures into done-steps, but re-raises
                     # TotalCostLimitExceededError -- unguarded that would abort run_agents
@@ -563,31 +463,31 @@ def run_agents(inst_dir, spec, rounds, steps_per_round, dump_context_enabled=Fal
                     print(f"    [{aid}] step raised {type(e).__name__}: {e} -- retiring agent")
                     retired[aid] = True
                     break
-                record = _step_record(len(agent.trajectory), out)
+                record = res.as_record()
                 round_steps.append(record)
                 print(f"    [{aid}] step {record['step']}: {_format_tool_calls(record['tool_calls'])}")
-                if NOOP_MARKER in (out.observation or ""):
+                if NOOP_MARKER in (res.observation or ""):
                     print(f"    [{aid}] passed this round (no_op)")
                     passed = True
                     break             # turn over for this round; agent is NOT done
-                if getattr(out, "done", False):
+                if res.done:
                     # `done` covers ~10 outcomes, only one of which is a real submission
                     # (agents.py sets exit_status "submitted"/"submitted (...)"). The rest --
                     # exit_cost, exit_context, exit_format, exit_command_timeout, exit_forfeit,
                     # exit_error, ... -- mean the agent cannot usefully continue, so retire it
                     # instead of burning a wasted step on it every remaining round.
-                    if str(out.exit_status or "").startswith("submitted"):
+                    if res.submitted:
                         submitted[aid] = True
                         submitted_round.setdefault(aid, r + 1)
                     else:
-                        print(f"    [{aid}] ended: {out.exit_status} -- retiring agent")
+                        print(f"    [{aid}] ended: {res.exit_status} -- retiring agent")
                         retired[aid] = True
                     break
             traj_dir = inst_dir / aid / "traj"
             traj_dir.mkdir(parents=True, exist_ok=True)
             (traj_dir / f"round_{r + 1}.json").write_text(json.dumps(round_steps, indent=2))
             try:            # stage this agent's new messages; do NOT publish them yet
-                posted = json.loads(env.read_file(COMM_BOARD_IN_IMAGE))
+                posted = json.loads(sc.read_file(COMM_BOARD_IN_IMAGE))
                 if not isinstance(posted, list):
                     posted = []
             except Exception:
@@ -598,7 +498,7 @@ def run_agents(inst_dir, spec, rounds, steps_per_round, dump_context_enabled=Fal
             if beliefs_on:
                 # Post-turn state, so the archive shows what the agent believed going INTO
                 # the next round -- which is what the next round's notice will replay.
-                after = read_beliefs(env, aid)
+                after = read_beliefs(sc, aid)
                 (inst_dir / aid / f"beliefs_round_{r + 1}.json").write_text(
                     json.dumps(after, indent=2))
             stats.append(_comm_stats_row(r, aid, mine, posted_now, round_steps,
@@ -626,7 +526,7 @@ def run_agents(inst_dir, spec, rounds, steps_per_round, dump_context_enabled=Fal
 
     for a in spec["agents"]:
         aid = a["id"]
-        env = envs[aid]
+        sc = scaffolds[aid]
         full = a.get("scope_mode") == "full"
         # In "full" (denylist) mode the agent could edit ANY file except peers' gold files, so
         # a["scope"] (= just its own gold file) is NOT the edit boundary -- scoping the diff to
@@ -637,24 +537,15 @@ def run_agents(inst_dir, spec, rounds, steps_per_round, dump_context_enabled=Fal
         # restricted to `scope`, so staging beyond it was never needed.
         pathspec = "" if full else " -- " + " ".join(shlex.quote(f) for f in a["scope"])
         try:
-            # base64 -w0 the diff instead of capturing it raw: env.communicate runs in a pty,
-            # which (a) CRLF-mangles every line and (b) can eat trailing blank/whitespace
-            # context lines -- observed truncating a hunk 2 lines short of its @@ header
-            # count, making `git apply` reject the ENTIRE merged patch as "corrupt patch"
-            # (graded as if the agents did nothing). A single base64 line survives the pty
-            # byte-exact. --no-pager still needed so git never invokes $PAGER in the pty.
-            out = env.communicate(f'cd "${{ROOT:-/app}}" && git add -A{pathspec} && '
-                                  f'git --no-pager diff --cached{pathspec} | base64 -w0',
-                                  timeout=120)
-            diff = base64.b64decode("".join(out.split())).decode("utf-8", errors="replace")
+            diff = sc.collect_diff(pathspec)
             (inst_dir / f"{aid}.patch").write_text(diff)
             print(f"  {aid}: scoped diff -> {aid}.patch ({len(diff.splitlines())} lines)")
         except Exception as e:
-            # Never let one agent's collection failure strand the other agents'
-            # containers -- that leaks disk until the next manual cleanup.
+            # Never let one agent's collection failure strand the other agents' containers --
+            # that leaks disk until the next manual cleanup.
             print(f"  {aid}: diff collection FAILED: {e}")
         finally:
-            env.close()
+            sc.close()
     (inst_dir / "board.json").write_text(json.dumps(board, indent=2))
 
 

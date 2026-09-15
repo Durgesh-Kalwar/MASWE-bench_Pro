@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Finish this agent's turn, under mini-swe-agent.
+#
+# mini has no tool schema and no submit_command: DefaultAgent.has_finished() ends the episode
+# when a command's FIRST output line is the sentinel below. So submission is just a script
+# that prints it -- which is why the coordination gate has to run HERE, before the sentinel is
+# emitted, exactly as tools/scoped_fs/bin/scoped_submit does for SWE-agent.
+#
+# The gate itself (tools/scoped_fs/lib/submit_gate.py) is reused UNCHANGED: it reads
+# COMM_BOARD / REPO_ROOT / AGENT_ID from the environment and knows nothing about either
+# framework. A refusal must exit 0 WITHOUT the sentinel, so the agent keeps stepping and can
+# go satisfy the gate (publish_interface / send_message) itself.
+SENTINEL="COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
+cd "${REPO_ROOT:-${ROOT:-/app}}" || exit 1
+
+if [ -n "${SUBMIT_GATE:-}" ]; then
+    SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+    if ! python3 "$SCRIPT_DIR/../lib/submit_gate.py"; then
+        # submit_gate.py already printed WHY on stdout, which is the model-visible observation.
+        exit 0
+    fi
+fi
+
+# Sentinel FIRST -- has_finished() only looks at line 1. Everything after it is kept as the
+# submission message. The orchestrator independently recomputes the graded diff from the
+# worktree (scoped to this agent's files), so this summary is a signal, not the patch.
+echo "$SENTINEL"
+git --no-pager diff --stat HEAD 2>/dev/null | tail -20
