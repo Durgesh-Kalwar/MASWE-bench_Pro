@@ -8,7 +8,9 @@ SWE-Bench Pro: a benchmark for evaluating LLM agents on long-horizon software-en
 
 ## Submodules
 
-`SWE-agent/` and `mini-swe-agent/` are git submodules (Scale forks, see `.gitmodules`) used to *generate* patches. They are independent agent scaffolds with their own setup. After cloning, run `git submodule update --init --recursive`. Patch *generation* happens there; patch *evaluation* happens in the root scripts.
+`SWE-agent/` and `mini-swe-agent/` are git submodules used to *generate* patches. They are independent agent scaffolds with their own setup. After cloning, run `git submodule update --init --recursive`. Patch *generation* happens there; patch *evaluation* happens in the root scripts.
+
+Both now resolve through **personal forks**, not Scale's repos — `SWE-agent` is pinned at `ddff6a5`, a LiteLLM cost-accounting fix the `multiagent_pro` runs need that upstream will not take. Consequences: a pre-existing checkout must run `git submodule sync --recursive` once or its submodule update will fail, and a local scaffold fix must be pushed to the fork *before* the pin is bumped. See [`docs/submodules.md`](./docs/submodules.md).
 
 ## End-to-end pipeline
 
