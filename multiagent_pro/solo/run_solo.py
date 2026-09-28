@@ -197,15 +197,25 @@ class SoloRunner:
             out = self.agent.step()
         except NonTerminatingException as e:
             # The model WAS called and the parse then failed; run() feeds the error back as a
-            # user turn and continues, so this still counts as one step for alignment.
+            # user turn and continues, so this still counts as one step for alignment. The
+            # thought is recorded even though there is no valid action -- on a format error it is
+            # the only evidence of what the model was trying to do.
             self._account()
+            thought = self._last_thought()
             self.agent.add_message("user", str(e))
-            return StepResult(step=step_no, observation=str(e), exit_status="format_error",
-                              execution_time=time.time() - t0)
+            return StepResult(step=step_no, thought=thought, observation=str(e),
+                              exit_status="format_error", execution_time=time.time() - t0)
         except TerminatingException as e:
             self._account()
+            # Capture thought/action BEFORE appending the termination notice: the model did issue
+            # a command on this step (the submit sentinel, or whatever tripped the limit), and
+            # without this the final step renders in the dashboard with an empty action.
+            thought, action = self._last_thought(), self._last_action()
             self.agent.add_message("user", str(e))
-            return StepResult(step=step_no, observation=str(e), exit_status=type(e).__name__,
+            return StepResult(step=step_no, thought=thought, action=action,
+                              observation=str(e), exit_status=type(e).__name__,
+                              tool_calls=[{"name": _command_name(action),
+                                           "args": {"command": action}}] if action else [],
                               done=True, submitted=isinstance(e, Submitted),
                               execution_time=time.time() - t0)
         except Exception as e:                       # never let one step kill the run
