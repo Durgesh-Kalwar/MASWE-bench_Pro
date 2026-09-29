@@ -270,9 +270,13 @@ class SoloRunner:
             litellm_cost = float(getattr(self.agent.model, "cost", 0.0) or 0.0)
             billed = self.gateway_cost or litellm_cost
             label = _command_name(res.action) or res.exit_status or "-"
+            # flush=True because this log is almost always redirected to a file, where Python
+            # block-buffers stdout: without it `tail -f` shows nothing for minutes and a healthy
+            # run is indistinguishable from a hung one (which cost a diagnosis mid-sweep).
             print(f"  step {i:>3}/{max_steps}  {label:<16} "
                   f"ctx={len(self.agent.messages):>3}msg "
-                  f"tok_in={self.tokens_in:>9,} ${billed:>7.3f}  {res.execution_time:>5.1f}s")
+                  f"tok_in={self.tokens_in:>9,} ${billed:>7.3f}  {res.execution_time:>5.1f}s",
+                  flush=True)
 
             if res.done:
                 stop = "submitted" if res.submitted else (res.exit_status or "done")
@@ -385,7 +389,7 @@ def main():
         max_steps = args.max_steps or spec.get("step_limit") or 250
         print(f"\n=== {idir.name}")
         print(f"    arm={spec.get('arm')} requirements={spec.get('requirements_included')} "
-              f"steps={max_steps} model={spec.get('model')}")
+              f"steps={max_steps} model={spec.get('model')}", flush=True)
         runner = SoloRunner(idir, dump_context=not args.no_dump_context)
         try:
             runner.start()

@@ -9,6 +9,20 @@ must behave as follows: …"). An instance can look solvable because that spec w
 rather than because the task is well posed, and the multi-agent benchmark includes it in every
 agent's issue text. This arm removes it.
 
+## Result (2026-09-28, Opus 5.5)
+
+**34 of 50 bench50 instances resolved with the `requirements` spec withheld** — Pro's full
+criterion, every F2P and P2P test passing. F2P 340/385, P2P 3217/3219, $77.66 total
+(mean $1.55/instance), 87 min at 4 workers, steps 5–37.
+
+Read as **34 solvable, 15 failed on merit, 1 undetermined** — `ansible-811093f0` was cut by the
+cost brake after 22 steps of pure exploration with no edit attempted, so it is not evidence either
+way. Full analysis, per-repo and per-N breakdowns, and the alternative criteria (`f2p_all` → 35,
+`f2p_any` → 43) are in `../CHECKPOINT.md` §14.
+
+These numbers are **not comparable to published SWE-bench Pro results**, which include the
+`requirements` field. `--arm withreq` reproduces the paper's composition if that is wanted.
+
 ## Pipeline
 
 ```bash

@@ -151,6 +151,12 @@ def main():
                     help="what 'solvable without requirements' means. resolved (default): full "
                          "Pro criterion, F2P and P2P all pass. f2p_all: every FAIL_TO_PASS "
                          "passes, P2P damage ignored. f2p_any: at least one F2P passes.")
+    ap.add_argument("--num_workers", type=int, default=8,
+                    help="concurrent grading containers. swe_bench_pro_eval.py defaults to 50, "
+                         "which for a 50-instance cell means ~50 test suites at once -- and a "
+                         "single non-terminating patch has previously pinned a core while "
+                         "allocating ~10 GiB/min, reaching 132 GiB before it was killed "
+                         "(CHECKPOINT 8.9). 8 keeps a bad patch survivable on this box.")
     ap.add_argument("--dockerhub_username", default="jefzda")
     ap.add_argument("--instances", nargs="*",
                     help="restrict to these instance_ids (default: every built instance). Use it "
@@ -181,6 +187,7 @@ def main():
                "--output_dir", str(cell / "eval_out"),
                "--scripts_dir", "run_scripts",
                "--dockerhub_username", args.dockerhub_username,
+               "--num_workers", str(args.num_workers),
                "--use_local_docker"]
         if args.redo:
             cmd.append("--redo")

@@ -1,19 +1,24 @@
 # Checkpoint — multi-agent full-access mode + coordination findings
 
-**Started:** 2026-08-07 · **Last updated:** 2026-08-16 · **Branch:** `main`
+**Started:** 2026-08-07 · **Last updated:** 2026-09-28 · **Branch:** `comm-harness-50`
 
-> ## ▶ START HERE (2026-08-16): read **§9** (newest), then **§8** for the mechanism it tests.
-> §§1-7 are historical: §§1-5 = full-access mode (committed as `4ad402b`), §6 = the
-> coordination mode (`--partition-issue`/`--submit-gate`), §7 = a design study whose open
-> questions §8 **supersedes**. Everything from §8 onward is the current state.
+> ## ▶ START HERE (2026-09-28): read **§14** (newest), then §13 (mini scaffold) and §12
+> (the `--route-interface` split the bench50 set is built on).
 >
-> **One-line status:** lockstep rounds + `no_op` + per-round read gate are implemented and
-> verified. On a second instance (§9) coordination **provably changed real code** — a published
-> `prepare_multipart` contract crossed the board and two consumers coded against it (35/46
-> tests pass across two runs, best results yet). Remaining blockers are NOT the coordination
-> channel: `no_op` livelock (an agent talked for 3 rounds and shipped 0 lines), agents that
-> invent a competing API instead of adopting the published one (reproducible in BOTH runs), and
-> a structural edit bug (§8). **Ranked next steps: §9.3.**
+> **One-line status:** the SOLO BASELINE IS DONE. Opus 5.5 single-agent mini-swe-agent, issue
+> text with the `requirements` spec **withheld**, solves **34 of the 50** bench50 instances under
+> Pro's full criterion ($77.66, 87 min). `solvable.txt` is the filter; the multi-agent phase runs
+> on those 34 and still needs its set rebuilt WITHOUT requirements (§14.8 step 1).
+>
+> **Read §14.4 before swapping models:** Opus 5.5's `reasoning_extraction` classifier makes it
+> return EMPTY completions on the paper's prompt, with no error — every step becomes a
+> `format_error` and the run looks like an ordinary bad agent. Pre-flight any new model.
+>
+> §§1-11 are historical and partly superseded: §§1-5 full-access mode, §6-7 the
+> `--partition-issue` split (replaced by §12), §8 lockstep rounds (pull-based comms, replaced by
+> §10's push), §9 the defect classes that still stand, §10-11 the three communication harnesses
+> and the 20-instance sweep. **§12 renumbering clash with `main` still unresolved — see §12's
+> own note.**
 
 This file is the resume anchor: where the work stands, what was learned, and what to pick up
 next. Feature docs live in `README.md` (§scope) and `multiagent_aci.md` (§2.5); this file is
@@ -1756,3 +1761,184 @@ reading the grade.
   but it should be quoted as best-effort in any writeup.
 - The §10.5 / §11 defects are untouched: structural edit bug, edit-failure recovery, false
   attestation via free-text `send_message`.
+
+## 14. 2026-09-28 — the solo baseline: 34/50 solvable without the requirements spec
+
+Branch `comm-harness-50`. Commits `8be4c86`, `5cc8fa0` (`multiagent_pro/solo/`).
+
+### 14.1 Why this ran before any multi-agent work
+
+bench50 gives every agent the dataset's `requirements` field, which is not background — it is a
+prose implementation spec. Measured across the set it runs 804–2578 characters of the form
+*"Replace all remaining direct uses of `UnsafeProxy` with `wrap_var(...)`"*, *"`wrap_var(v)` must
+behave as follows: …"* — close to a description of the gold patch. An instance can therefore look
+solvable because the spec was handed over rather than because the task is well posed.
+
+The control: **one agent, the whole repo, problem statement + interface, NO requirements.** Only
+instances that survive it belong in the multi-agent grid, because on the rest a coordination
+result would be measuring whether the spec was copied correctly.
+
+### 14.2 Headline result
+
+**34 of 50 resolved (68%)** under Pro's real criterion — every FAIL_TO_PASS *and* PASS_TO_PASS
+test passing. Opus 5.5 (`aws/claude5_5_opus`), single-agent mini-swe-agent, 250-step budget,
+$5/instance cost limit.
+
+| | |
+| --- | --- |
+| resolved | **34 / 50 (68%)** |
+| FAIL_TO_PASS | 340 / 385 (88%) |
+| PASS_TO_PASS | 3217 / 3219 (99.9%) |
+| total cost | **$77.66** (mean $1.55/instance) |
+| wall time | 87 min at 4 workers |
+| steps | min 5, median 17, max 37 |
+| empty patches | 1 of 50 |
+
+Read as **34 solvable, 15 failed on merit, 1 undetermined** — see §14.5. Note P2P 99.9% is not an
+achievement on its own: an empty patch earns nearly all of it. F2P is the column that moves.
+
+| repo | resolved | | multi-agent N | resolved |
+| --- | --- | --- | --- | --- |
+| qutebrowser | 7/8 (88%) | | N=4 | 13/15 (87%) |
+| openlibrary | 14/20 (70%) | | N=3 | 5/9 (56%) |
+| ansible | 13/22 (59%) | | N=6 | 5/9 (56%) |
+| | | | N=10 | 0/2 (0%) |
+
+**Coupling stratification is degenerate on this set** — all 50 bench50 instances carry
+`label: coupled`, so there is no `decomposable` arm to compare against. The standing rule to
+always stratify by coupling (from the bench20 sweep, where the spread was 13.1pp) simply carries
+no information here; do not report a coupling split for bench50.
+
+### 14.3 The threshold is re-cuttable without re-running
+
+`solo_scores.json` records per-instance F2P/P2P, so `grade_solo.py --skip-eval --criterion X`
+re-cuts the filter for free:
+
+| criterion | kept |
+| --- | --- |
+| `resolved` (chosen) | **34** |
+| `f2p_all` — every F2P passes, P2P damage ignored | 35 |
+| `f2p_any` — at least one F2P passes | 43 |
+
+Exactly one instance separates the first two: **`ansible-d33bedc4`, F2P 5/5 but P2P 80/81.** It
+built the feature correctly and broke one pre-existing test — the P2P-regression class §9.5 calls
+the costliest category, so excluding it is defensible, but it is the only disagreement.
+
+Nearest misses otherwise: `openlibrary-0a90f9` and `qutebrowser-394bfaed`, both F2P 15/16.
+Starkest failure: **`openlibrary-5de7de`, F2P 0/16** — a complete miss on a 16-test feature, and
+the most informative trajectory to inspect.
+
+### 14.4 Opus 5.5 REFUSES the paper's prompt (the finding with the widest reach)
+
+`mini-swe-agent/src/minisweagent/config/swebp.yaml`'s system template contains:
+
+> Include a THOUGHT section before your command where you explain your reasoning process.
+
+On `claude5_5_opus` that sentence makes the gateway return an **empty completion** — 1–8 output
+tokens, `content: ""`, `finish_reason: "stop"`, **no error**. mini's `parse_action` then finds 0
+bash blocks, so **every step becomes a `format_error`**: a 250-step run spends the whole budget
+and produces a 0-line patch, and the aggregate score looks like an ordinary bad run. The first
+smoke test was 3/3 format errors before this was traced.
+
+Opus 5.5 added a `reasoning_extraction` safety classifier (joining `bio` and `cyber`), and asking
+for a labelled section of the model's reasoning trips it. Through an OpenAI-compatible shim there
+is no `stop_details` field, so the refusal presents as empty content rather than
+`stop_reason: "refusal"` — which is why it reads as a format error.
+
+Bisected to that one sentence. Lowercase "thought section" trips it too; *"explain your reasoning
+process"* on its own does **not**. Measured with the paper's prompt verbatim, same gateway:
+
+| model | result |
+| --- | --- |
+| `claude5_5_opus` | **DEAD** — 0 chars |
+| `claude5_opus` / `claude5_sonnet` / `claude4_8_opus` / `gpt4o_mini` | all fine |
+
+Fix is the smallest substitution that clears it (→ *"Before the command, write a short
+explanation of what you are about to do and why."*), applied only to models measured to need it,
+so an Opus 5 or Sonnet 5 run keeps the paper's prompt byte-for-byte. The `instance_template`'s own
+`THOUGHT:` example does **not** trip it and is untouched; `parse_action` never required a THOUGHT
+section anyway. A requested substitution that finds nothing is a hard error, not a silent no-op.
+
+**Consequence for any future model swap: pre-flight the prompt.** One request with the real
+system prompt, and check the completion is non-empty. An empty completion is indistinguishable
+from a bad agent in the aggregate score.
+
+### 14.5 The cost brake, and the one undetermined instance
+
+Two runs hit `LimitsExceeded`, and they came out opposite ways:
+
+- **`ansible-e40889e7`** — cut at $5.45 after 32 steps, yet scored **F2P 18/18, P2P 191/191** and
+  is KEPT. It had finished the work before the brake fired.
+- **`ansible-811093f0`** — 84 minutes, $5.67, 22 steps, **0 patch lines**. Every one of those 22
+  actions was `cd /app && cat/grep/sed …`: pure exploration, not one edit. Steps 21 and 22 were
+  byte-identical commands, the §9.5 verbatim-retry defect showing up in exploration rather than
+  editing. Output averaged 8,195 tokens/step.
+
+`811093f0` is **undetermined, not unsolvable** — the brake cut it before it attempted the task. It
+is the largest instance in the set (N=8). Re-running it alone at `--cost-limit 15` would settle it
+for ~$15; until then do not count it as evidence either way.
+
+### 14.6 Two measured facts about the gateway
+
+- **Prompt caching is ignored.** An identical 28,930-token prefix sent three times reported
+  `cached_tokens: 0` every time, with and without `cache_control` blocks. So `set_cache_control`
+  is deliberately left unset, and cost is the full quadratic (full history, no elision).
+- **Cost tracking now works.** `build_solo.py` registers real per-token prices for the gateway ids
+  (`solo/gateway_model_prices.json`), verified: a 28,930-token input billed $0.11582 = exactly
+  $4.00/M. So mini's `cost_limit` is a real dollar brake, unlike the multi-agent runs where
+  `MSWEA_COST_TRACKING=ignore_errors` reports $0.00 and leaves it inert (§13.4). **Do not set that
+  variable in the solo arm.**
+
+Cost is quadratic in the step budget, so the 250-step ceiling is ~$250/instance *if an agent never
+finishes*. That is the tail, not the expectation: agents submit at 5–37 steps and the measured mean
+was $1.55. The brake is what bounds the tail — 50 × $5 = $250 worst case, $77.66 actual.
+
+### 14.7 Reproduce
+
+```bash
+eval "$(grep -m1 '^export CREATEAI_API_KEY=' ~/.bashrc)"
+eval "$(grep -m1 '^export CREATAI_BASE_URL=' ~/.bashrc)"
+export OPENAI_API_KEY="$CREATEAI_API_KEY"
+
+WORKERS=4 /media/data/dkalwar/harness50/launch_solo47.sh noreq claude_opus_5_5 250 <id_file>
+python multiagent_pro/solo/grade_solo.py \
+    --root /media/data/dkalwar/harness50/solo_noreq/mini_swe_agent/claude_opus_5_5
+cd /media/data/dkalwar/harness50/dashboard && python3 build_dashboard.py && ./serve.sh
+```
+
+Artifacts: `/media/data/dkalwar/harness50/solo_noreq/mini_swe_agent/claude_opus_5_5/` —
+`solvable.txt` (the 34), `solo_scores.json`, per-instance `solo_stats.json`, and full
+`agent_1/{context,traj}` so every step is browsable in the dashboard (it needed no changes: solo
+runs are an ordinary grid cell, alignment verified 17/17 and 6/6 on the checkable pairs).
+
+Method, and every deviation from the paper's configuration, is in `multiagent_pro/solo/README.md`.
+The two that matter: the JSON-encoded text fields are **decoded** (the paper's own composer does
+not decode them, so its prompt carries literal `\n`), and the §14.4 prompt substitution. Neither
+arm is therefore byte-comparable with published Pro numbers — and more fundamentally, **these
+numbers are not comparable to the paper's at all, because the paper includes `requirements`.**
+`--arm withreq` reproduces its composition if that comparison is ever wanted.
+
+### 14.8 Next, and what is still open
+
+1. **Rebuild the multi-agent set on the 34, without requirements** — into a NEW directory, since
+   the existing bench50 runs are graded against the with-requirements text and would stop being
+   comparable:
+   ```bash
+   python multiagent_pro/build_multiagent_pro.py --mode build --input sampled_pro \
+       --output multiagent_pro_bench34_noreq --instances $(cat solvable.txt) \
+       --distractors -1 --route-interface --emit-gold        # NO --include-requirements
+   ```
+   Note the ablation hits the arms asymmetrically: the solo agent lost the spec but kept the whole
+   interface, while a bench50 agent loses the spec *and* only ever had its own routed slice. That
+   is the intended coordination pressure, but it makes the multi-agent arm strictly harder — do
+   not read a solo-vs-multi gap as purely a coordination effect.
+2. **`run_args` container leak in `gen_solver_config.py`'s mini path.** mini's default `run_args`
+   is `["--rm"]` and the config REPLACES it with `["--entrypoint", ""]`, so every multi-agent mini
+   container leaks (14 were found from the §13.5 runs). `build_solo.py` passes
+   `["--rm", "--entrypoint", ""]`; the multi-agent path still needs it, before it runs 34
+   instances × N agents.
+3. `run_solo.sh`'s `progress.txt` line greps the wrong summary (it reports the extrapolation
+   footer, not the per-instance result). Cosmetic — `solo_stats.json` is correct.
+4. Optionally adjudicate `811093f0` at a higher cost limit (§14.5).
+5. Unchanged from §10.5 / §13.6: structural edit bug, edit-failure recovery, false attestation via
+   free-text `send_message`, scope-guard leaks 3/3 obfuscated reads.
