@@ -412,7 +412,16 @@ def build_mini_config(spec, agent, inst_dir, *, model, roster, comm_bundle, api_
             "environment_class": "mini_scaffold.ScopedDockerEnvironment",
             "image": spec["image"],
             "cwd": REPO_ROOT_IN_IMAGE,
-            "run_args": ["--entrypoint", ""],
+            # --rm is REPEATED, not implied: mini's run_args default is ["--rm"] and setting the
+            # field REPLACES that list rather than appending to it, so passing --entrypoint alone
+            # silently drops the auto-cleanup. Every container then survives its run -- 14 exited
+            # minisweagent-* containers were found left over from the 13.5 runs, and a full
+            # 3-cell sweep over the 34-instance set starts ~540 of them, each holding a writable
+            # layer on a root filesystem that has already hit 100% once (11.5).
+            # --entrypoint "" itself is mandatory: these images set ENTRYPOINT ["/bin/bash"], so
+            # mini's `docker run -d <image> sleep N` becomes `/bin/bash sleep N`, exits 126, and
+            # every later command returns "No such container" (13.4).
+            "run_args": ["--rm", "--entrypoint", ""],
             "repo_root": REPO_ROOT_IN_IMAGE,
             "scope_deny": agent.get("deny", []),
             "env": {
