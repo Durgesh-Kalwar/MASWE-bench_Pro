@@ -516,8 +516,15 @@ def main():
                          "--context-window (from your institute's model page) the first time; "
                          "the pricing is saved to custom_model_pricing.json and reused after.")
     ap.add_argument("--price-per-million-tokens", type=float, default=None,
-                    help="Blended $ price per 1M tokens for an unregistered --model (from your "
-                         "institute/provider's model page). Only needed once per model name.")
+                    help="INPUT $ price per 1M tokens for an unregistered --model (from your "
+                         "institute/provider's model page). Applied to output too unless "
+                         "--output-price-per-million-tokens is given. Only needed once per "
+                         "model name; a saved SPLIT rate is never flattened by this flag.")
+    ap.add_argument("--output-price-per-million-tokens", type=float, default=None,
+                    help="OUTPUT $ price per 1M tokens, when the provider publishes input and "
+                         "output separately. Frontier models always do and the gap is wide "
+                         "(Opus 5.5 is $4/M in, $20/M out), so a blended rate understates a "
+                         "100k-in/10k-out turn by 27% and the cost limit overspends to match.")
     ap.add_argument("--context-window", type=int, default=None,
                     help="Context window (tokens) for an unregistered --model. Only needed once "
                          "per model name; paired with --price-per-million-tokens.")
@@ -569,7 +576,8 @@ def main():
     # via UnregisteredModelError for genuinely unknown models (self-hosted / institute-proxied).
     from model_pricing import ensure_registered
     ensure_registered(args.model, price_per_million=args.price_per_million_tokens,
-                      context_window=args.context_window)
+                      context_window=args.context_window,
+                      output_price_per_million=args.output_price_per_million_tokens)
 
     root = Path(args.output)
     inst_dirs = ([root / i for i in args.instances] if args.instances
