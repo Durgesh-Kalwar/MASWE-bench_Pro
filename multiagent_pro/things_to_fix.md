@@ -64,6 +64,42 @@ quadratic in steps.
 Fix: set both templates in `build_mini_config` from swebp.yaml's versions, so the solo and
 multi-agent mini arms wrap observations identically. That also removes a solo-vs-multi confound.
 
+### B2. The SWE-agent arm pays for tool documentation twice
+`aci/gen_solver_config.py` — `SYSTEM_PROMPT` ends with `Available tools:\n{{command_docs}}`.
+
+Function calling IS in use on this arm (confirmed on a real run: 40/40 traj steps carry structured
+`tool_calls`, 36 `role: "tool"` messages, `tool_call_ids` on messages; and structurally,
+`enable_bash_tool: false` would raise at construction under any other parser). So the tool schemas
+already go out as the API's `tools=` parameter — `models.py:679`, built by
+`commands.py::get_function_calling_tool`. Rendering `{{command_docs}}` as well sends the same
+information a second time, as prose.
+
+Measured on a real `broadcast/swe_agent` system message:
+
+| | chars |
+| --- | --- |
+| rendered system message | 6,763 |
+| our prose (`SYSTEM_PROMPT`) | 1,812 |
+| `command_docs` | **4,951 — 73% of the system prompt** |
+
+Re-sent on every request, and this gateway ignores prompt caching (§14.6), so at Opus 5.5 input
+rates that is ~$0.30 per agent over 60 steps and **~$53 per instance** across 180 agents — before
+any of the actual work.
+
+The paper's single-agent config does NOT do this: `config/tool_use.yaml` never references
+`command_docs`, and SWE-agent's own docs say the variable exists precisely for the case where you
+are NOT using `FunctionCallingParser` (`sweagent/tools/parsing.py:30`).
+
+Fix: drop `Available tools:\n{{command_docs}}` from `SYSTEM_PROMPT`, matching the paper. Keep it
+only if a deliberate decision is made that redundant in-prompt docs help a weaker model -- in
+which case say so, because it is a 73% tax on the system prompt. Cheap to measure both ways on a
+few instances before committing.
+
+Note this is NOT symmetric with the mini arm: mini has no function-calling channel at all, so its
+`comm_docs` block is the only way its agents learn the commands exist. Removing `command_docs` from
+SWE-agent therefore does not create an asymmetry -- it removes a duplication that only SWE-agent
+has.
+
 ---
 
 ## C. Measured defects no prompt currently addresses
