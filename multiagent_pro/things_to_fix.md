@@ -90,15 +90,37 @@ The paper's single-agent config does NOT do this: `config/tool_use.yaml` never r
 `command_docs`, and SWE-agent's own docs say the variable exists precisely for the case where you
 are NOT using `FunctionCallingParser` (`sweagent/tools/parsing.py:30`).
 
-Fix: drop `Available tools:\n{{command_docs}}` from `SYSTEM_PROMPT`, matching the paper. Keep it
-only if a deliberate decision is made that redundant in-prompt docs help a weaker model -- in
-which case say so, because it is a 73% tax on the system prompt. Cheap to measure both ways on a
-few instances before committing.
+**Nothing is lost by removing it — checked field by field across all 12 tools of this arm.** The
+docstring becomes the schema `description`, and every argument description, `type`, `required`
+flag and `enum` is carried through: 12/12 on both. The only string `command_docs` adds is the
+CLI-style signature line (`scoped_view <path> [<start_line>] [<end_line>]`), which has no consumer
+under function calling — the model fills structured arguments rather than typing a command line.
 
-Note this is NOT symmetric with the mini arm: mini has no function-calling channel at all, so its
-`comm_docs` block is the only way its agents learn the commands exist. Removing `command_docs` from
-SWE-agent therefore does not create an asymmetry -- it removes a duplication that only SWE-agent
-has.
+**Verified end to end on Opus 5.5** with the real 12-schema set, same instance, one call each:
+
+| | system prompt | first action returned | valid | input tokens |
+| --- | --- | --- | --- | --- |
+| with `command_docs` | 6,878c | `scoped_list`, `scoped_search` | yes | 5,145 |
+| without | 1,793c | `scoped_list`, `scoped_search` | yes | **3,454** |
+
+Same tool choices, well-formed arguments, **1,691 fewer input tokens per request (-33%)**.
+
+Caveat on that test: one prompt each, on an easy first step where the obvious move is to look
+around. It demonstrates the mechanism, NOT that behaviour is unchanged over 60 steps. The honest
+check is a few instances both ways.
+
+Fix: drop `Available tools:\n{{command_docs}}` from `SYSTEM_PROMPT`, matching the paper. Keep it
+only on a deliberate decision that redundant in-prompt docs help a weaker model — in which case
+record that reasoning, because it is a 73% tax on the system prompt.
+
+Two things to weigh before editing:
+
+* This is a **behavioural change, not a pure cleanup**, so it belongs with section D: every
+  harness50 run so far has the docs in-prompt, and changing this invalidates comparison with them.
+* It is **not** symmetric with the mini arm, which must keep its `comm_docs` block: mini has no
+  function-calling channel at all, so that text is the only way its agents learn the commands
+  exist. Removing `command_docs` from SWE-agent brings the two arms closer together rather than
+  further apart.
 
 ---
 
