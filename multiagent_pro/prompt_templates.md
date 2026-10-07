@@ -1,44 +1,50 @@
 # Chat templates, as the model actually receives them
 
-Every block below is the RENDERED text, extracted from generated configs rather than retyped --
-placeholders already substituted, fragments already spliced. Regenerate this file after changing
-any template; nothing here is hand-maintained prose about the prompts, it IS the prompts.
+Every block below is the RENDERED text, extracted from the live templates rather than retyped --
+placeholders already substituted, fragments already spliced.
+
+**This file is generated. Do not hand-edit it** -- run
+`python multiagent_pro/gen_prompt_templates.py` after changing any template.
 
 Sources: `multiagent_pro/aci/gen_solver_config.py` (both multi-agent prompts),
-`multiagent_pro/solo/build_solo.py` + `mini-swe-agent/src/minisweagent/config/swebp.yaml`
-(the solo prompt), `multiagent_pro/aci/orchestrate.py` (the round notice).
+`multiagent_pro/aci/orchestrate.py` (the round notice), and for each single-agent arm the SWE-bench
+Pro paper's own config inside that scaffold's submodule --
+`mini-swe-agent/src/minisweagent/config/swebp.yaml` and `SWE-agent/config/tool_use.yaml`.
 
-## The four arms, and the one that does not exist
+## The four arms
 
 | arm | system prompt | source |
 | --- | --- | --- |
-| mini x SINGLE | swebp.yaml, 638c (+1 substitution) | the SWE-bench Pro paper's own config |
+| mini x SINGLE | swebp.yaml, 638c (+1 substitution) | the paper's config, in the submodule |
 | mini x MULTI | `MINI_SYSTEM`, 4567c rendered | ours |
+| swe-agent x SINGLE | tool_use.yaml, 77c | the paper's config, in the submodule |
 | swe-agent x MULTI | `SYSTEM_PROMPT`, 1895c rendered | ours |
-| swe-agent x SINGLE | **does not exist** | `build_solo.py` only emits `mini.yaml` |
 
-There is no single-agent SWE-agent arm. The solo baseline (CHECKPOINT 14) is mini-only, because
-its purpose was to reproduce the paper's configuration and the paper's runs are mini. If a
-swe-agent solo control is ever wanted, it has to be built.
+Both single-agent prompts come from the paper and are documented here as the reference baselines.
+Note what that does and does not mean for this repo: **only the mini single-agent arm has a build
+path** (`solo/build_solo.py`, which emits `mini.yaml` and nothing else). A swe-agent single-agent
+run would use `tool_use.yaml` through SWE-agent's own `run-batch`, outside this harness; nothing
+here generates it, and the CHECKPOINT 14 baseline is mini-only.
 
 Three things to hold in mind while reading:
 
-1. **The system prompt is not the whole prompt.** Under push delivery there is no tool an agent
-   can call to see its mail, so the ROUND NOTICE (section 5) is injected as a user turn at the
-   start of every round from round 2 on, carrying the interface registry, new messages, private
-   notes, and the what-to-do-next instruction. For coordination behaviour it matters as much as
-   the system prompt.
-2. **The two multi-agent arms differ by far more than tool mechanics.** `MINI_SYSTEM` is
-   2.4x the length of `SYSTEM_PROMPT` and
-   carries behavioural instructions SWE-agent has no equivalent of. The `COORD_*` fragments are
-   shared on purpose (they are the study variable); nothing else is.
-3. **The multi-agent mini arm inherits mini's BARE defaults** for observation and format-error
-   wrapping, where the solo arm gets swebp.yaml's rich versions -- so no output truncation and no
-   visible returncode. Table in 2.4.
+1. **The system prompt is not the whole prompt.** In the multi-agent arms there is no tool an
+   agent can call to see its mail, so the ROUND NOTICE (section 6) is injected as a user turn at
+   the start of every round from round 2 on, carrying the interface registry, new messages,
+   private notes and the what-to-do-next instruction. For coordination behaviour it matters as
+   much as the system prompt. The single-agent arms have no notice at all.
+2. **Both paper single-agent prompts put almost nothing in the system prompt** and almost
+   everything in the instance template -- one line and 638c respectively,
+   against instance templates of 1208c and
+   2697c. Our multi-agent prompts invert that.
+3. **Our two multi-agent prompts differ by far more than tool mechanics.** `MINI_SYSTEM` is
+   2.4x the length of `SYSTEM_PROMPT` and carries
+   behavioural instructions SWE-agent has no equivalent of. The `COORD_*` fragments are shared on
+   purpose (they are the study variable); nothing else is. See `things_to_fix.md` section D.
 
 ---
 
-# 1. mini x SINGLE AGENT (the solo baseline)
+# 1. mini x SINGLE AGENT (the solo baseline, CHECKPOINT 14)
 
 Written by `multiagent_pro/solo/build_solo.py`; templates read from the submodule's
 `config/swebp.yaml` at build time so they track upstream. Prompt-compat substitution applied for
@@ -165,7 +171,7 @@ anything
 ## 1.3 action_observation_template (867c)
 
 Wraps every command's output. Note the 10,000-character cap with head/tail split, and the
-`<returncode>` -- neither of which the multi-agent mini arm has.
+`<returncode>` -- neither of which our multi-agent mini arm has (2.4).
 
 ```
 <returncode>{{output.returncode}}</returncode>
@@ -222,7 +228,7 @@ Written by `gen_solver_config.py::build_mini_config` (`--scaffold mini`).
 
 ## 2.1 system_template -- rendered for `--comm-mode p2p --beliefs`, rounds=10, steps=6 (4567c)
 
-`{coord}` <- the `COORD_*` fragments (section 4). `{comm_docs}` <- the per-cell
+`{coord}` <- the `COORD_*` fragments (section 5). `{comm_docs}` <- the per-cell
 command list (2.3). `{rounds}`/`{steps}` <- the orchestrator's real budget; these
 MUST match what `orchestrate.py` actually runs, or the prompt lies to the agent about its own
 budget.
@@ -370,11 +376,148 @@ ceiling there. The solo arm registers real per-token prices instead (CHECKPOINT 
 
 ---
 
-# 3. swe-agent x MULTI AGENT
+# 3. swe-agent x SINGLE AGENT (the paper's config, not built by this harness)
+
+`SWE-agent/config/tool_use.yaml`, driven by SWE-agent's own `run-batch`. Its header records the
+lineage: *"a fork of 250225_anthropic_filemap_simple_review.yaml ... heavily inspired by anthropic
+and openhands"*.
+
+No rounds, no peers, no comm tools, no scope guard, no round notice.
+
+## 3.1 system_template (77c)
+
+One sentence. Everything substantive is in the instance template.
+
+```
+You are a helpful assistant that can interact with a computer to solve tasks.
+```
+
+## 3.2 instance_template (1208c)
+
+`{{working_dir}}` -> the repo root; `{{problem_statement}}` -> the
+instance's composed issue text (3.5).
+
+Near-identical in substance to mini's swebp instance template (1.2) -- same `<pr_description>`
+framing, same five numbered steps, same "I've already taken care of all changes to any of the test
+files" line. Byte-identical: **False**. mini's is longer because it
+additionally carries the response-format rules and shell examples that a function-calling scaffold
+does not need.
+
+```
+<uploaded_files>
+{{working_dir}}
+</uploaded_files>
+I've uploaded a python code repository in the directory {{working_dir}}. Consider the following PR description:
+
+<pr_description>
+{{problem_statement}}
+</pr_description>
+
+Can you help me implement the necessary changes to the repository so that the requirements specified in the <pr_description> are met?
+I've already taken care of all changes to any of the test files described in the <pr_description>. This means you DON'T have to modify the testing logic or any of the tests in any way!
+Your task is to make the minimal changes to non-tests files in the {{working_dir}} directory to ensure the <pr_description> is satisfied.
+Follow these steps to resolve the issue:
+1. As a first step, it might be a good idea to find and read code relevant to the <pr_description>
+2. Create a script to reproduce the error and execute it with `python <filename.py>` using the bash tool, to confirm the error
+3. Edit the source code of the repo to resolve the issue
+4. Rerun your reproduce script and confirm that the error is fixed!
+5. Think about edgecases and make sure your fix handles them as well
+Your thinking should be thorough and so it's fine if it's very long.
+```
+
+## 3.3 Per-step templates
+
+`next_step_template`:
+
+```
+OBSERVATION:
+{{observation}}
+```
+
+`next_step_no_output_template`:
+
+```
+Your command ran successfully and did not produce any output.
+```
+
+## 3.4 Action space -- THREE tools, and a real shell
+
+`enable_bash_tool: True`, `parse_function: function_calling`,
+`execution_timeout: 450`.
+
+| bundle | tools |
+| --- | --- |
+| `tools/registry` | none declared -- support bundle only (`_read_env` / `_write_env`, the cross-tool state registry) |
+| `tools/edit_anthropic` | `str_replace_editor` -- one tool with a `command` enum: `view`, `create`, `str_replace`, `insert`, `undo_edit` |
+| `tools/submit` | `submit` |
+| (built in) | `bash` -- because `enable_bash_tool` is true |
+
+Bundles loaded: `['tools/registry', 'tools/edit_anthropic', 'tools/submit']`.
+
+That is the sharpest contrast in this document. The paper's single-agent SWE-agent has **a shell
+plus one editing tool**; our multi-agent SWE-agent arm has **no shell at all** and nine
+`scoped_fs` tools plus the comm bundle (4.3). So "SWE-agent" does not denote one action space --
+the single-agent and multi-agent arms differ more from each other than mini's two arms do.
+
+Two settings worth knowing:
+
+* `env_variables: USE_FILEMAP: 'true'` is **vestigial here**. The `filemap` command lives in
+  `tools/filemap`, which is NOT in this config's bundle list, and nothing in the three loaded
+  bundles reads the variable. It is inherited from the `anthropic_filemap.yaml` ancestor named in
+  the header comment.
+* **No history processor is set**, so SWE-agent's default applies -- and
+  `DefaultHistoryProcessor.__call__` returns the history unchanged. There is NO elision in this
+  arm, unlike our multi-agent SWE-agent arm's `last_n_observations` (4.4).
+
+## 3.5 What fills `{{problem_statement}}`
+
+`SWE-agent/data/instances.yaml` -- 731 instances (the full Pro set), each
+carrying one pre-composed `problem_statement` field of ~6000c. Measured on the
+first instance: contains `Requirements:` **True**, contains
+`New interfaces introduced:` **True**, still JSON-escaped (starts with a
+quote, literal `\n` throughout) **True**.
+
+So this arm is the three dataset fields concatenated by
+`helper_code/create_problem_statement.py`, exactly as mini's paper arm is -- **requirements
+INCLUDED**, and undecoded. Our solo arm (section 1) differs on both counts deliberately: it
+withholds requirements and decodes the text (CHECKPOINT 14, `solo/README.md`).
+
+## 3.6 The paper's launch command
+
+Reproduced verbatim from `SWE-agent/sweagent_wrapper_configs/example_config.yaml`. Read it as an
+example rather than the published run: `--instances.slice :25` and
+`--agent.model.per_instance_call_limit 3` are smoke-test values, and the model pinned here is
+Claude 3.7 Sonnet.
+
+```yaml
+output_dir: sweagent_results/sweagent/swe_bench_pro_test
+sweagent_command: |
+  sweagent run-batch \
+    --config config/tool_use.yaml \
+    --output_dir {output_dir} \
+    --num_workers 75 \
+    --random_delay_multiplier 1 \
+    --instances.type file \
+    --instances.path data/instances.yaml \
+    --instances.slice :25 \
+    --instances.shuffle=False \
+    --instances.deployment.type=modal \
+    --instances.deployment.startup_timeout 1800 \
+    --instances.deployment.runtime_timeout 3600 \
+    --agent.model.name anthropic/claude-3-7-sonnet-20250219 \
+    --agent.model.api_base $OPENAI_BASE_URL \
+    --agent.model.api_key $OPENAI_API_KEY \
+    --agent.model.per_instance_cost_limit 0 \
+    --agent.model.per_instance_call_limit 3
+```
+
+---
+
+# 4. swe-agent x MULTI AGENT
 
 Written by `gen_solver_config.py::build_agent_config` (`--scaffold swe-agent`).
 
-## 3.1 system_template -- rendered for `--comm-mode p2p`, rounds=10, steps=6 (1895c)
+## 4.1 system_template -- rendered for `--comm-mode p2p`, rounds=10, steps=6 (1895c)
 
 Substitution is `str.replace`, never `str.format`: the prompt also carries the jinja literal
 `{{command_docs}}` that SWE-agent renders later, and `.format()` would silently
@@ -416,7 +559,7 @@ Available tools:
 {{command_docs}}
 ```
 
-## 3.2 instance_template (89c)
+## 4.2 instance_template (89c)
 
 ```
 You are working in the repository checked out at {{working_dir}}.
@@ -424,11 +567,10 @@ You are working in the repository checked out at {{working_dir}}.
 {{problem_statement}}
 ```
 
-## 3.3 What `{{command_docs}}` expands to
+## 4.3 What `{{command_docs}}` expands to
 
-SWE-agent renders the declarations of every loaded bundle. `enable_bash_tool: false` and
-`parse_function: function_calling`, so these ARE the agent's entire action space -- there is no
-shell, which is the whole contrast with the mini arm.
+`enable_bash_tool: false` and `parse_function: function_calling`, so these ARE the agent's entire
+action space -- there is no shell, which is the whole contrast with the mini arm and with 3.4.
 
 | bundle | tools |
 | --- | --- |
@@ -440,12 +582,13 @@ declared tool with no bin hard-fails at `agent.setup()`, so the two are selected
 Verified: regenerating a cell without `--beliefs` drops the `update_belief` bin as well as its
 declaration, so a stale affordance cannot leak between cells.
 
-## 3.4 Per-step templates
+## 4.4 Per-step templates and history
 
 `next_step_template`:
 
 ```
-OBSERVATION:\n{{observation}}
+OBSERVATION:
+{{observation}}
 ```
 
 `next_step_no_output_template`: `Your command ran successfully and did not produce any output.`
@@ -453,10 +596,11 @@ OBSERVATION:\n{{observation}}
 History processor: `last_n_observations`, n = `--last-n-observations` (default 6; the harness50
 runs used 10). It elides only entries typed `observation`, which is why pushed round notices are
 never dropped -- that is what makes push delivery immune to the elision bug of CHECKPOINT 9.4.
+Contrast 3.4: the paper's single-agent arm elides nothing.
 
 ---
 
-# 4. COORD_* -- the study variable, shared by both scaffolds
+# 5. COORD_* -- the study variable, shared by both multi-agent scaffolds
 
 The only text that differs between harness cells, and the only text deliberately identical across
 scaffolds: "harness" is what the study varies, so the paragraph defining it must not also vary by
@@ -488,17 +632,17 @@ them current and use them to decide whom to ask for what.
 
 ---
 
-# 5. The ROUND NOTICE -- injected every round, both scaffolds
+# 6. The ROUND NOTICE -- injected every round, both multi-agent scaffolds
 
 `orchestrate.py::build_notice`. Byte-identical for both backends; only the injection mechanics
 differ (SWE-agent `_append_history` with `message_type: "user"`, mini `add_message("user", ...)`).
-Injected from round 2 on. **This is the entire delivery mechanism** -- under push there is no tool
-an agent could call to fetch any of it.
+Injected from round 2 on. **This is the entire delivery mechanism** -- there is no tool an agent
+could call to fetch any of it. Neither single-agent arm has one.
 
 Order is deliberate: the registry comes FIRST and repeats every round; messages are new-only. A
 contract is state, a message is an event.
 
-## 5.1 A working agent's notice, round 2 (1091c)
+## 6.1 A working agent's notice, round 2 (1091c)
 
 ```
 --- Round 2 begins ---
@@ -521,7 +665,7 @@ Anything you post from now on reaches your peers in round 3, not this one. So:
     `no_op` to end your turn and wait for the reply next round.
 ```
 
-## 5.2 An already-submitted agent's notice, round 5, with beliefs (1053c)
+## 6.2 An already-submitted agent's notice, round 5, with beliefs (1053c)
 
 `NOTICE_SUBMITTED` replaces `NOTICE_WORKING` for an agent that has already submitted. It exists
 because agents are never retired on submission -- peers can only reach an agent while it keeps
@@ -549,7 +693,7 @@ taking turns. Decide from what is above:
   * nothing above concerns you -> run `scoped_submit` again to confirm you are still finished.
 ```
 
-## 5.3 Message expiry
+## 6.3 Message expiry
 
 A notice is superseded by the next one, so every earlier notice is pruned. An agent's OWN outgoing
 message survives one extra round, because the reply to a question asked in round N-1 only arrives
