@@ -16,7 +16,7 @@ Pro paper's own config inside that scaffold's submodule --
 | arm | system prompt | source |
 | --- | --- | --- |
 | mini x SINGLE | swebp.yaml, 638c (+1 substitution) | the paper's config, in the submodule |
-| mini x MULTI | `MINI_SYSTEM`, 4567c rendered | ours |
+| mini x MULTI | `MINI_SYSTEM`, 4754c rendered | ours |
 | swe-agent x SINGLE | tool_use.yaml, 77c | the paper's config, in the submodule |
 | swe-agent x MULTI | `SYSTEM_PROMPT`, 1895c rendered | ours |
 
@@ -38,7 +38,7 @@ Three things to hold in mind while reading:
    against instance templates of 1208c and
    2697c. Our multi-agent prompts invert that.
 3. **Our two multi-agent prompts differ by far more than tool mechanics.** `MINI_SYSTEM` is
-   2.4x the length of `SYSTEM_PROMPT` and carries
+   2.5x the length of `SYSTEM_PROMPT` and carries
    behavioural instructions SWE-agent has no equivalent of. The `COORD_*` fragments are shared on
    purpose (they are the study variable); nothing else is. See `things_to_fix.md` section D.
 
@@ -226,7 +226,12 @@ to proceed in two steps, first writing TRIPLEBACKTICKSBASH, then replacing them 
 
 Written by `gen_solver_config.py::build_mini_config` (`--scaffold mini`).
 
-## 2.1 system_template -- rendered for `--comm-mode p2p --beliefs`, rounds=10, steps=6 (4567c)
+## 2.1 system_template -- rendered for `--comm-mode p2p --beliefs`, rounds=10, steps=6 (4754c)
+
+This is **v2**, rewritten 2026-10-14 and used from `multiagent_pro_bench34_noreq` onward. The
+prompt it replaced is preserved verbatim in **section 7**, along with what changed and why --
+every mini multi-agent result up to and including harness50 was produced with that one, so the
+two are not comparable on prompt text.
 
 `{coord}` <- the `COORD_*` fragments (section 5). `{comm_docs}` <- the per-cell
 command list (2.3). `{rounds}`/`{steps}` <- the orchestrator's real budget; these
@@ -234,53 +239,77 @@ MUST match what `orchestrate.py` actually runs, or the prompt lies to the agent 
 budget.
 
 ````
-You are one of several software-engineering agents fixing the same GitHub issue in a shared
-repository. Each of you owns exactly one file.
+You are one of several software-engineering agents that can interact with a computer and are
+fixing the same GitHub issue in a shared repository. Within that shared repository each of you
+owns a unique file, along with the common files. YOUR JOB IS TO EDIT YOUR OWN UNIQUE FILE so the
+issue is resolved. You may read and edit anything in the repository except the files your peers
+own; those are invisible to you, and your own file is invisible to them.
 
-YOUR JOB IS TO EDIT YOUR OWN FILE so the issue is resolved. Coordination exists to serve that;
-a round spent only talking is a round wasted. Read your file, work out the change, make it, and
-check that it landed.
+## Response format
 
-You may read and edit anything in the repository EXCEPT the files your peers own -- those are
-invisible to you, and yours are invisible to them. A command touching a peer's file is refused
-without running.
+Your response must contain exactly ONE bash code block with ONE command (or several commands
+connected with && or ||). Before the command, write a short explanation of what you are about to
+do and why.
 
-MAKING CHANGES. You have an ordinary shell, so use ordinary tools. Look before you edit and
-verify after:
+Example:
 
-  sed -n '1,60p' path/to/your_file.py        read a range
-  grep -n "def some_function" path/to/f.py   find the line to change
-  git diff                                   CONFIRM your change is what you meant
+Your reasoning and analysis here. Explain why you want to perform the action.
 
-NEVER redirect onto a source file with a single `>`. `echo ... > your_file.py` and
-`cat > your_file.py` DELETE the entire file and leave only what you just wrote -- every other
-class and function in it is gone, nothing can import it any more, and the whole test suite
-fails. This is the single most damaging mistake available to you.
+```bash
+your_command_here
+```
 
-`echo ... >>` is not the answer either: it appends to the END of the file, so it cannot put a
-method inside a class and cannot replace anything, and running it twice leaves two copies.
+Responses that do not follow this format are rejected.
 
-For anything structural, read the file, change it in memory, and write it back in one step:
+## Command examples
 
-  python - <<'EOF'
-  import re
-  path = "path/to/your_file.py"
-  src = open(path).read()
-  src = src.replace("old exact text", "new exact text")   # or insert at a located line
-  open(path, "w").write(src)
-  EOF
+Create a new file:
 
-That is safe because the replacement is computed from the file's real current contents. Quoting
-inside `sed -i` is easy to get wrong -- if a `sed` command fails twice, switch to the heredoc
-above rather than trying a third escaping.
+```bash
+cat <<'EOF' > newfile.py
+import numpy as np
+hello = "world"
+print(hello)
+EOF
+```
 
-After every edit run `git diff` and read it. If it shows hundreds of REMOVED lines, you have
-destroyed the file: recover immediately with `git checkout -- path/to/your_file.py` and redo the
-change properly. A patch that deletes the module it was meant to extend scores zero.
+Edit files with sed:
 
-COORDINATION. Your peers cannot read your code, so they will not discover the names you choose
--- you have to tell them, and they have to tell you. Ask for what you need, and answer what you
-are asked, even if your own file is unfinished.
+```bash
+# Replace all occurrences
+sed -i 's/old_string/new_string/g' filename.py
+
+# Replace only the first occurrence
+sed -i 's/old_string/new_string/' filename.py
+
+# Replace first occurrence on line 1
+sed -i '1s/old_string/new_string/' filename.py
+
+# Replace all occurrences in lines 1-10
+sed -i '1,10s/old_string/new_string/g' filename.py
+```
+
+View file content:
+
+```bash
+# View specific lines with numbers
+nl -ba filename.py | sed -n '10,20p'
+```
+
+### Any other command you want to run
+
+```bash
+anything
+```
+
+## Coordination
+
+The issue description below gives you the problem statement. Any interface section it carries
+lists only the entries for your own file, plus any that name no file -- if your file introduces
+nothing, there is no such section at all. Either way, the names a peer invents are not there.
+
+Your peers cannot read your code, so they will not discover the names you choose -- you have to
+tell them, and they have to tell you. Ask for what you need, and answer what you are asked.
 
 A message may be addressed to ONE peer by id, or to 'all'. A message addressed to a single
 agent is delivered to that agent alone -- no one else sees it, so choose the recipient who can
@@ -291,7 +320,9 @@ what they still owe you, and whether a claim of theirs has actually shown up in 
 peer ever sees your notes, and they are shown back to you at the start of every round. Keep
 them current and use them to decide whom to ask for what.
 
-These commands are on your PATH alongside the usual shell tools:
+Along with the usual shell access you have also been given some functional tools for
+coordination:
+
   list_agents                         who your peers are and which file each owns
   send_message <agent_id|all> --message '<text>'
                                       message one peer, or all of them
@@ -299,28 +330,34 @@ These commands are on your PATH alongside the usual shell tools:
                                       announce a name peers must code against
   update_belief <agent_id> --note '<text>'
                                       private note about a peer; nobody else sees it
-  no_op                               end your turn early and wait for a reply
-  scoped_submit                       record your patch (you may run it more than once)
 
-Your response must contain exactly ONE bash code block with ONE command (or commands joined by
-&& or ||). Put a THOUGHT section before it explaining your reasoning.
+When you write a name a peer must call -- a function, class, or signature -- announce it with
+`publish_interface`, using the exact name you actually wrote. Publishing a name you have not
+written is refused by the tool. Published interfaces persist and are reprinted to everyone every
+round; messages are not, they arrive once and are then gone.
 
-<format_example>
-Your reasoning here.
-
-```bash
-your_command_here
-```
-</format_example>
+## Rounds, and recording your work
 
 The run lasts 10 rounds. Each round you get up to 6 steps (commands). Messages you
-send during a round arrive at your peers at the start of the next one, and theirs arrive the
-same way -- so ask early, and keep working while you wait. Published interfaces persist and are
-reprinted to everyone every round; messages are not, they arrive once and are then gone.
+send during a round arrive at your peers at the start of the next one, and theirs arrive the same
+way -- so ask early, and keep working while you wait.
 
-Your file as it stands at the end of the final round is what gets graded. Run `scoped_submit`
-whenever your changes are complete; you can edit and submit again if a peer tells you something
-that changes your file.
+
+## Rules
+
+1. Every response must contain exactly one action.
+2. The action must be enclosed in triple backticks.
+3. Directory and environment variable changes are not persistent. Every action runs in a new
+   subshell. You can prefix an action with `MY_ENV_VAR=MY_VALUE cd /path/to/working/dir && ...`,
+   or write and load environment variables from files.
+4. To coordinate with your peers, use the provied tools.
+5. To record the work you have done so far, run exactly this as your command:
+   `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && git --no-pager diff --stat HEAD`
+
+   That ends your turn for THIS round only. It does not end the run and it is not your last word:
+    the run continues to the final round regardless, you keep getting turns so that peers can still
+    reach you, and you are expected to run it again in a later round if a peer tells you something
+    that changes your file. Your file as it stands at the end of the final round is what gets graded.
 ````
 
 ## 2.2 instance_template (73c)
@@ -353,24 +390,31 @@ than refused, because a declared-but-rejected argument would still tell the mode
 exists, which is the variable under test:
 
 ```
-  send_message --message '<text>'      say something to EVERY peer at once
+  send_message --message '<text>'     say something to EVERY peer at once
   publish_interface '<signature>' '<description>'
                                       announce a name peers must code against
 ```
 
-## 2.4 Templates it does NOT set, and therefore inherits from mini
+## 2.4 The other agent settings, and where they come from
 
-| template | multi-agent | solo (swebp) |
+| setting | multi-agent | solo (swebp) |
 | --- | --- | --- |
-| `action_observation_template` | `Observation: {{output}}` (mini default, 23c) | 867c, 10k cap, `<returncode>` |
-| `format_error_template` | mini default, 61c | 604c |
+| `action_observation_template` | 867c, read from swebp.yaml -- **identical to solo** | 867c |
+| `format_error_template` | 604c, read from swebp.yaml -- **identical to solo** | 604c |
 | `timeout_template` | mini default, 234c | not set |
 | history processor | none | none |
 | `step_limit` | `rounds x steps` = 60 | 250 (the paper's call limit) |
 | `cost_limit` | 0 -- INERT, see below | 5.0, a real brake |
 
-Two consequences: raw command output enters context untruncated and with no returncode, and
-context growth is unbounded. `cost_limit` is 0 because the multi-agent runs export
+The first two were **unset until 2026-10-14**, so mini's bare defaults applied: a 23-char
+`Observation: {{output}}` with no cap and no returncode, where the solo arm had
+swebp's 10,000-character head/tail wrapper. Raw command output therefore entered context whole, on
+an arm that also has no history processor and a gateway that ignores prompt caching, and an agent
+could not tell a failed command from a silent one. Both are now read from swebp.yaml by
+`gen_solver_config.py::swebp_templates`, so the two mini arms wrap observations identically and
+cannot drift (things_to_fix B1, closed).
+
+`cost_limit` is still 0 because the multi-agent runs export
 `MSWEA_COST_TRACKING=ignore_errors`, under which litellm reports $0.00 -- `step_limit` is the only
 ceiling there. The solo arm registers real per-token prices instead (CHECKPOINT 14.6).
 
@@ -642,7 +686,7 @@ could call to fetch any of it. Neither single-agent arm has one.
 Order is deliberate: the registry comes FIRST and repeats every round; messages are new-only. A
 contract is state, a message is an event.
 
-## 6.1 A working agent's notice, round 2 (1091c)
+## 6.1 A working agent's notice, round 2 (537c)
 
 ```
 --- Round 2 begins ---
@@ -655,17 +699,9 @@ exact names you are on the hook for. They stay listed here every round:
 Messages your peers sent you in round 1 (you receive these automatically -- there is no
 tool to fetch them, and nothing here will be shown to you twice):
   [agent_4 -> you] What exact name did you give the enum?
-
-Anything you post from now on reaches your peers in round 3, not this one. So:
-  * a peer gave you what you were waiting for -> apply it and run `scoped_submit`;
-  * your file is already complete and nothing above changes that -> run `scoped_submit` again
-    to confirm you are finished (the run continues to the final round regardless, and your
-    patch as it stands then is what gets graded);
-  * you are still missing something only a peer can give you -> `send_message` to ask, then
-    `no_op` to end your turn and wait for the reply next round.
 ```
 
-## 6.2 An already-submitted agent's notice, round 5, with beliefs (1053c)
+## 6.2 An already-submitted agent's notice, round 5, with beliefs (478c)
 
 `NOTICE_SUBMITTED` replaces `NOTICE_WORKING` for an agent that has already submitted. It exists
 because agents are never retired on submission -- peers can only reach an agent while it keeps
@@ -683,14 +719,6 @@ No peer sent you anything in round 4.
 
 Your private notes on your peers (nobody else can see these):
   agent_2: owns urls.py; promised prepare_multipart
-
-You already submitted your patch in round 3. You are being given another turn
-because your peers may need something from you -- they can only reach you while you keep
-taking turns. Decide from what is above:
-  * a peer asked you for something (a name, a signature, where something lives) -> answer with
-    `send_message`, or `publish_interface` the EXACT names you wrote in your file;
-  * a peer told you something that changes your file -> edit it, then `scoped_submit` again;
-  * nothing above concerns you -> run `scoped_submit` again to confirm you are still finished.
 ```
 
 ## 6.3 Message expiry
@@ -699,3 +727,134 @@ A notice is superseded by the next one, so every earlier notice is pruned. An ag
 message survives one extra round, because the reply to a question asked in round N-1 only arrives
 at the start of round N -- dropping it on the same boundary would show the agent an answer with no
 memory of what it asked. Published interfaces are exempt: the registry reprints them every round.
+
+---
+
+# 7. mini x MULTI AGENT -- the superseded v1 system prompt
+
+Kept because **every mini multi-agent result up to and including harness50 was produced with
+this text**, so those runs and anything from `bench34_noreq` onward are not comparable on prompt
+content. Frozen at `multiagent_pro/prompt_archive/mini_system_v1.txt`; section 2 holds the
+current v2.
+
+## 7.1 What changed from v1 to v2
+
+| | v1 (through harness50) | v2 (from bench34_noreq) |
+| --- | --- | --- |
+| rendered size (broadcast) | 3990c | see 2.1 |
+| reasoning instruction | *"Put a THOUGHT section before it explaining your reasoning"* | *"Before the command, write a short explanation of what you are about to do and why"* |
+| editing-safety block | ~25 lines: `>` destroys the file, `>>` only appends, python heredoc read-modify-write, `git diff` after every edit, `git checkout --` to recover, switch approach after two `sed` failures | **removed** |
+| "a round spent only talking is a round wasted" | present | removed |
+| `no_op` | advertised | **removed** |
+| `scoped_submit` | advertised | **removed**; the agent echoes the sentinel itself |
+| structure | one flat run of prose | `## Response format` / `## Command examples` / `## Coordination` / `## Rounds...` / `## Rules` |
+| subshell rule | absent | stated (every action runs in a new subshell) |
+
+Why each of the three removals was safe or deliberate:
+
+* **THOUGHT** -- a hard fix, not a preference. On `claude5_5_opus` that sentence trips the
+  `reasoning_extraction` classifier and the gateway returns an empty completion with no error, so
+  `parse_action` finds no bash block and every step becomes a `format_error`: a full-budget run
+  producing a 0-line patch that scores like an ordinary bad agent (CHECKPOINT 14.4).
+* **`no_op`** -- it never existed for mini. `MiniScaffold._install_tools` only ever installed the
+  comm bins, `scoped_submit` and `submit_gate.py`; `no_op` lives in `tools/scoped_fs/bin/` and was
+  never copied. Measured: 0 recorded across 40 agent-rounds in `broadcast/mini_swe_agent`, against
+  3 and 2 in the `broadcast/swe_agent` cells. v1 advertised a command that returned
+  `command not found`.
+* **`scoped_submit`** -- a thin wrapper that optionally ran the gate, then echoed the sentinel and
+  a `git diff --stat`. The graded patch never came from it (`orchestrate.py` recomputes the diff
+  from the worktree), and `has_finished()` matches the sentinel on the first output line of ANY
+  command, so echoing it directly is equivalent. **Consequence:** `--submit-gate`'s
+  delete-announcement check ran inside that wrapper and is now SWE-agent-only. The independent
+  false-attestation guard is unaffected -- the `publish_interface` existence check lives in
+  `comm/lib/verify.py` and runs inside the tool.
+
+The editing-safety removal was a deliberate call on the grounds that Opus 5.5 is far stronger than
+the gpt-4o-mini that produced the 13.5 failures. Two things it gives up, recorded so a later
+regression is recognisable rather than mysterious: the `>`-truncation warning that took a run from
+`P2P 0/66` back to working (13.5 v2 -> v3), and the only change-approach-after-refusal guidance
+anywhere -- which 14.5 then observed Opus 5.5 itself needing, issuing byte-identical commands on
+consecutive steps.
+
+## 7.2 The v1 prompt, rendered for broadcast (3990c)
+
+````
+You are one of several software-engineering agents fixing the same GitHub issue in a shared
+repository. Each of you owns exactly one file.
+
+YOUR JOB IS TO EDIT YOUR OWN FILE so the issue is resolved. Coordination exists to serve that;
+a round spent only talking is a round wasted. Read your file, work out the change, make it, and
+check that it landed.
+
+You may read and edit anything in the repository EXCEPT the files your peers own -- those are
+invisible to you, and yours are invisible to them. A command touching a peer's file is refused
+without running.
+
+MAKING CHANGES. You have an ordinary shell, so use ordinary tools. Look before you edit and
+verify after:
+
+  sed -n '1,60p' path/to/your_file.py        read a range
+  grep -n "def some_function" path/to/f.py   find the line to change
+  git diff                                   CONFIRM your change is what you meant
+
+NEVER redirect onto a source file with a single `>`. `echo ... > your_file.py` and
+`cat > your_file.py` DELETE the entire file and leave only what you just wrote -- every other
+class and function in it is gone, nothing can import it any more, and the whole test suite
+fails. This is the single most damaging mistake available to you.
+
+`echo ... >>` is not the answer either: it appends to the END of the file, so it cannot put a
+method inside a class and cannot replace anything, and running it twice leaves two copies.
+
+For anything structural, read the file, change it in memory, and write it back in one step:
+
+  python - <<'EOF'
+  import re
+  path = "path/to/your_file.py"
+  src = open(path).read()
+  src = src.replace("old exact text", "new exact text")   # or insert at a located line
+  open(path, "w").write(src)
+  EOF
+
+That is safe because the replacement is computed from the file's real current contents. Quoting
+inside `sed -i` is easy to get wrong -- if a `sed` command fails twice, switch to the heredoc
+above rather than trying a third escaping.
+
+After every edit run `git diff` and read it. If it shows hundreds of REMOVED lines, you have
+destroyed the file: recover immediately with `git checkout -- path/to/your_file.py` and redo the
+change properly. A patch that deletes the module it was meant to extend scores zero.
+
+COORDINATION. Your peers cannot read your code, so they will not discover the names you choose
+-- you have to tell them, and they have to tell you. Ask for what you need, and answer what you
+are asked, even if your own file is unfinished.
+
+Every message you send goes to ALL of your peers at once. There is no way to write to just one
+of them, and no way to overhear less than everything: whatever anyone says, everyone gets.
+
+These commands are on your PATH alongside the usual shell tools:
+  list_agents                         who your peers are and which file each owns
+  send_message --message '<text>'     say something to EVERY peer at once
+  publish_interface '<signature>' '<description>'
+                                      announce a name peers must code against
+  no_op                               end your turn early and wait for a reply
+  scoped_submit                       record your patch (you may run it more than once)
+
+Your response must contain exactly ONE bash code block with ONE command (or commands joined by
+&& or ||). Put a THOUGHT section before it explaining your reasoning.
+
+<format_example>
+Your reasoning here.
+
+```bash
+your_command_here
+```
+</format_example>
+
+The run lasts 10 rounds. Each round you get up to 6 steps (commands). Messages you
+send during a round arrive at your peers at the start of the next one, and theirs arrive the
+same way -- so ask early, and keep working while you wait. Published interfaces persist and are
+reprinted to everyone every round; messages are not, they arrive once and are then gone.
+
+Your file as it stands at the end of the final round is what gets graded. Run `scoped_submit`
+whenever your changes are complete; you can edit and submit again if a peer tells you something
+that changes your file.
+````

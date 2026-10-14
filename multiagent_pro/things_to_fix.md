@@ -8,19 +8,6 @@ sections.
 
 ## A. Blocks the multi-agent run on bench34_noreq
 
-### A1. mini's prompt makes Opus 5.5 return empty completions
-`aci/gen_solver_config.py:346` — *"Put a THOUGHT section before it explaining your reasoning."*
-
-Trips Opus 5.5's `reasoning_extraction` classifier. The gateway returns `content: ""`,
-`finish_reason: "stop"`, **no error**; `parse_action` then finds no bash block, so EVERY step
-becomes a `format_error` and the run produces a 0-line patch that scores like an ordinary bad
-agent. Measured: dead on `claude5_5_opus`, fine on Opus 5 / Sonnet 5 / Opus 4.8 / gpt4o_mini
-(§14.4).
-
-Fix: port `solo/build_solo.py::apply_prompt_compat` to `build_mini_config` — same substitution,
-same model gate, same hard error if the expected sentence is absent. Do not special-case it in
-two places; share one helper.
-
 ### A2. The SWE-agent prompt claims requirements are present
 `aci/gen_solver_config.py:100-102` — *"The problem statement and requirements below are complete
 and unedited."*
@@ -45,24 +32,9 @@ Fix: delete paragraph 1; paragraph 2 is correct and already says everything.
 
 ---
 
+---
+
 ## B. Found while writing `prompt_templates.md`
-
-### B1. Multi-agent mini has no output truncation and no returncode
-`build_mini_config` sets only `system_template` and `instance_template`, so mini's bare defaults
-apply:
-
-| template | multi-agent | solo (swebp.yaml) |
-| --- | --- | --- |
-| `action_observation_template` | `Observation: {{output}}` (23c) | 867c — 10,000-char cap, head/tail split, `<returncode>` |
-| `format_error_template` | 61c default | 604c |
-
-Consequences: one `cat` of a large file enters context whole, and the agent cannot distinguish a
-failed command from a silent one. There is also no history processor on this arm, so context
-growth is unbounded — and the gateway does not honour prompt caching (§14.6), making cost
-quadratic in steps.
-
-Fix: set both templates in `build_mini_config` from swebp.yaml's versions, so the solo and
-multi-agent mini arms wrap observations identically. That also removes a solo-vs-multi confound.
 
 ### B2. The SWE-agent arm pays for tool documentation twice
 `aci/gen_solver_config.py` — `SYSTEM_PROMPT` ends with `Available tools:\n{{command_docs}}`.

@@ -261,17 +261,23 @@ class MiniScaffold:
                 if f.is_file():
                     payload[f"{sub}/{f.name}"] = base64.b64encode(
                         f.read_bytes()).decode()
-        # mini's submit tool, plus the coordination gate it calls. The gate is taken from the
-        # scoped_fs bundle at install time rather than copied into the tree, so there is one
-        # submit_gate.py and the two scaffolds can never drift apart on what blocks a submit.
-        tools_src = Path(__file__).resolve().parent / "tools"
-        extra = {
-            "bin/scoped_submit": tools_src / "mini" / "bin" / "scoped_submit",
-            "lib/submit_gate.py": tools_src / "scoped_fs" / "lib" / "submit_gate.py",
-        }
-        for dest, src in extra.items():
-            if src.is_file():
-                payload[dest] = base64.b64encode(src.read_bytes()).decode()
+        # Only the comm bins. `scoped_submit` and `submit_gate.py` are deliberately NOT installed
+        # any more: mini now records a round by echoing the sentinel itself
+        # (`echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && git --no-pager diff --stat HEAD`, as the
+        # system prompt instructs), which is what `DefaultAgent.has_finished()` matches on the
+        # first output line of any command, so the wrapper had nothing left to do. The graded
+        # patch never came from it either -- `orchestrate.py` recomputes the diff from the
+        # worktree at run end.
+        #
+        # CONSEQUENCE, recorded rather than hidden: `--submit-gate`'s delete-announcement check
+        # (a public def/class you removed must have been announced) ran inside that wrapper, so it
+        # is now SWE-agent-only. The independent false-attestation guard is unaffected -- the
+        # `publish_interface` existence check lives in comm/lib/verify.py and runs inside the tool.
+        # Either run a sweep with the gate off for both arms, or note the asymmetry when reporting.
+        #
+        # `no_op` was never installed here at all (it lives in tools/scoped_fs/bin and was only
+        # ever copied for SWE-agent), which is why mini recorded 0 no_ops across every round of
+        # every run while the SWE-agent cells used it. The prompt no longer advertises it.
         blob = base64.b64encode(json.dumps(payload).encode()).decode()
         script = (
             "mkdir -p /root/tools/bin /root/tools/lib /root/comm && "

@@ -61,6 +61,15 @@ def collect() -> dict:
         coord=g.COORD_P2P + g.COORD_BELIEFS, comm_docs=P["mini_comm_docs_p2p"],
         rounds=10, steps=6)
     P["mini_instance"] = g.MINI_INSTANCE
+    # The superseded v1 prompt, frozen in the repo rather than recovered from a run: every
+    # mini multi-agent result up to and including harness50 was produced with it, so it has to
+    # stay readable after MINI_SYSTEM moves on.
+    v1 = REPO / "multiagent_pro" / "prompt_archive" / "mini_system_v1.txt"
+    P["mini_system_v1"] = v1.read_text() if v1.is_file() else ""
+    P["mini_system_v1_rendered"] = (
+        P["mini_system_v1"].format(coord=g.COORD_BROADCAST,
+                                   comm_docs=g._MINI_COMM_DOCS["broadcast"],
+                                   rounds=10, steps=6) if P["mini_system_v1"] else "")
 
     # --- mini single agent: the Pro paper's own config, plus our Opus 5.5 substitution ---
     t = sb.load_swebp_templates()
@@ -202,6 +211,11 @@ Written by `gen_solver_config.py::build_mini_config` (`--scaffold mini`).
 
 ## 2.1 system_template -- rendered for `--comm-mode p2p --beliefs`, rounds=10, steps=6 ({L('mini_system_p2p_bel')}c)
 
+This is **v2**, rewritten 2026-10-14 and used from `multiagent_pro_bench34_noreq` onward. The
+prompt it replaced is preserved verbatim in **section 7**, along with what changed and why --
+every mini multi-agent result up to and including harness50 was produced with that one, so the
+two are not comparable on prompt text.
+
 `{BR}coord{KET}` <- the `COORD_*` fragments (section 5). `{BR}comm_docs{KET}` <- the per-cell
 command list (2.3). `{BR}rounds{KET}`/`{BR}steps{KET}` <- the orchestrator's real budget; these
 MUST match what `orchestrate.py` actually runs, or the prompt lies to the agent about its own
@@ -229,19 +243,26 @@ exists, which is the variable under test:
 
 {fence(P['mini_comm_docs_bcast'])}
 
-## 2.4 Templates it does NOT set, and therefore inherits from mini
+## 2.4 The other agent settings, and where they come from
 
-| template | multi-agent | solo (swebp) |
+| setting | multi-agent | solo (swebp) |
 | --- | --- | --- |
-| `action_observation_template` | `Observation: {BR}{BR}output{KET}{KET}` (mini default, 23c) | {L('solo_action_observation_template')}c, 10k cap, `<returncode>` |
-| `format_error_template` | mini default, 61c | {L('solo_format_error_template')}c |
+| `action_observation_template` | {L('solo_action_observation_template')}c, read from swebp.yaml -- **identical to solo** | {L('solo_action_observation_template')}c |
+| `format_error_template` | {L('solo_format_error_template')}c, read from swebp.yaml -- **identical to solo** | {L('solo_format_error_template')}c |
 | `timeout_template` | mini default, 234c | not set |
 | history processor | none | none |
 | `step_limit` | `rounds x steps` = 60 | 250 (the paper's call limit) |
 | `cost_limit` | 0 -- INERT, see below | 5.0, a real brake |
 
-Two consequences: raw command output enters context untruncated and with no returncode, and
-context growth is unbounded. `cost_limit` is 0 because the multi-agent runs export
+The first two were **unset until 2026-10-14**, so mini's bare defaults applied: a 23-char
+`Observation: {BR}{BR}output{KET}{KET}` with no cap and no returncode, where the solo arm had
+swebp's 10,000-character head/tail wrapper. Raw command output therefore entered context whole, on
+an arm that also has no history processor and a gateway that ignores prompt caching, and an agent
+could not tell a failed command from a silent one. Both are now read from swebp.yaml by
+`gen_solver_config.py::swebp_templates`, so the two mini arms wrap observations identically and
+cannot drift (things_to_fix B1, closed).
+
+`cost_limit` is still 0 because the multi-agent runs export
 `MSWEA_COST_TRACKING=ignore_errors`, under which litellm reports $0.00 -- `step_limit` is the only
 ceiling there. The solo arm registers real per-token prices instead (CHECKPOINT 14.6).
 
@@ -428,6 +449,58 @@ A notice is superseded by the next one, so every earlier notice is pruned. An ag
 message survives one extra round, because the reply to a question asked in round N-1 only arrives
 at the start of round N -- dropping it on the same boundary would show the agent an answer with no
 memory of what it asked. Published interfaces are exempt: the registry reprints them every round.
+
+---
+
+# 7. mini x MULTI AGENT -- the superseded v1 system prompt
+
+Kept because **every mini multi-agent result up to and including harness50 was produced with
+this text**, so those runs and anything from `bench34_noreq` onward are not comparable on prompt
+content. Frozen at `multiagent_pro/prompt_archive/mini_system_v1.txt`; section 2 holds the
+current v2.
+
+## 7.1 What changed from v1 to v2
+
+| | v1 (through harness50) | v2 (from bench34_noreq) |
+| --- | --- | --- |
+| rendered size (broadcast) | {len(P['mini_system_v1_rendered'])}c | see 2.1 |
+| reasoning instruction | *"Put a THOUGHT section before it explaining your reasoning"* | *"Before the command, write a short explanation of what you are about to do and why"* |
+| editing-safety block | ~25 lines: `>` destroys the file, `>>` only appends, python heredoc read-modify-write, `git diff` after every edit, `git checkout --` to recover, switch approach after two `sed` failures | **removed** |
+| "a round spent only talking is a round wasted" | present | removed |
+| `no_op` | advertised | **removed** |
+| `scoped_submit` | advertised | **removed**; the agent echoes the sentinel itself |
+| structure | one flat run of prose | `## Response format` / `## Command examples` / `## Coordination` / `## Rounds...` / `## Rules` |
+| subshell rule | absent | stated (every action runs in a new subshell) |
+
+Why each of the three removals was safe or deliberate:
+
+* **THOUGHT** -- a hard fix, not a preference. On `claude5_5_opus` that sentence trips the
+  `reasoning_extraction` classifier and the gateway returns an empty completion with no error, so
+  `parse_action` finds no bash block and every step becomes a `format_error`: a full-budget run
+  producing a 0-line patch that scores like an ordinary bad agent (CHECKPOINT 14.4).
+* **`no_op`** -- it never existed for mini. `MiniScaffold._install_tools` only ever installed the
+  comm bins, `scoped_submit` and `submit_gate.py`; `no_op` lives in `tools/scoped_fs/bin/` and was
+  never copied. Measured: 0 recorded across 40 agent-rounds in `broadcast/mini_swe_agent`, against
+  3 and 2 in the `broadcast/swe_agent` cells. v1 advertised a command that returned
+  `command not found`.
+* **`scoped_submit`** -- a thin wrapper that optionally ran the gate, then echoed the sentinel and
+  a `git diff --stat`. The graded patch never came from it (`orchestrate.py` recomputes the diff
+  from the worktree), and `has_finished()` matches the sentinel on the first output line of ANY
+  command, so echoing it directly is equivalent. **Consequence:** `--submit-gate`'s
+  delete-announcement check ran inside that wrapper and is now SWE-agent-only. The independent
+  false-attestation guard is unaffected -- the `publish_interface` existence check lives in
+  `comm/lib/verify.py` and runs inside the tool.
+
+The editing-safety removal was a deliberate call on the grounds that Opus 5.5 is far stronger than
+the gpt-4o-mini that produced the 13.5 failures. Two things it gives up, recorded so a later
+regression is recognisable rather than mysterious: the `>`-truncation warning that took a run from
+`P2P 0/66` back to working (13.5 v2 -> v3), and the only change-approach-after-refusal guidance
+anywhere -- which 14.5 then observed Opus 5.5 itself needing, issuing byte-identical commands on
+consecutive steps.
+
+## 7.2 The v1 prompt, rendered for broadcast ({len(P['mini_system_v1_rendered'])}c)
+
+{fence(P['mini_system_v1_rendered'])}
 """
 
 

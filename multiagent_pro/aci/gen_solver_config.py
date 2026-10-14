@@ -288,79 +288,123 @@ def build_agent_config(spec, agent, inst_dir, *, model, cost_limit, roster, comm
 # --------------------------------------------------------------------------- #
 # mini-swe-agent config
 # --------------------------------------------------------------------------- #
+# EVERY fence in this prompt is FLUSH-LEFT, and Rule 5's record-your-work command is stated
+# INLINE in backticks on purpose -- do not re-wrap it in a fenced block, and do not indent any of
+# the existing fences (there are five pairs: one in `## Response format`, four in
+# `## Command examples`).
+#
+# mini parses an action with `re.findall(r"```bash\s*\n(.*?)\n```", ..., re.DOTALL)`, which
+# requires the CLOSING fence to follow a newline directly. Measured against that exact regex: a
+# flush-left fence yields 1 action; the same fence indented four spaces (which is what it looks
+# like nested inside a numbered list item) yields ZERO -- a FormatError. Models mirror the shape
+# they are shown, and Rule 5 is the shape in front of the model exactly when it goes to record its
+# work, the step where a parse failure is most expensive. Keeping a single flush-left demo in
+# `## Response format` removes the inconsistency rather than reducing it.
 MINI_SYSTEM = """\
-You are one of several software-engineering agents fixing the same GitHub issue in a shared
-repository. Each of you owns exactly one file.
+You are one of several software-engineering agents that can interact with a computer and are
+fixing the same GitHub issue in a shared repository. Within that shared repository each of you
+owns a unique file, along with the common files. YOUR JOB IS TO EDIT YOUR OWN UNIQUE FILE so the
+issue is resolved. You may read and edit anything in the repository except the files your peers
+own; those are invisible to you, and your own file is invisible to them.
 
-YOUR JOB IS TO EDIT YOUR OWN FILE so the issue is resolved. Coordination exists to serve that;
-a round spent only talking is a round wasted. Read your file, work out the change, make it, and
-check that it landed.
+## Response format
 
-You may read and edit anything in the repository EXCEPT the files your peers own -- those are
-invisible to you, and yours are invisible to them. A command touching a peer's file is refused
-without running.
+Your response must contain exactly ONE bash code block with ONE command (or several commands
+connected with && or ||). Before the command, write a short explanation of what you are about to
+do and why.
 
-MAKING CHANGES. You have an ordinary shell, so use ordinary tools. Look before you edit and
-verify after:
+Example:
 
-  sed -n '1,60p' path/to/your_file.py        read a range
-  grep -n "def some_function" path/to/f.py   find the line to change
-  git diff                                   CONFIRM your change is what you meant
-
-NEVER redirect onto a source file with a single `>`. `echo ... > your_file.py` and
-`cat > your_file.py` DELETE the entire file and leave only what you just wrote -- every other
-class and function in it is gone, nothing can import it any more, and the whole test suite
-fails. This is the single most damaging mistake available to you.
-
-`echo ... >>` is not the answer either: it appends to the END of the file, so it cannot put a
-method inside a class and cannot replace anything, and running it twice leaves two copies.
-
-For anything structural, read the file, change it in memory, and write it back in one step:
-
-  python - <<'EOF'
-  import re
-  path = "path/to/your_file.py"
-  src = open(path).read()
-  src = src.replace("old exact text", "new exact text")   # or insert at a located line
-  open(path, "w").write(src)
-  EOF
-
-That is safe because the replacement is computed from the file's real current contents. Quoting
-inside `sed -i` is easy to get wrong -- if a `sed` command fails twice, switch to the heredoc
-above rather than trying a third escaping.
-
-After every edit run `git diff` and read it. If it shows hundreds of REMOVED lines, you have
-destroyed the file: recover immediately with `git checkout -- path/to/your_file.py` and redo the
-change properly. A patch that deletes the module it was meant to extend scores zero.
-
-COORDINATION. Your peers cannot read your code, so they will not discover the names you choose
--- you have to tell them, and they have to tell you. Ask for what you need, and answer what you
-are asked, even if your own file is unfinished.
-{coord}
-These commands are on your PATH alongside the usual shell tools:
-  list_agents                         who your peers are and which file each owns
-{comm_docs}  no_op                               end your turn early and wait for a reply
-  scoped_submit                       record your patch (you may run it more than once)
-
-Your response must contain exactly ONE bash code block with ONE command (or commands joined by
-&& or ||). Put a THOUGHT section before it explaining your reasoning.
-
-<format_example>
-Your reasoning here.
+Your reasoning and analysis here. Explain why you want to perform the action.
 
 ```bash
 your_command_here
 ```
-</format_example>
+
+Responses that do not follow this format are rejected.
+
+## Command examples
+
+Create a new file:
+
+```bash
+cat <<'EOF' > newfile.py
+import numpy as np
+hello = "world"
+print(hello)
+EOF
+```
+
+Edit files with sed:
+
+```bash
+# Replace all occurrences
+sed -i 's/old_string/new_string/g' filename.py
+
+# Replace only the first occurrence
+sed -i 's/old_string/new_string/' filename.py
+
+# Replace first occurrence on line 1
+sed -i '1s/old_string/new_string/' filename.py
+
+# Replace all occurrences in lines 1-10
+sed -i '1,10s/old_string/new_string/g' filename.py
+```
+
+View file content:
+
+```bash
+# View specific lines with numbers
+nl -ba filename.py | sed -n '10,20p'
+```
+
+### Any other command you want to run
+
+```bash
+anything
+```
+
+## Coordination
+
+The issue description below gives you the problem statement. Any interface section it carries
+lists only the entries for your own file, plus any that name no file -- if your file introduces
+nothing, there is no such section at all. Either way, the names a peer invents are not there.
+
+Your peers cannot read your code, so they will not discover the names you choose -- you have to
+tell them, and they have to tell you. Ask for what you need, and answer what you are asked.
+{coord}
+Along with the usual shell access you have also been given some functional tools for
+coordination:
+
+  list_agents                         who your peers are and which file each owns
+{comm_docs}
+When you write a name a peer must call -- a function, class, or signature -- announce it with
+`publish_interface`, using the exact name you actually wrote. Publishing a name you have not
+written is refused by the tool. Published interfaces persist and are reprinted to everyone every
+round; messages are not, they arrive once and are then gone.
+
+## Rounds, and recording your work
 
 The run lasts {rounds} rounds. Each round you get up to {steps} steps (commands). Messages you
-send during a round arrive at your peers at the start of the next one, and theirs arrive the
-same way -- so ask early, and keep working while you wait. Published interfaces persist and are
-reprinted to everyone every round; messages are not, they arrive once and are then gone.
+send during a round arrive at your peers at the start of the next one, and theirs arrive the same
+way -- so ask early, and keep working while you wait.
 
-Your file as it stands at the end of the final round is what gets graded. Run `scoped_submit`
-whenever your changes are complete; you can edit and submit again if a peer tells you something
-that changes your file.
+
+## Rules
+
+1. Every response must contain exactly one action.
+2. The action must be enclosed in triple backticks.
+3. Directory and environment variable changes are not persistent. Every action runs in a new
+   subshell. You can prefix an action with `MY_ENV_VAR=MY_VALUE cd /path/to/working/dir && ...`,
+   or write and load environment variables from files.
+4. To coordinate with your peers, use the provied tools.
+5. To record the work you have done so far, run exactly this as your command:
+   `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && git --no-pager diff --stat HEAD`
+
+   That ends your turn for THIS round only. It does not end the run and it is not your last word:
+    the run continues to the final round regardless, you keep getting turns so that peers can still
+    reach you, and you are expected to run it again in a later round if a peer tells you something
+    that changes your file. Your file as it stands at the end of the final round is what gets graded.
 """
 
 MINI_INSTANCE = """\
@@ -369,8 +413,29 @@ The repository is checked out at {{working_dir}}.
 {{problem_statement}}
 """
 
+def swebp_templates() -> dict:
+    """The SWE-bench Pro paper's own mini config, read from the submodule at generation time.
+
+    Used for `action_observation_template` and `format_error_template` so the multi-agent mini arm
+    wraps observations EXACTLY as the single-agent arm does. Without this, `build_mini_config` set
+    neither and mini's bare defaults applied -- `action_observation_template` was
+    `Observation: {{output}}` (23 chars), so raw command output entered context untruncated and
+    with no visible returncode, while the solo arm got swebp's 867-char version with a
+    10,000-character cap, a head/tail split and `<returncode>`. On an arm that also has no history
+    processor, and on a gateway that ignores prompt caching, that was unbounded context growth and
+    an agent unable to tell a failed command from a silent one (things_to_fix B1).
+
+    Read rather than copied so it tracks upstream, and so solo and multi-agent cannot drift --
+    `solo/build_solo.py::load_swebp_templates` reads the same file for the same reason.
+    """
+    p = REPO_DIR / "mini-swe-agent" / "src" / "minisweagent" / "config" / "swebp.yaml"
+    if not p.is_file():
+        raise SystemExit(f"missing {p} -- run `git submodule update --init --recursive`")
+    return yaml.safe_load(p.read_text())
+
+
 _MINI_COMM_DOCS = {
-    "broadcast": ("  send_message --message '<text>'      say something to EVERY peer at once\n"
+    "broadcast": ("  send_message --message '<text>'     say something to EVERY peer at once\n"
                   "  publish_interface '<signature>' '<description>'\n"
                   "                                      announce a name peers must code against\n"),
     "p2p": ("  send_message <agent_id|all> --message '<text>'\n"
@@ -395,6 +460,9 @@ def build_mini_config(spec, agent, inst_dir, *, model, roster, comm_bundle, api_
       * step_limit      -- litellm has no price for these gateway models and mini reports
                            $0.00, so cost_limit is inert; the call budget is the real ceiling.
     """
+    # Loaded here rather than at import time: swebp_templates() exits if the submodule is absent,
+    # and that must not break importing this module for the swe-agent path or for tooling.
+    swebp = swebp_templates()["agent"]
     aid = agent["id"]
     scope_mode = agent.get("scope_mode", "allow")
     coord = COORD_BROADCAST if comm_mode == "broadcast" else COORD_P2P
@@ -433,7 +501,12 @@ def build_mini_config(spec, agent, inst_dir, *, model, roster, comm_bundle, api_
                 "COMM_BOARD": COMM_BOARD_IN_IMAGE,
                 "AGENTS_ROSTER": json.dumps(roster),
                 "COMM_MODE": comm_mode,
-                "SUBMIT_GATE": "1" if submit_gate else "",
+                # No SUBMIT_GATE here, deliberately. Its only readers are
+                # tools/{mini,scoped_fs}/bin/scoped_submit and scoped_fs/lib/submit_gate.py, none
+                # of which MiniScaffold installs any more -- mini records a round by echoing the
+                # sentinel itself. Setting the variable would imply a gate that cannot fire, which
+                # is worse than not setting it: `--submit-gate` is now SWE-agent-only and the
+                # generated config should say so by omission rather than claim otherwise.
                 # The comm bins are installed here by MiniScaffold._install_tools().
                 "PATH": "/root/tools/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:"
                         "/usr/bin:/sbin:/bin",
@@ -444,6 +517,11 @@ def build_mini_config(spec, agent, inst_dir, *, model, roster, comm_bundle, api_
             "system_template": MINI_SYSTEM.format(
                 coord=coord, comm_docs=docs, rounds=rounds, steps=steps_per_round),
             "instance_template": MINI_INSTANCE,
+            # Taken from the paper's swebp.yaml, identical to the solo arm (see swebp_templates):
+            # the 10k-capped head/tail observation wrapper with <returncode>, and the full
+            # format-error text. Previously unset, so mini's 23-char and 61-char defaults applied.
+            "action_observation_template": swebp["action_observation_template"],
+            "format_error_template": swebp["format_error_template"],
             # 0 = unlimited. The orchestrator bounds steps per round itself; this is the
             # whole-run backstop that replaces the inert cost limit.
             "step_limit": call_limit or (rounds * steps_per_round),

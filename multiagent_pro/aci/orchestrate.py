@@ -299,10 +299,10 @@ def build_notice(r, aid, delivered, beliefs, submitted_in, registry=()):
         parts.append(NOTICE_NOTHING.format(prev=r))
     if beliefs:
         parts.append(NOTICE_BELIEFS.format(beliefs=render_beliefs(beliefs)))
-    if submitted_in:
-        parts.append(NOTICE_SUBMITTED.format(submitted_in=submitted_in))
-    else:
-        parts.append(NOTICE_WORKING.format(next=r + 2))
+    # if submitted_in:
+    #     parts.append(NOTICE_SUBMITTED.format(submitted_in=submitted_in))
+    # else:
+    #     parts.append(NOTICE_WORKING.format(next=r + 2))
     return "".join(parts)
 
 
