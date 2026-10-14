@@ -1,14 +1,23 @@
 # Checkpoint — multi-agent full-access mode + coordination findings
 
-**Started:** 2026-08-07 · **Last updated:** 2026-09-28 · **Branch:** `comm-harness-50`
+**Started:** 2026-08-07 · **Last updated:** 2026-10-14 · **Branch:** `comm-harness-50`
 
-> ## ▶ START HERE (2026-09-28): read **§14** (newest), then §13 (mini scaffold) and §12
-> (the `--route-interface` split the bench50 set is built on).
+> ## ▶ START HERE (2026-10-14): read **§15** (newest), then §14 (the solo baseline it filters
+> from), §13 (mini scaffold) and §12 (the `--route-interface` split the sets are built on).
 >
-> **One-line status:** the SOLO BASELINE IS DONE. Opus 5.5 single-agent mini-swe-agent, issue
-> text with the `requirements` spec **withheld**, solves **34 of the 50** bench50 instances under
-> Pro's full criterion ($77.66, 87 min). `solvable.txt` is the filter; the multi-agent phase runs
-> on those 34 and still needs its set rebuilt WITHOUT requirements (§14.8 step 1).
+> **One-line status:** the multi-agent set is BUILT and the mini prompt is REWRITTEN.
+> `multiagent_pro_bench34_noreq/` holds the 34 instances §14 found solvable without the
+> `requirements` spec (180 agents, 14 `fixed.patch`), and `MINI_SYSTEM` v2 clears the Opus 5.5
+> classifier that was turning every step into a `format_error`. A 2-instance smoke run was in
+> flight when §15 was written. Live fix list: **`multiagent_pro/things_to_fix.md`**; every arm's
+> rendered prompt: **`multiagent_pro/prompt_templates.md`** (generated — run
+> `gen_prompt_templates.py`, do not hand-edit).
+>
+> **Two traps worth reading before you touch anything:** build the multi-agent set from
+> `sampled_pro_pruned`, never `sampled_pro` (§15.1 — the latter silently gives 201 agents instead
+> of 180 and no `fixed.patch`); and pre-flight the prompt against the model with one live call
+> asserting a non-empty completion (§15.6 — an empty completion is indistinguishable from a bad
+> agent in the aggregate score).
 >
 > **Read §14.4 before swapping models:** Opus 5.5's `reasoning_extraction` classifier makes it
 > return EMPTY completions on the paper's prompt, with no error — every step becomes a
@@ -1942,3 +1951,205 @@ numbers are not comparable to the paper's at all, because the paper includes `re
 4. Optionally adjudicate `811093f0` at a higher cost limit (§14.5).
 5. Unchanged from §10.5 / §13.6: structural edit bug, edit-failure recovery, false attestation via
    free-text `send_message`, scope-guard leaks 3/3 obfuscated reads.
+
+## 15. 2026-10-01/14 — the 34-instance no-requirements set, and the mini v2 prompt
+
+Branch `comm-harness-50`. Commits `7072b92`, `dda520d`, `c5d2a46`, `0697182`, `3a135b4`,
+`2c3ae6d`, `1998107`, `6b63409`.
+
+§14 established that 34 of the 50 bench50 instances are solvable with the `requirements` spec
+withheld. This section is everything between that result and the first multi-agent run on those
+34: the set itself, two cost-accounting bugs, the prompt documentation, and the mini prompt
+rewrite that was blocking the run.
+
+### 15.1 `multiagent_pro_bench34_noreq/` — and the trap in building it
+
+34 instances, **180 agents**, 14 with a `fixed.patch`. Built from `solvable.txt`.
+
+**Build it from `sampled_pro_pruned`, NEVER `sampled_pro`.** The first attempt used the latter and
+produced **201 agents and no `fixed.patch` anywhere** — a structurally different benchmark.
+bench50 is a PRUNED decomposition (§12.4: non-functional files stop being agents and their gold
+diff is carried as `fixed.patch`), and `sampled_pro_pruned/` is the metadata dir that produced it;
+its pruned-patch file count matches bench50's agent count 50/50.
+
+Verified against bench50 for all 34: identical `num_agents`, `gold_files`, `fixed_files`,
+`base_commit`, `route_interface`; 180 agents; 14 `fixed.patch`; and **all 180 `local_issue.md`
+files differ from their bench50 counterparts by REMOVED lines only**, the single dropped section
+being `## Requirements`. Kept as a new directory rather than replacing bench50, whose runs are
+graded against the with-requirements text.
+
+### 15.2 Two cost-accounting bugs, both silent
+
+**Container leak.** `gen_solver_config.py`'s mini path set `run_args: ["--entrypoint", ""]`, and
+mini's default is `["--rm"]` — setting the field REPLACES that list rather than appending, so
+auto-cleanup was silently dropped and every container survived its run (14 were still on the box
+from the §13.5 runs). A 3-cell sweep over this set starts ~540 containers on a root filesystem
+that has already hit 100% once (§11.5). Now `["--rm", "--entrypoint", ""]`.
+
+**Blended pricing flattening a split rate.** `--price-per-million-tokens` takes ONE rate and
+applies it to both directions, so registering Opus 5.5 that way recorded output at $4/M when it is
+$20/M — a 27% understatement on a 100k-in/10k-out shape, which an SWE-agent
+`per_instance_cost_limit` then overspends by the same margin. Worse, `ensure_registered` called
+`save_pricing` unconditionally whenever price+context were passed, and callers always pass them
+(`run_one.sh` hardcodes it), so a corrected entry was rewritten on the next config generation —
+it happened twice before the cause was clear. `save_pricing` now takes an optional output rate,
+`--output-price-per-million-tokens` exposes it, and `ensure_registered` refuses to overwrite an
+entry whose input and output already differ unless an explicit output price is given, printing
+what it kept.
+
+### 15.3 `prompt_templates.md` — every arm's prompt, generated not written
+
+New reference holding the RENDERED prompt for every arm (placeholders substituted, fragments
+spliced), plus the round notice, which no template shows and which is the entire delivery
+mechanism under push. Generated by `gen_prompt_templates.py`; **do not hand-edit it**.
+
+Three things it surfaced that reading the source does not:
+
+* **The swe-agent single-agent arm DOES exist** — `SWE-agent/config/tool_use.yaml`, driven by
+  SWE-agent's own `run-batch`. An earlier claim here that it "does not exist" was wrong; what does
+  not exist is a build path in THIS harness (`solo/build_solo.py` emits only `mini.yaml`).
+* **"SWE-agent" does not denote one action space.** The paper's single-agent config has a REAL
+  SHELL plus one editing tool (`enable_bash_tool: true`, `str_replace_editor`, `submit`); our
+  multi-agent arm has NO shell and nine `scoped_fs` tools plus the comm bundle. Its two arms
+  differ more from each other than mini's two do — worth remembering, since §13's premise was that
+  SWE-agent's restrictive tool surface motivated adding mini. The *paper's* SWE-agent is not the
+  restrictive one; ours is.
+* Two settings in that config are inert: `USE_FILEMAP: 'true'` is vestigial (`tools/filemap` is
+  not in its bundle list and nothing loaded reads the variable), and no history processor is set,
+  so `DefaultHistoryProcessor` applies and **returns history unchanged** — that arm elides nothing,
+  unlike ours.
+
+A rendering bug worth recording because the first version shipped with it: four of these templates
+contain their own ``` examples, which close a 3-backtick fence early and leak their `##` lines as
+document headings. The generator now widens each fence past any backtick run inside the content and
+**fails if any heading escapes a fence**.
+
+`things_to_fix.md` was created alongside it as the live fix list — items deleted as implemented.
+
+### 15.4 B2: the SWE-agent arm documents its tools twice (measured, NOT applied)
+
+Function calling is genuinely in use on that arm, not merely configured: a real `broadcast` run
+shows structured `tool_calls` on **40/40** trajectory steps, 36 `role: "tool"` messages and
+`tool_call_ids` on messages, and `enable_bash_tool: false` would raise at construction under any
+other parser. So the schemas already reach the model through `tools=` (`models.py:679`).
+
+Rendering `{{command_docs}}` into `SYSTEM_PROMPT` on top of that sends the same information again
+as prose: **4,951 of a 6,763-char system message, 73% of it**, on every request, on a gateway that
+ignores caching — ~$53 per instance across 180 agents at Opus 5.5 input rates before any work.
+Nothing is lost by removing it: checked field by field across all 12 tools, the docstring becomes
+the schema `description` and every argument description, type, `required` and `enum` carries
+through 12/12; the only string `command_docs` adds is the CLI signature line, which has no consumer
+under function calling. A live A/B returned the same first action both ways (`scoped_list`,
+`scoped_search`), valid and well-formed, at **3,454 vs 5,145 input tokens**.
+
+**Left as a proposal.** It is a behavioural change and every harness50 run has the docs in-prompt,
+so applying it breaks comparability with them — it belongs with the §D scaffold decision, not with
+the bug fixes.
+
+Also recorded, because it confuses anyone reading the dumps: **the schemas are invisible in
+`context/messages.jsonl`**. `tools=` is a sibling API parameter, not a message, and `dump_context`
+records `agent.messages` only. What IS visible is the consequence — the `tool` roles and the
+`tool_calls` on assistant turns.
+
+### 15.5 The mini multi-agent prompt, v2
+
+`MINI_SYSTEM` restructured into `## Response format` / `## Command examples` / `## Coordination` /
+`## Rounds` / `## Rules`. The v1 text is frozen at `prompt_archive/mini_system_v1.txt` and
+rendered as `prompt_templates.md` §7 with the change table, because **every mini multi-agent
+result up to and including harness50 was produced with v1** and those runs are not comparable with
+these on prompt text.
+
+* **THOUGHT had to go (A1, closed).** On `claude5_5_opus` that sentence trips the
+  `reasoning_extraction` classifier: empty completion, no error, `parse_action` finds no bash
+  block, EVERY step a `format_error` (§14.4). Verified closed by a live call per instance on two
+  bench34 instances — non-empty content, exactly one parseable action each.
+* **`no_op` never existed for mini.** `_install_tools` only ever copied the comm bins,
+  `scoped_submit` and `submit_gate.py`; `no_op` lives in `tools/scoped_fs/bin/` and was never
+  installed. Measured: **0 recorded across 40 agent-rounds** in `broadcast/mini_swe_agent`, against
+  3 and 2 in the `broadcast/swe_agent` cells. v1 advertised a command returning
+  `command not found`, so the pass/wait mechanism has never existed in the mini arm at all.
+* **`scoped_submit` removed, for mini only.** It was a thin wrapper: optionally run the gate, then
+  echo the sentinel and a `git diff --stat`. The graded patch never came from it, and
+  `has_finished()` matches the sentinel on the first output line of ANY command, so the prompt now
+  instructs the agent to echo it directly. **Consequence:** `--submit-gate`'s delete-announcement
+  check ran inside that wrapper and is now **SWE-agent-only**; `SUBMIT_GATE` is no longer injected
+  into mini's env either, since setting it would imply a gate that cannot fire. The independent
+  false-attestation guard is unaffected — the `publish_interface` existence check lives in
+  `comm/lib/verify.py` and runs inside the tool.
+* **B1 closed.** `action_observation_template` and `format_error_template` are now read from the
+  submodule's `swebp.yaml`, so the multi-agent mini arm wraps observations **byte-identically to
+  the solo arm** (867c with a 10k head/tail cap and `<returncode>`; 604c format error). They had
+  been unset, leaving mini's 23- and 61-char defaults — untruncated output with no returncode, into
+  a context with no history processor on a gateway that ignores caching.
+* **A5: an indented fence makes the submit step unparseable.** `parse_action` is
+  `re.findall(r"```bash\s*\n(.*?)\n```", ..., re.DOTALL)`, which needs the CLOSING fence to follow
+  a newline directly. Measured against that exact regex: a flush-left fence yields 1 action; the
+  same fence indented four spaces — which is what it looks like nested in a numbered list — yields
+  **ZERO, a FormatError**. Models mirror the shape they are shown, and that shape sat in front of
+  the model exactly when it went to record its work. Rule 5's command is now stated INLINE in
+  backticks and every fence in the prompt is flush-left.
+* **The editing-safety block was dropped deliberately**, on the grounds that Opus 5.5 is far
+  stronger than the gpt-4o-mini behind the §13.5 failures. What that gives up, recorded so a later
+  regression is recognisable rather than mysterious: the `>`-truncation warning that took a run
+  from `P2P 0/66` back to working (§13.5 v2→v3), and the only change-approach-after-refusal
+  guidance anywhere — which §14.5 then observed Opus 5.5 itself needing, issuing byte-identical
+  commands on consecutive steps.
+* **The round notice no longer appends `NOTICE_WORKING` / `NOTICE_SUBMITTED`** (user's change).
+  They named `scoped_submit` and `no_op`, and the notice is injected EVERY round from round 2, so
+  every mini agent would have been told repeatedly to run commands that no longer exist. It could
+  not be fixed by branching on scaffold — the notice is byte-identical for both backends on
+  purpose, and that is what keeps "scaffold" a controlled variable (§13.1). What went with it: the
+  round-arithmetic hint, and the explanation §8 added for why an already-submitted agent is being
+  stepped again. The reciprocity instruction also went, but symmetrically — it is in the system
+  prompt for every agent — so that confound is gone rather than reintroduced. `build_notice`'s
+  `submitted_in` parameter is now unused and the blocks are commented rather than deleted.
+
+### 15.6 Verification, and two launch lessons
+
+* **Config validation**, 2 instances x 3 agents: all 6 `mini.yaml` load into mini's own
+  `AgentConfig` and `ScopedDockerEnvironmentConfig`; no stray `{rounds}`/`{steps}`/`{coord}`/
+  `{comm_docs}`; no `no_op`/`scoped_submit`/`THOUGHT`; comm bins correct per cell; deny lists
+  correct (peers PLUS the `fixed.patch` file §12.4 denies to everyone).
+* **Opus 5.5 pre-flight PASSED** on both instances — non-empty, exactly one parseable action,
+  $0.024. **Do this before every sweep and after every model swap**: an empty completion is
+  indistinguishable from a bad agent in the aggregate score.
+* **`--mode dry` does not support mini** — it loads `solver.yaml` unconditionally, and a
+  mini-generated instance has only `mini.yaml`.
+* **Launch with `setsid`, and verify the parent chain.** A first launch used `nohup ... &`, which
+  ignores SIGHUP but stays in this session's process group — `PPID` was the launching shell, not
+  init. Relaunched via `setsid tmux new-session -d`, after which the chain is
+  `orchestrate -> launcher -> tmux server -> init`.
+* **`orchestrate.py` does not flush stdout**, so piped through `tee` both the log file and the tmux
+  pane lag behind a buffer and a healthy run looks frozen (the same bug `run_solo.py` was fixed for
+  with `flush=True`). Progress is readable from `context/messages.jsonl` and `traj/round_*.json`,
+  which are written directly. **Set `PYTHONUNBUFFERED=1` in the launcher before the 34-instance
+  sweep** — a frozen-looking log over several hours is a real problem.
+
+**IN FLIGHT at time of writing:** a 2-instance / 2-round smoke run of v2, broadcast, Opus 5.5, in
+tmux `mini_v2_smoke` via `/media/data/dkalwar/harness50/run_mini_v2_smoke.sh`, landing in
+`harness50/broadcast/mini_swe_agent/claude_opus_5_5/` with `--dump-context`. Read the action
+histogram and patch shape BEFORE the grade: §13.5 v1 and a working run scored identically while
+one team had done no work at all.
+
+### 15.7 Still open
+
+1. **things_to_fix.md A2/A3** — the SWE-agent prompt still claims requirements are present (false
+   on bench34_noreq) and its first paragraph contradicts its second on scope. Both block the
+   SWE-agent arm, not the mini arm.
+2. **B2** (§15.4) and **D** — the scaffold comparison is confounded: `MINI_SYSTEM` is far longer
+   than `SYSTEM_PROMPT` and carries behavioural levers SWE-agent lacks. Choose parity vs declared
+   asymmetry BEFORE running, since changing it later invalidates comparisons.
+3. **C1-C5** — registry omits the owning file; nothing says adopt-don't-invent,
+   don't-claim-unverified, or change-approach-after-refusal; round arithmetic unexplained.
+4. **mini's cost tracking is inert.** `build_mini_config` does not wire `litellm_model_registry`,
+   so litellm cannot price the gateway model and mini RAISES rather than warns —
+   `MSWEA_COST_TRACKING=ignore_errors` is required, after which cost reports $0.00 and `cost_limit`
+   does nothing; `step_limit` is the only ceiling. The solo arm registers real prices and has a
+   working brake (§14.6); doing the same here would give the multi-agent arm one too.
+5. `PYTHONUNBUFFERED=1` in the launcher; `--mode dry` support for mini; the commented-out notice
+   blocks and unused `submitted_in`.
+6. **Disk: 12 GB free, 99%.** No pulls are needed for these instances, but `docker system df`
+   reports ~120 GB reclaimable in images and ~15 GB of build cache. Do not prune the `sweap-images`
+   without asking (§11.5).
+7. Unchanged from §10.5 / §13.6: structural edit bug, edit-failure recovery, false attestation via
+   free-text `send_message`, scope guard leaking 3/3 obfuscated reads.
