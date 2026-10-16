@@ -16,7 +16,7 @@ Pro paper's own config inside that scaffold's submodule --
 | arm | system prompt | source |
 | --- | --- | --- |
 | mini x SINGLE | swebp.yaml, 638c (+1 substitution) | the paper's config, in the submodule |
-| mini x MULTI | `MINI_SYSTEM`, 4758c rendered | ours |
+| mini x MULTI | `MINI_SYSTEM`, 4767c rendered | ours |
 | swe-agent x SINGLE | tool_use.yaml, 77c | the paper's config, in the submodule |
 | swe-agent x MULTI | `SYSTEM_PROMPT`, 1895c rendered | ours |
 
@@ -226,7 +226,7 @@ to proceed in two steps, first writing TRIPLEBACKTICKSBASH, then replacing them 
 
 Written by `gen_solver_config.py::build_mini_config` (`--scaffold mini`).
 
-## 2.1 system_template -- rendered for `--comm-mode p2p --beliefs`, rounds=10, steps=6 (4758c)
+## 2.1 system_template -- rendered for `--comm-mode p2p --beliefs`, rounds=10, steps=6 (4767c)
 
 This is **v2**, rewritten 2026-10-14 and used from `multiagent_pro_bench34_noreq` onward. The
 prompt it replaced is preserved verbatim in **section 7**, along with what changed and why --
@@ -349,7 +349,7 @@ way -- so ask early, and keep working while you wait.
 3. Directory and environment variable changes are not persistent. Every action runs in a new
    subshell. You can prefix an action with `MY_ENV_VAR=MY_VALUE cd /path/to/working/dir && ...`,
    or write and load environment variables from files.
-4. To coordinate with your peers, use the provied tools.
+4. To coordinate with your peers, use the above defined commands.
 5. To record the work you have done so far, run `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT` as the only command. Do not combine it with anything else.
     
     That ends your turn for THIS round only. It does not end the run and it is not your last word:

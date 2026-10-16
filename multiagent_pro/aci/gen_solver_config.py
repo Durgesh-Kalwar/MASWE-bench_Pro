@@ -396,7 +396,7 @@ way -- so ask early, and keep working while you wait.
 3. Directory and environment variable changes are not persistent. Every action runs in a new
    subshell. You can prefix an action with `MY_ENV_VAR=MY_VALUE cd /path/to/working/dir && ...`,
    or write and load environment variables from files.
-4. To coordinate with your peers, use the provied tools.
+4. To coordinate with your peers, use the above defined commands.
 5. To record the work you have done so far, run `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT` as the only command. Do not combine it with anything else.
     
     That ends your turn for THIS round only. It does not end the run and it is not your last word:
