@@ -373,8 +373,7 @@ nothing, there is no such section at all. Either way, the names a peer invents a
 Your peers cannot read your code, so they will not discover the names you choose -- you have to
 tell them, and they have to tell you. Ask for what you need, and answer what you are asked.
 {coord}
-Along with the usual shell access you have also been given some functional tools for
-coordination:
+These commands are on your PATH alongside the usual shell commands to coordination with your peers:
 
   list_agents                         who your peers are and which file each owns
 {comm_docs}
@@ -398,10 +397,9 @@ way -- so ask early, and keep working while you wait.
    subshell. You can prefix an action with `MY_ENV_VAR=MY_VALUE cd /path/to/working/dir && ...`,
    or write and load environment variables from files.
 4. To coordinate with your peers, use the provied tools.
-5. To record the work you have done so far, run exactly this as your command:
-   `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && git --no-pager diff --stat HEAD`
-
-   That ends your turn for THIS round only. It does not end the run and it is not your last word:
+5. To record the work you have done so far, run `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT` as the only command. Do not combine it with anything else.
+    
+    That ends your turn for THIS round only. It does not end the run and it is not your last word:
     the run continues to the final round regardless, you keep getting turns so that peers can still
     reach you, and you are expected to run it again in a later round if a peer tells you something
     that changes your file. Your file as it stands at the end of the final round is what gets graded.
@@ -436,11 +434,11 @@ def swebp_templates() -> dict:
 
 _MINI_COMM_DOCS = {
     "broadcast": ("  send_message --message '<text>'     say something to EVERY peer at once\n"
-                  "  publish_interface '<signature>' '<description>'\n"
+                  "  publish_interface '<signature>' --description '<text>'\n"
                   "                                      announce a name peers must code against\n"),
     "p2p": ("  send_message <agent_id|all> --message '<text>'\n"
             "                                      message one peer, or all of them\n"
-            "  publish_interface '<signature>' '<description>'\n"
+            "  publish_interface '<signature>' --description '<text>'\n"
             "                                      announce a name peers must code against\n"),
 }
 _MINI_BELIEF_DOC = ("  update_belief <agent_id> --note '<text>'\n"

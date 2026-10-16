@@ -42,6 +42,26 @@ from minisweagent.environments.docker import (  # noqa: E402
 # The sentinel mini's DefaultAgent.has_finished() matches on a command's FIRST output line.
 SUBMIT_SENTINEL = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
 
+# Shell segment separators, for checking scope per command rather than per whole line. Not a
+# shell parser: it does not know about quotes or subshells, so a separator inside a string
+# splits too. That errs toward MORE segments and hence more checking, which is the safe
+# direction -- a segment is only ever exempted when its own first word is a comm bin.
+COMMAND_SEP = re.compile(r"&&|\|\||;|\n")
+
+# The comm bundle's bins (tools/comm/bin). Naming a peer's file in one of these is the intended
+# way to ask its owner about it, so these segments are exempt from the scope check.
+COMM_BINS = frozenset({"list_agents", "publish_interface", "send_message", "update_belief"})
+
+
+def _splittable(seg: str) -> bool:
+    """Whether shlex can tokenize this segment -- unbalanced quotes raise ValueError, and a
+    heredoc body routinely contains them."""
+    try:
+        shlex.split(seg)
+        return True
+    except ValueError:
+        return False
+
 
 # --------------------------------------------------------------------------- #
 # Scope guard
@@ -140,15 +160,36 @@ class ScopedDockerEnvironment(DockerEnvironment):
 
     def _denied(self, command: str) -> str | None:
         """The peer path this command names, or None. Longest needle first so the reported
-        path is the most specific match rather than a two-component suffix."""
-        for needle, owner in sorted(self._needles, key=lambda t: -len(t[0])):
-            if needle in command:
-                return owner
-        # Split reference: `cd <peer dir> && cat <basename>` -- both parts present, but not
-        # adjacent, so no single needle matches.
-        for parent, base, owner in self._pairs:
-            if parent in command and base in command:
-                return owner
+        path is the most specific match rather than a two-component suffix.
+
+        Checked per shell segment, not over the whole string. A peer path is legitimate INSIDE
+        a comm command -- naming a peer's file is how you ask its owner about it -- so a
+        segment that only invokes a comm bin is exempt, the same exemption `internal=True`
+        gives the harness. Measured on the 2026-10-15 smoke run: whole-command matching refused
+        a correct `send_message` announcement because `cd /app/<dir>` supplied the parent and
+        the peer's basename appeared in the prose.
+
+        Deliberate limitation: only comm bins and `cd` are exempt, so a peer path inside an
+        ordinary command is still refused even when the command EXCLUDES that file
+        (`grep -v peer.py`, `--exclude=peer.py`). Telling those apart needs per-flag argument
+        analysis, which would be easy to get wrong in the permissive direction.
+        """
+        for seg in COMMAND_SEP.split(command):
+            seg = seg.strip()
+            if not seg:
+                continue
+            head = shlex.split(seg)[0] if _splittable(seg) else seg.split()[0]
+            if head in COMM_BINS or head == "cd":
+                continue                       # asking about a peer's file is allowed
+            for needle, owner in sorted(self._needles, key=lambda t: -len(t[0])):
+                if needle in seg:
+                    return owner
+            # Split reference: `cd <peer dir> && cat <basename>` -- both parts present, but not
+            # adjacent, so no single needle matches. Pairs are checked against the WHOLE command
+            # because that is precisely a cross-segment construction.
+            for parent, base, owner in self._pairs:
+                if parent in command and base in seg:
+                    return owner
         return None
 
     def _record(self, command: str, owner: str) -> None:
@@ -351,15 +392,24 @@ class MiniScaffold:
         self._steps += 1
         try:
             out = self.agent.step()
+        # Both handlers record the thought and action that CAUSED the exception. Leaving them
+        # empty made every terminating step a blank row in the trajectory: a fired submission
+        # looked indistinguishable from one that never happened, which is exactly how the
+        # submission-loss measurement first came out wrong. Mirrors solo/run_solo.py.
         except NonTerminatingException as e:
             # run() feeds the error back to the model as a user turn and continues.
+            thought, action = self._last_thought(), self._last_action()
             self.agent.add_message("user", str(e))
-            return StepResult(step=self._steps, observation=str(e),
-                              exit_status="format_error")
+            return StepResult(step=self._steps, thought=thought, action=action,
+                              observation=str(e), exit_status="format_error")
         except TerminatingException as e:
             submitted = isinstance(e, Submitted)
+            thought, action = self._last_thought(), self._last_action()
             self.agent.add_message("user", str(e))
-            return StepResult(step=self._steps, observation=str(e),
+            return StepResult(step=self._steps, thought=thought, action=action,
+                              observation=str(e),
+                              tool_calls=[{"name": _command_name(action),
+                                           "args": {"command": action}}] if action else [],
                               exit_status=type(e).__name__, done=True,
                               submitted=submitted)
         except Exception as e:                       # never let one step kill the run

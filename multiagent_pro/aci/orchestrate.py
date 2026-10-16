@@ -550,10 +550,16 @@ def run_agents(inst_dir, spec, rounds, steps_per_round, dump_context_enabled=Fal
 
 
 # --------------------------------------------------------------------------- #
-def merge_and_grade(inst_dir, output_root, prefix, grade, dockerhub_username):
-    inst_id = inst_dir.name
+def merge_and_grade(inst_dirs, output_root, prefix, grade, dockerhub_username):
+    """Merge EVERY instance of this run, then grade once.
+
+    Takes the whole list, not one directory: the merger rewrites patches.json from scratch on
+    every call, so merging per instance inside the run loop left the file holding only the last
+    one -- every earlier instance silently dropped out of the grade.
+    """
+    inst_ids = [d.name for d in inst_dirs]
     subprocess.run([sys.executable, str(BUILD_SCRIPT), "--mode", "merge",
-                    "--instances", inst_id, "--output", str(output_root),
+                    "--instances", *inst_ids, "--output", str(output_root),
                     "--prefix", prefix], check=True)
     if not grade:
         print(f"\nMerged. To grade:\n  python swe_bench_pro_eval.py "
@@ -607,6 +613,7 @@ def main():
     sys.path.insert(0, str(REPO_DIR / "helper_code"))
     from image_uri import get_dockerhub_image_uri
 
+    solved = []                 # instances actually run, in order -- merged together at the end
     for inst_dir in inst_dirs:
         spec = json.loads((inst_dir / "spec.json").read_text())
         spec.setdefault("image", get_dockerhub_image_uri(
@@ -635,7 +642,11 @@ def main():
         else:
             run_agents(inst_dir, spec, args.rounds, args.steps_per_round,
                        dump_context_enabled=args.dump_context)
-        merge_and_grade(inst_dir, root, args.prefix, args.grade, args.dockerhub_username)
+        solved.append(inst_dir)
+
+    # Outside the loop: one merge covering every instance, then one grading pass.
+    if solved:
+        merge_and_grade(solved, root, args.prefix, args.grade, args.dockerhub_username)
 
 
 if __name__ == "__main__":

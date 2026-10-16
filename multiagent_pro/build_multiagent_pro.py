@@ -1308,8 +1308,11 @@ def main():
             print(f"  {spec[KEY_INSTANCE_ID]:<70} {tag:<16} contract={contract}")
         print(f"\nDone. Specs under {out_dir}/")
     else:
+        # Without --instances, an instance is a subdirectory holding spec.json -- the same test
+        # orchestrate.py uses. Plain `p.is_dir()` also picked up a run's logs/ and eval_out/,
+        # and merge_instance exits on the first directory with no agent_*.patch.
         targets = [out_dir / i for i in args.instances] if args.instances else \
-            [p for p in out_dir.iterdir() if p.is_dir()]
+            [p for p in sorted(out_dir.iterdir()) if (p / "spec.json").is_file()]
         print(f"Merging agent patches for {len(targets)} instance(s)\n")
         entries = [merge_instance(t, prefix=args.prefix) for t in targets]
         out = write_patches_json(entries, out_dir / "patches.json")

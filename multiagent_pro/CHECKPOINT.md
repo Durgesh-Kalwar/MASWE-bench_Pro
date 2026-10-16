@@ -2153,3 +2153,106 @@ one team had done no work at all.
    without asking (§11.5).
 7. Unchanged from §10.5 / §13.6: structural edit bug, edit-failure recovery, false attestation via
    free-text `send_message`, scope guard leaking 3/3 obfuscated reads.
+
+---
+
+## 16. 2026-10-15 — the 6-round smoke run: first resolved multi-agent instances, and four fixes
+
+### 16.1 What ran
+
+Two instances (`ansible-395e5e20`, `qutebrowser-e57b6e0`), 3 agents each, **6 rounds x 6 steps**,
+broadcast, mini, Opus 5.5, on `multiagent_pro_bench34_noreq`. Launcher
+`harness50/run_mini_v2_smoke6.sh` — unlike the 2-round script it REGENERATES `mini.yaml` first, so
+the edited `MINI_SYSTEM` actually reaches the agents and the prompt's round budget matches what
+runs. rc=0, 12.5 min, 112 steps. The 2026-10-14 2-round artifacts are archived under
+`harness50/_archive/2026-10-14_mini_v2_smoke_2rounds/`.
+
+Prompt delta from the 2-round run: the user rewrote Rule 5 to *"run `echo
+COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT` as the only command. Do not combine it with anything
+else."*
+
+### 16.2 Result: 2/2 resolved, and submission loss eliminated
+
+| | 2-round run | 6-round run |
+| --- | --- | --- |
+| submissions fired | 9 | **29** |
+| submissions silently lost | **7 (44%)** | **0** |
+| format errors | 1 | **0** |
+| resolved | not graded | **2/2** |
+
+ansible F2P 8/8, qutebrowser F2P 1/1, P2P empty for both; agent patches 211/17/24 and 10/11/87
+lines; no merge overlap warnings. This is the **first multi-agent cell in the grid with any
+resolved instances** — every other coordination cell is 0-for-1.
+
+The sentinel fix came from prompt wording ALONE. Agents still chain `&&` on ~70% of steps
+(`has_finished()` only inspects output line 1), they simply keep the sentinel unchained. The
+`has_finished` override proposed earlier was therefore NOT implemented: it would change what
+"submitted" means relative to every recorded run for no measured gain. It remains the robust fix
+if a future model ignores Rule 5.
+
+**Caveat on the qutebrowser pass.** Its graded F2P is one test in
+`tests/unit/components/test_blockutils.py`. Agent_3 spent rounds 3-5 correctly diagnosing 12
+`TypeError`s in `tests/unit/components/test_adblock.py` — down to the call site, line 222 of
+agent_1's file — and that file is not in `selected_test_files_to_run`. The instance scores resolved
+while a real integration break the agents FOUND goes unmeasured. A property of the benchmark's test
+selection, but it means coordination quality and the grade can move independently in both
+directions.
+
+### 16.3 6 rounds buys coordination that 2 rounds cannot show
+
+With 2 rounds, round 1 is the only round anyone sends in and round 2 the only round anyone receives
+in, so no agent can act on what a peer said. At 6 rounds, `qutebrowser` produced a full
+diagnose → report → confirm exchange, and agent_3 reasoned correctly about the scoping itself
+(*"Our views of each other's files may simply be stale or isolated"*). Also measured: C2 fired
+invisibly — agent_2 and agent_3 both wrote agent_1's enum API before any message was delivered,
+opening with *"I assume agent_1 defines…"*, and happened to guess right because the issue text
+implies the names. A lucky guess and a coordinated one are indistinguishable in the artifacts.
+
+### 16.4 Four fixes applied
+
+1. **`publish_interface` was documented with the wrong syntax.** `_MINI_COMM_DOCS` showed
+   `publish_interface '<sig>' '<description>'`; the bin takes `--description`. All three of
+   agent_1's round-1 publishes died on argparse and the registry was EMPTY through round 1; it
+   self-corrected in round 2. Note `refused_interfaces` stayed 0 — an argparse failure is not
+   counted as a refusal, so this was invisible in `comm_stats`. **Mini-only**, because the
+   SWE-agent arm passes the tool as a schema: a confound in the scaffold comparison (item D), not
+   just a typo. Prompt text changed, so comparability with earlier mini runs is affected.
+2. **`patches.json` held only the last instance.** `merge_and_grade` ran inside the per-instance
+   loop and the merger rewrites the file from scratch, so every earlier instance silently dropped
+   out of the grade. Merge + grade now run once, outside the loop, over every instance. Separately,
+   `build_multiagent_pro.py --mode merge` without `--instances` treated `logs/` and `eval_out/` as
+   instances and aborted on the first with no `agent_*.patch`; it now filters on `spec.json`, the
+   test `orchestrate.py` already uses.
+3. **E1: terminating and format-error steps now record thought/action** (and `tool_calls` on
+   terminating steps), mirroring `solo/run_solo.py`. This bug actively misled analysis: a fired
+   submission records `observation = str(Submitted)` — the lines AFTER the sentinel — and left
+   `action` empty, so the first measurement of submission loss came out as "0 fired" for both
+   models. 29 blank dashboard rows in this run alone.
+4. **A6: the scope check is now per shell segment.** `_denied()` splits on `&&` / `||` / `;` /
+   newline and exempts a segment whose first word is a comm bin (`send_message`,
+   `publish_interface`, `list_agents`, `update_belief`) or `cd`; other segments are checked as
+   before, and the split-reference pair rule still looks at the whole command. A pure announcement
+   passes, a mixed chain like `send_message --message x && cat peer.py` stays refused.
+
+   **BEHAVIOUR CHANGE, recorded deliberately.** This loosens a guard mid-study: violation counts
+   and `comm_stats` are not comparable across the change, because before it some entries were
+   legitimate messages rather than attempted reads. Runs recorded before 2026-10-15 carry the old
+   semantics. The residual case is in things_to_fix A6-residual — a peer path inside an EXCLUSION
+   filter (`grep -v peer.py`) is still refused, hit twice this run; and the older, opposite leak
+   is unchanged (`grep -rn X lib/ansible/` names no peer path, yet recursion reads every peer file
+   under it).
+
+### 16.5 Dashboard
+
+`serve.sh` and `build_dashboard.py` are fine — the cell looked broken only because the run was not
+graded, and everything grade-derived (`resolved`, `tests`, `n_tests`, the merged `patch`) reads from
+`eval_out/`. Ungraded cells report `n_resolved/n_graded` as `0/0`, not `0/N`. After grading:
+`broadcast__mini_swe_agent__claude_opus_5_5: 2 instances, 2/2 resolved, 112 steps`. Note `serve.sh`
+binds 127.0.0.1, so viewing it from another machine needs `ssh -L 8765:localhost:8765`.
+
+### 16.6 Still open
+
+Unchanged from 15.7 except: A6 and E1 are implemented (16.4), A7 (submission loss) is closed by
+prompt wording (16.2), and E2's `PYTHONUNBUFFERED=1` is now in the smoke launcher but not yet in
+`run_one.sh` or the sweep driver. A2/A3 (SWE-agent prompt), B2/D (scaffold comparison, now with one
+more confound), C1-C5, E3, E4 and the disk situation all stand.

@@ -16,7 +16,7 @@ Pro paper's own config inside that scaffold's submodule --
 | arm | system prompt | source |
 | --- | --- | --- |
 | mini x SINGLE | swebp.yaml, 638c (+1 substitution) | the paper's config, in the submodule |
-| mini x MULTI | `MINI_SYSTEM`, 4754c rendered | ours |
+| mini x MULTI | `MINI_SYSTEM`, 4758c rendered | ours |
 | swe-agent x SINGLE | tool_use.yaml, 77c | the paper's config, in the submodule |
 | swe-agent x MULTI | `SYSTEM_PROMPT`, 1895c rendered | ours |
 
@@ -226,7 +226,7 @@ to proceed in two steps, first writing TRIPLEBACKTICKSBASH, then replacing them 
 
 Written by `gen_solver_config.py::build_mini_config` (`--scaffold mini`).
 
-## 2.1 system_template -- rendered for `--comm-mode p2p --beliefs`, rounds=10, steps=6 (4754c)
+## 2.1 system_template -- rendered for `--comm-mode p2p --beliefs`, rounds=10, steps=6 (4758c)
 
 This is **v2**, rewritten 2026-10-14 and used from `multiagent_pro_bench34_noreq` onward. The
 prompt it replaced is preserved verbatim in **section 7**, along with what changed and why --
@@ -320,13 +320,12 @@ what they still owe you, and whether a claim of theirs has actually shown up in 
 peer ever sees your notes, and they are shown back to you at the start of every round. Keep
 them current and use them to decide whom to ask for what.
 
-Along with the usual shell access you have also been given some functional tools for
-coordination:
+These commands are on your PATH alongside the usual shell commands to coordination with your peers:
 
   list_agents                         who your peers are and which file each owns
   send_message <agent_id|all> --message '<text>'
                                       message one peer, or all of them
-  publish_interface '<signature>' '<description>'
+  publish_interface '<signature>' --description '<text>'
                                       announce a name peers must code against
   update_belief <agent_id> --note '<text>'
                                       private note about a peer; nobody else sees it
@@ -351,10 +350,9 @@ way -- so ask early, and keep working while you wait.
    subshell. You can prefix an action with `MY_ENV_VAR=MY_VALUE cd /path/to/working/dir && ...`,
    or write and load environment variables from files.
 4. To coordinate with your peers, use the provied tools.
-5. To record the work you have done so far, run exactly this as your command:
-   `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && git --no-pager diff --stat HEAD`
-
-   That ends your turn for THIS round only. It does not end the run and it is not your last word:
+5. To record the work you have done so far, run `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT` as the only command. Do not combine it with anything else.
+    
+    That ends your turn for THIS round only. It does not end the run and it is not your last word:
     the run continues to the final round regardless, you keep getting turns so that peers can still
     reach you, and you are expected to run it again in a later round if a peer tells you something
     that changes your file. Your file as it stands at the end of the final round is what gets graded.
@@ -379,7 +377,7 @@ p2p (+ beliefs):
 ```
   send_message <agent_id|all> --message '<text>'
                                       message one peer, or all of them
-  publish_interface '<signature>' '<description>'
+  publish_interface '<signature>' --description '<text>'
                                       announce a name peers must code against
   update_belief <agent_id> --note '<text>'
                                       private note about a peer; nobody else sees it
@@ -391,7 +389,7 @@ exists, which is the variable under test:
 
 ```
   send_message --message '<text>'     say something to EVERY peer at once
-  publish_interface '<signature>' '<description>'
+  publish_interface '<signature>' --description '<text>'
                                       announce a name peers must code against
 ```
 
@@ -741,7 +739,7 @@ current v2.
 
 | | v1 (through harness50) | v2 (from bench34_noreq) |
 | --- | --- | --- |
-| rendered size (broadcast) | 3990c | see 2.1 |
+| rendered size (broadcast) | 3997c | see 2.1 |
 | reasoning instruction | *"Put a THOUGHT section before it explaining your reasoning"* | *"Before the command, write a short explanation of what you are about to do and why"* |
 | editing-safety block | ~25 lines: `>` destroys the file, `>>` only appends, python heredoc read-modify-write, `git diff` after every edit, `git checkout --` to recover, switch approach after two `sed` failures | **removed** |
 | "a round spent only talking is a round wasted" | present | removed |
@@ -776,7 +774,7 @@ regression is recognisable rather than mysterious: the `>`-truncation warning th
 anywhere -- which 14.5 then observed Opus 5.5 itself needing, issuing byte-identical commands on
 consecutive steps.
 
-## 7.2 The v1 prompt, rendered for broadcast (3990c)
+## 7.2 The v1 prompt, rendered for broadcast (3997c)
 
 ````
 You are one of several software-engineering agents fixing the same GitHub issue in a shared
@@ -833,7 +831,7 @@ of them, and no way to overhear less than everything: whatever anyone says, ever
 These commands are on your PATH alongside the usual shell tools:
   list_agents                         who your peers are and which file each owns
   send_message --message '<text>'     say something to EVERY peer at once
-  publish_interface '<signature>' '<description>'
+  publish_interface '<signature>' --description '<text>'
                                       announce a name peers must code against
   no_op                               end your turn early and wait for a reply
   scoped_submit                       record your patch (you may run it more than once)

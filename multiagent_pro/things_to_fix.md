@@ -32,50 +32,29 @@ Fix: delete paragraph 1; paragraph 2 is correct and already says everything.
 
 ---
 
+### A6-residual. The scope guard still refuses commands that EXCLUDE a peer's file
+
+A6 proper is implemented (2026-10-15): `_denied()` now checks each `&&` / `||` / `;` / newline
+segment separately and exempts a segment whose first word is a comm bin or `cd`, so a pure
+announcement passes while a mixed chain stays refused. CHECKPOINT 16.4 records the behaviour
+change. What remains is the narrower case:
+
+```
+grep -rn ITERATING_ lib/ansible --include=*.py \
+  | grep -v "play_iterator.py\|strategy/__init__.py\|strategy/linear.py"   -> REFUSED
+```
+
+The peer paths appear only in an EXCLUSION filter -- the command is explicitly avoiding those
+files -- but `grep` is not a comm bin, so the segment is checked and the needles match. Observed
+twice in the 2026-10-15 run (`ansible-395e5e20`, agent_1 round 4; the agent recovered with
+`--exclude-dir`). Deliberately not fixed: telling an exclusion from an access needs per-flag
+argument analysis, which is easy to get wrong in the permissive direction.
+
+Note the opposite hole is older and still open: `grep -rn X lib/ansible/` names no peer path and
+is allowed, yet recursion reads every peer file under it. That is the §10.5 / §13.6 "guard, not a
+sandbox" leak, not something the segment check changed.
+
 ---
-
-### A6. The scope guard refuses coordination messages that name a peer's file
-
-`aci/mini_scaffold.py` -- `ScopedDockerEnvironment._denied()` is substring matching over the whole
-command string, so it cannot tell NAMING a file from ACCESSING one. Its split-reference rule (the
-parent dir and the basename both appearing anywhere in the command) fires on a message body.
-
-Observed in the 2026-10-14 smoke run, `qutebrowser-e57b6e0`, agent_2 -- refused without running:
-
-```
-cd /app/qutebrowser/components && send_message --message 'agent_2 (braveadblock.py) here.
-Owner of blockutils.py: I am coding against upstream naming. Constructor:
-BlocklistDownloads(urls, parent=None) with NO callbacks. Signals: ...'
-  -> REFUSED: qutebrowser/components/adblock.py is owned by another agent
-```
-
-`cd /app/qutebrowser/components` supplied the parent directory, `adblock.py` appeared in the
-MESSAGE TEXT, and a complete, correct interface announcement never reached the board.
-
-This is inverted from the design intent. The guard exists so an agent cannot READ a peer's file and
-must therefore ASK -- and here it blocked the asking. Coordination in this benchmark is largely
-about peer files, so a well-formed message is likely to name one.
-
-**Why it matters before the sweep: it silently suppresses the dependent variable.** The study
-measures coordination, and this drops coordination messages while logging them as scope
-violations. It hit once in 11 board-bound commands here; across 34 instances x 180 agents x 3
-cells, a systematic bias against messages that name peer files would distort exactly the
-comparison the benchmark exists to make -- and would read as "agents coordinated less in this
-cell", not as a bug. It also corrupts the attempted-violation metric 13.2 introduced, since the
-counts now include legitimate messages.
-
-Fix: exempt the comm bins (`send_message`, `publish_interface`, `update_belief`, `list_agents`)
-from `_denied()`, the way `internal=True` already exempts harness-issued commands. They are
-standalone Python reading AGENT_ID / COMM_BOARD / AGENTS_ROSTER and writing JSON under
-`/root/comm/` -- they never touch the repo, so there is nothing for the guard to protect.
-
-The care is in the predicate: it must NOT be "contains send_message", or a read can be smuggled
-through `send_message --message x && cat peers_file.py`. Require that EVERY command in the
-`&&` / `||` / `;` chain is either a `cd` or one of the comm bins, so a mixed chain stays refused
-while a pure announcement passes.
-
-Verify by re-running the two smoke instances and confirming agent_2's announcement reaches
-`board.json` with zero entries in `scope_violations.jsonl` for that command.
 
 ---
 
@@ -217,20 +196,8 @@ prompts pull from, so they cannot drift.
 
 ## E. Tooling and instrumentation (not prompt defects)
 
-All four surfaced during the 2026-10-14 smoke run and are also listed in CHECKPOINT 15.7.
-
-### E1. `mini_scaffold.py` records no action on terminating or format-error steps
-
-`MiniScaffold.step()` builds its `StepResult` without `thought`/`action` in both the
-`TerminatingException` and `NonTerminatingException` branches, so every submission and every
-format error renders in the dashboard with an empty action -- 9 Submitted and 3 format_error steps
-out of 50 in the smoke run. The model DID issue a command on those steps (the sentinel echo, or
-whatever failed to parse), and on a format error the thought is the only evidence of what it was
-attempting.
-
-Fix: the same change already made in `solo/run_solo.py` -- capture `_last_thought()` /
-`_last_action()` BEFORE appending the termination notice, since that append moves the assistant
-turn away from the end of the message list.
+These surfaced during the 2026-10-14 smoke run and are also listed in CHECKPOINT 15.7. E1 was
+implemented on 2026-10-15 (CHECKPOINT 16.4).
 
 ### E2. `orchestrate.py` does not flush stdout
 
