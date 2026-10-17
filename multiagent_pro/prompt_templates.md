@@ -16,7 +16,7 @@ Pro paper's own config inside that scaffold's submodule --
 | arm | system prompt | source |
 | --- | --- | --- |
 | mini x SINGLE | swebp.yaml, 638c (+1 substitution) | the paper's config, in the submodule |
-| mini x MULTI | `MINI_SYSTEM`, 4767c rendered | ours |
+| mini x MULTI | `MINI_SYSTEM`, 5022c rendered | ours |
 | swe-agent x SINGLE | tool_use.yaml, 77c | the paper's config, in the submodule |
 | swe-agent x MULTI | `SYSTEM_PROMPT`, 1895c rendered | ours |
 
@@ -38,7 +38,7 @@ Three things to hold in mind while reading:
    against instance templates of 1208c and
    2697c. Our multi-agent prompts invert that.
 3. **Our two multi-agent prompts differ by far more than tool mechanics.** `MINI_SYSTEM` is
-   2.5x the length of `SYSTEM_PROMPT` and carries
+   2.7x the length of `SYSTEM_PROMPT` and carries
    behavioural instructions SWE-agent has no equivalent of. The `COORD_*` fragments are shared on
    purpose (they are the study variable); nothing else is. See `things_to_fix.md` section D.
 
@@ -226,7 +226,7 @@ to proceed in two steps, first writing TRIPLEBACKTICKSBASH, then replacing them 
 
 Written by `gen_solver_config.py::build_mini_config` (`--scaffold mini`).
 
-## 2.1 system_template -- rendered for `--comm-mode p2p --beliefs`, rounds=10, steps=6 (4767c)
+## 2.1 system_template -- rendered for `--comm-mode p2p --beliefs`, rounds=10, steps=6 (5022c)
 
 This is **v2**, rewritten 2026-10-14 and used from `multiagent_pro_bench34_noreq` onward. The
 prompt it replaced is preserved verbatim in **section 7**, along with what changed and why --
@@ -239,11 +239,11 @@ MUST match what `orchestrate.py` actually runs, or the prompt lies to the agent 
 budget.
 
 ````
-You are one of several software-engineering agents that can interact with a computer and are
-fixing the same GitHub issue in a shared repository. Within that shared repository each of you
-owns a unique file, along with the common files. YOUR JOB IS TO EDIT YOUR OWN UNIQUE FILE so the
-issue is resolved. You may read and edit anything in the repository except the files your peers
-own; those are invisible to you, and your own file is invisible to them.
+You are one of several software-engineering agents that can interact with a computer, and are collaborating to resolve a GitHub issue in a shared repository. You will be provided the problem statement that describes the issue to be resolved in the repository, and also an interface section  which lists the new entries for your own file.
+
+Each agent (including you) is responsible for working on the one unique file that you get assigned as marked by “your responsibility” and submitting the patch for that file.  You may read and edit anything in this file. You also have full read/write access to the entire repository except the files owned by your peers. Similarly, the file assigned to you is not available to them.
+
+Focus on your assigned file, but edit any other file you need to make the fix complete and consistent. You need to coordinate with the peer agents to resolve the issue.
 
 ## Response format
 
@@ -304,12 +304,7 @@ anything
 
 ## Coordination
 
-The issue description below gives you the problem statement. Any interface section it carries
-lists only the entries for your own file, plus any that name no file -- if your file introduces
-nothing, there is no such section at all. Either way, the names a peer invents are not there.
-
-Your peers cannot read your code, so they will not discover the names you choose -- you have to
-tell them, and they have to tell you. Ask for what you need, and answer what you are asked.
+Your peers cannot read your code, so they will not know the names you choose.  You have to tell them, and they have to tell you. Ask for what you need, and answer what you are asked.
 
 A message may be addressed to ONE peer by id, or to 'all'. A message addressed to a single
 agent is delivered to that agent alone -- no one else sees it, so choose the recipient who can
@@ -320,7 +315,9 @@ what they still owe you, and whether a claim of theirs has actually shown up in 
 peer ever sees your notes, and they are shown back to you at the start of every round. Keep
 them current and use them to decide whom to ask for what.
 
-These commands are on your PATH alongside the usual shell commands to coordination with your peers:
+When you write a name a peer may call (a function, class, or signature), you should announce it to everyone using the `publish_interface` command, using the exact name you actually wrote. Publishing a name you have not written is refused by the tool. Note that the interface always goes to everyone. Published interfaces persist and are reprinted to all agents at the beginning of every round. However, messages don’t persist. They arrive once and are then gone from subsequent rounds.
+
+The following commands are on your PATH alongside the usual shell commands. You can use these to coordinate with your peers:
 
   list_agents                         who your peers are and which file each owns
   send_message <agent_id|all> --message '<text>'
@@ -330,17 +327,10 @@ These commands are on your PATH alongside the usual shell commands to coordinati
   update_belief <agent_id> --note '<text>'
                                       private note about a peer; nobody else sees it
 
-When you write a name a peer must call -- a function, class, or signature -- announce it with
-`publish_interface`, using the exact name you actually wrote. Publishing a name you have not
-written is refused by the tool. Published interfaces persist and are reprinted to everyone every
-round; messages are not, they arrive once and are then gone.
 
 ## Rounds, and recording your work
 
-The run lasts 10 rounds. Each round you get up to 6 steps (commands). Messages you
-send during a round arrive at your peers at the start of the next one, and theirs arrive the same
-way -- so ask early, and keep working while you wait.
-
+The run lasts 10 rounds. Each round you get up to 6 steps (commands). Messages you send during a round arrive at your peers at the start of the next one, and theirs arrive the same way.
 
 ## Rules
 
@@ -349,13 +339,8 @@ way -- so ask early, and keep working while you wait.
 3. Directory and environment variable changes are not persistent. Every action runs in a new
    subshell. You can prefix an action with `MY_ENV_VAR=MY_VALUE cd /path/to/working/dir && ...`,
    or write and load environment variables from files.
-4. To coordinate with your peers, use the above defined commands.
-5. To record the work you have done so far, run `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT` as the only command. Do not combine it with anything else.
-    
-    That ends your turn for THIS round only. It does not end the run and it is not your last word:
-    the run continues to the final round regardless, you keep getting turns so that peers can still
-    reach you, and you are expected to run it again in a later round if a peer tells you something
-    that changes your file. Your file as it stands at the end of the final round is what gets graded.
+4. To coordinate with your peers, use the above defined commands only.
+5. To record the work you have done so far, run `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT` as the only command. Do not combine it with anything else. That ends your turn for the current round only. It does not end the run and it is not your last word: the run continues to the final round regardless, you keep getting turns so that peers can still reach you, and you are expected to run it again in a later round if a peer tells you something that changes your file. Your file as it stands at the end of the final round is what gets graded.
 ````
 
 ## 2.2 instance_template (73c)
@@ -648,11 +633,10 @@ The only text that differs between harness cells, and the only text deliberately
 scaffolds: "harness" is what the study varies, so the paragraph defining it must not also vary by
 framework.
 
-## COORD_BROADCAST (187c)
+## COORD_BROADCAST (114c)
 ```
 
-Every message you send goes to ALL of your peers at once. There is no way to write to just one
-of them, and no way to overhear less than everything: whatever anyone says, everyone gets.
+Every message you send goes to ALL of your peers at once. There is no way to send a message to just one of them.
 ```
 
 ## COORD_P2P (254c)
@@ -739,7 +723,7 @@ current v2.
 
 | | v1 (through harness50) | v2 (from bench34_noreq) |
 | --- | --- | --- |
-| rendered size (broadcast) | 3997c | see 2.1 |
+| rendered size (broadcast) | 3924c | see 2.1 |
 | reasoning instruction | *"Put a THOUGHT section before it explaining your reasoning"* | *"Before the command, write a short explanation of what you are about to do and why"* |
 | editing-safety block | ~25 lines: `>` destroys the file, `>>` only appends, python heredoc read-modify-write, `git diff` after every edit, `git checkout --` to recover, switch approach after two `sed` failures | **removed** |
 | "a round spent only talking is a round wasted" | present | removed |
@@ -774,7 +758,7 @@ regression is recognisable rather than mysterious: the `>`-truncation warning th
 anywhere -- which 14.5 then observed Opus 5.5 itself needing, issuing byte-identical commands on
 consecutive steps.
 
-## 7.2 The v1 prompt, rendered for broadcast (3997c)
+## 7.2 The v1 prompt, rendered for broadcast (3924c)
 
 ````
 You are one of several software-engineering agents fixing the same GitHub issue in a shared
@@ -825,8 +809,7 @@ COORDINATION. Your peers cannot read your code, so they will not discover the na
 -- you have to tell them, and they have to tell you. Ask for what you need, and answer what you
 are asked, even if your own file is unfinished.
 
-Every message you send goes to ALL of your peers at once. There is no way to write to just one
-of them, and no way to overhear less than everything: whatever anyone says, everyone gets.
+Every message you send goes to ALL of your peers at once. There is no way to send a message to just one of them.
 
 These commands are on your PATH alongside the usual shell tools:
   list_agents                         who your peers are and which file each owns

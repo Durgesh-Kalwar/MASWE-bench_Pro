@@ -69,8 +69,7 @@ COMM_MODES = ("broadcast", "p2p")
 # difference. Only the surrounding tool-mechanics wording differs per scaffold.
 # --------------------------------------------------------------------------- #
 COORD_BROADCAST = """
-Every message you send goes to ALL of your peers at once. There is no way to write to just one
-of them, and no way to overhear less than everything: whatever anyone says, everyone gets.
+Every message you send goes to ALL of your peers at once. There is no way to send a message to just one of them.
 """
 
 COORD_P2P = """
@@ -301,11 +300,11 @@ def build_agent_config(spec, agent, inst_dir, *, model, cost_limit, roster, comm
 # work, the step where a parse failure is most expensive. Keeping a single flush-left demo in
 # `## Response format` removes the inconsistency rather than reducing it.
 MINI_SYSTEM = """\
-You are one of several software-engineering agents that can interact with a computer and are
-fixing the same GitHub issue in a shared repository. Within that shared repository each of you
-owns a unique file, along with the common files. YOUR JOB IS TO EDIT YOUR OWN UNIQUE FILE so the
-issue is resolved. You may read and edit anything in the repository except the files your peers
-own; those are invisible to you, and your own file is invisible to them.
+You are one of several software-engineering agents that can interact with a computer, and are collaborating to resolve a GitHub issue in a shared repository. You will be provided the problem statement that describes the issue to be resolved in the repository, and also an interface section  which lists the new entries for your own file.
+
+Each agent (including you) is responsible for working on the one unique file that you get assigned as marked by “your responsibility” and submitting the patch for that file.  You may read and edit anything in this file. You also have full read/write access to the entire repository except the files owned by your peers. Similarly, the file assigned to you is not available to them.
+
+Focus on your assigned file, but edit any other file you need to make the fix complete and consistent. You need to coordinate with the peer agents to resolve the issue.
 
 ## Response format
 
@@ -366,28 +365,18 @@ anything
 
 ## Coordination
 
-The issue description below gives you the problem statement. Any interface section it carries
-lists only the entries for your own file, plus any that name no file -- if your file introduces
-nothing, there is no such section at all. Either way, the names a peer invents are not there.
-
-Your peers cannot read your code, so they will not discover the names you choose -- you have to
-tell them, and they have to tell you. Ask for what you need, and answer what you are asked.
+Your peers cannot read your code, so they will not know the names you choose.  You have to tell them, and they have to tell you. Ask for what you need, and answer what you are asked.
 {coord}
-These commands are on your PATH alongside the usual shell commands to coordination with your peers:
+When you write a name a peer may call (a function, class, or signature), you should announce it to everyone using the `publish_interface` command, using the exact name you actually wrote. Publishing a name you have not written is refused by the tool. Note that the interface always goes to everyone. Published interfaces persist and are reprinted to all agents at the beginning of every round. However, messages don’t persist. They arrive once and are then gone from subsequent rounds.
+
+The following commands are on your PATH alongside the usual shell commands. You can use these to coordinate with your peers:
 
   list_agents                         who your peers are and which file each owns
 {comm_docs}
-When you write a name a peer must call -- a function, class, or signature -- announce it with
-`publish_interface`, using the exact name you actually wrote. Publishing a name you have not
-written is refused by the tool. Published interfaces persist and are reprinted to everyone every
-round; messages are not, they arrive once and are then gone.
 
 ## Rounds, and recording your work
 
-The run lasts {rounds} rounds. Each round you get up to {steps} steps (commands). Messages you
-send during a round arrive at your peers at the start of the next one, and theirs arrive the same
-way -- so ask early, and keep working while you wait.
-
+The run lasts {rounds} rounds. Each round you get up to {steps} steps (commands). Messages you send during a round arrive at your peers at the start of the next one, and theirs arrive the same way.
 
 ## Rules
 
@@ -396,13 +385,8 @@ way -- so ask early, and keep working while you wait.
 3. Directory and environment variable changes are not persistent. Every action runs in a new
    subshell. You can prefix an action with `MY_ENV_VAR=MY_VALUE cd /path/to/working/dir && ...`,
    or write and load environment variables from files.
-4. To coordinate with your peers, use the above defined commands.
-5. To record the work you have done so far, run `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT` as the only command. Do not combine it with anything else.
-    
-    That ends your turn for THIS round only. It does not end the run and it is not your last word:
-    the run continues to the final round regardless, you keep getting turns so that peers can still
-    reach you, and you are expected to run it again in a later round if a peer tells you something
-    that changes your file. Your file as it stands at the end of the final round is what gets graded.
+4. To coordinate with your peers, use the above defined commands only.
+5. To record the work you have done so far, run `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT` as the only command. Do not combine it with anything else. That ends your turn for the current round only. It does not end the run and it is not your last word: the run continues to the final round regardless, you keep getting turns so that peers can still reach you, and you are expected to run it again in a later round if a peer tells you something that changes your file. Your file as it stands at the end of the final round is what gets graded.
 """
 
 MINI_INSTANCE = """\
