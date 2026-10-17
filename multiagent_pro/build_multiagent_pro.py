@@ -586,14 +586,6 @@ def build_local_info(meta, agents, include_requirements, partition=False,
             sections = [
                 f"## Your responsibility (file: {ag['gold_file']})", "",
                 f"You are responsible for **`{ag['gold_file']}`**.",
-                "",
-                "IMPORTANT: the problem statement and the requirements below are COMPLETE "
-                "and unedited \u2014 nothing about the task has been withheld, shortened or "
-                "reworded. What you are NOT given is the new interfaces your PEERS "
-                "introduce: the last section lists only the entries for your own file, plus "
-                "any that name no file. A name a peer invents cannot be guessed \u2014 ask "
-                "for it with `send_message`, and announce the names you write with "
-                "`publish_interface` so peers can call them.",
                 "", "## Problem statement", "", problem or "(none provided)",
             ]
             if requirements:
@@ -1022,9 +1014,10 @@ def build_instance(meta, out_dir, k_distractors, include_requirements,
                 + "\n".join(ag["scope"]) + "\n"
             )
         if route_interface:
-            issue_header = (f"# Issue context for agent_{ag['idx']}\n"
-                            f"# (COMPLETE issue + requirements; only the interface entries "
-                            f"owned by PEERS are withheld)\n\n")
+            # No preamble: the body's own "## Your responsibility" section already states
+            # what is complete and what is withheld, and the old header also claimed
+            # requirements were present, which is false under --no-include-requirements.
+            issue_header = ""
         elif redact_paths_mode:
             issue_header = (f"# Issue context for agent_{ag['idx']}\n"
                             f"# (FULL text; only PEER-owned file locations are masked)\n\n")
