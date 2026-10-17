@@ -44,6 +44,11 @@ class StepResult:
     exit_status: str = ""
     done: bool = False
     submitted: bool = False
+    # Token accounting for the model call(s) this step made: tokens_in, tokens_out, and
+    # cost_gateway when the gateway reported its own billed figure. Empty when the backend
+    # does not surface usage. Recorded because the numbers arrive on every response and are
+    # otherwise discarded -- see `sum_usage`.
+    usage: dict = field(default_factory=dict)
 
     def as_record(self) -> dict:
         """The per-step dict written to <agent>/traj/round_<n>.json."""
@@ -56,7 +61,36 @@ class StepResult:
             "execution_time": self.execution_time,
             "done": self.done,
             "exit_status": self.exit_status,
+            "usage": self.usage,
         }
+
+
+# Keys that add up across steps. Anything else in a usage dict (a model name, say) is
+# per-call metadata and is deliberately NOT summed.
+USAGE_KEYS = ("calls", "tokens_in", "tokens_out", "reasoning_tokens", "cached_tokens",
+              "cost_litellm", "cost_gateway")
+
+
+def sum_usage(usages) -> dict:
+    """Add up per-step `usage` dicts. Absent keys count as zero; all-zero keys are omitted.
+
+    Why this exists at all: the model's reply carries `usage` on EVERY call, and on the
+    CreateAI gateway also its own billed `total_token_cost`, but nothing downstream kept
+    either -- mini's DefaultAgent keeps only the message content, so by the time a step is
+    recorded the numbers are gone. Spend then has to be guessed from character counts, which
+    cannot see tokens that were billed without being shown back (reasoning tokens being the
+    obvious case). Keeping the figures is free; re-deriving them afterwards is impossible.
+    """
+    total = {}
+    for u in usages:
+        for k in USAGE_KEYS:
+            v = (u or {}).get(k)
+            if v:
+                total[k] = total.get(k, 0) + v
+    for k in ("cost_litellm", "cost_gateway"):
+        if k in total:
+            total[k] = round(total[k], 6)
+    return total
 
 
 # --------------------------------------------------------------------------- #

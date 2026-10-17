@@ -195,7 +195,35 @@ def dump_context(path, sc, r, step_in_round):
         print(f"    (context dump skipped: {type(e).__name__}: {e})")
 
 
-def _comm_stats_row(r, aid, delivered, posted, round_steps, *, passed, submitted):
+def _cost_stats(stats):
+    """Per-agent and whole-instance token totals, folded up from the comm_stats rows.
+
+    Written beside comm_stats.json and from the same source, so the two can never disagree.
+    `cost_gateway` is the gateway's OWN billed figure and is authoritative where present;
+    `cost_litellm` is computed locally from the registered per-token prices and stays 0.0
+    until that registry is wired on this arm (things_to_fix E4).
+    """
+    from scaffolds import sum_usage
+    per_agent = {}
+    for row in stats:
+        per_agent.setdefault(row["agent"], []).append(row.get("usage") or {})
+    agents = {aid: sum_usage(us) for aid, us in sorted(per_agent.items())}
+    return {"total": sum_usage(agents.values()), "per_agent": agents}
+
+
+def _format_usage(u):
+    """One-line token summary for the round log, or '' when the backend reports none."""
+    if not u:
+        return ""
+    s = f"in={u.get('tokens_in', 0):,} out={u.get('tokens_out', 0):,}"
+    if u.get("reasoning_tokens"):
+        s += f" (reasoning {u['reasoning_tokens']:,})"
+    cost = u.get("cost_gateway") or u.get("cost_litellm")
+    return s + (f"  ${cost:.3f}" if cost else "")
+
+
+def _comm_stats_row(r, aid, delivered, posted, round_steps, *, passed, submitted,
+                    usage=None):
     """One row of comm_stats.json: what this agent received and said this round.
 
     These counts are the dependent variable of the harness study, so they are recorded even
@@ -220,6 +248,8 @@ def _comm_stats_row(r, aid, delivered, posted, round_steps, *, passed, submitted
         "belief_updates": names.count("update_belief"),
         "no_op": bool(passed),
         "submitted": bool(submitted),
+        # Tokens this agent spent this round. Empty on a backend that surfaces no usage.
+        "usage": usage or {},
     }
 
 
@@ -385,7 +415,7 @@ def run_agents(inst_dir, spec, rounds, steps_per_round, dump_context_enabled=Fal
     sys.path.insert(0, str(Path(__file__).resolve().parent))     # for build_runtime_image
     sys.path.insert(0, str(REPO_DIR / "SWE-agent"))
     from build_runtime_image import ensure_runtime_image
-    from scaffolds import SweAgentScaffold
+    from scaffolds import SweAgentScaffold, sum_usage
 
     # The harness is fixed at gen_solver_config time (it decided which comm bins exist in
     # <id>/_comm_bundle), so it is read back rather than re-specified with a flag that could
@@ -501,8 +531,12 @@ def run_agents(inst_dir, spec, rounds, steps_per_round, dump_context_enabled=Fal
                 after = read_beliefs(sc, aid)
                 (inst_dir / aid / f"beliefs_round_{r + 1}.json").write_text(
                     json.dumps(after, indent=2))
+            round_usage = sum_usage(st.get("usage") for st in round_steps)
+            if round_usage:
+                print(f"    [{aid}] {_format_usage(round_usage)}")
             stats.append(_comm_stats_row(r, aid, mine, posted_now, round_steps,
-                                         passed=passed, submitted=bool(submitted.get(aid))))
+                                         passed=passed, submitted=bool(submitted.get(aid)),
+                                         usage=round_usage))
         board = merge_board(board, pending)          # publish once, at the round barrier
         deliveries = board[len(frozen):]             # pushed into contexts next round
         for m in deliveries:
@@ -512,6 +546,10 @@ def run_agents(inst_dir, spec, rounds, steps_per_round, dump_context_enabled=Fal
         # Rewritten every round, not just at the end, so a run killed mid-flight still leaves
         # usable communication counts behind.
         (inst_dir / "comm_stats.json").write_text(json.dumps(stats, indent=2))
+        cost = _cost_stats(stats)
+        (inst_dir / "cost_stats.json").write_text(json.dumps(cost, indent=2))
+        if cost["total"]:
+            print(f"    [instance so far] {_format_usage(cost['total'])}")
         active = [a["id"] for a in spec["agents"] if not retired[a["id"]]]
         # Submitting no longer ends the run. An agent that finishes in round 2 keeps taking
         # turns, because it is the ONLY way a peer can still reach it -- and its patch stays

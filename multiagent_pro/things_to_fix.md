@@ -224,8 +224,30 @@ already uses to pick the backend) and validate `mini.yaml` against mini's own `A
 `build_mini_config` does not set `litellm_model_registry`, so litellm cannot price the gateway
 model and mini RAISES rather than warns -- `MSWEA_COST_TRACKING=ignore_errors` is therefore
 required, after which cost reports $0.00 and `cost_limit` does nothing. `step_limit` is the only
-ceiling on this arm. Real spend has to be reconstructed from the token counts in the context
-dumps (the smoke run cost $1.35 that way, against a reported $0.00).
+ceiling on this arm. The 2026-10-14 smoke run cost $1.35 against a reported $0.00; the 2026-10-15
+6-round run cost **$4.23** ($1.54 ansible + $2.69 qutebrowser, 106 calls, 866,250 in / 38,142 out).
+
+Those are measurements, not estimates. `cost_limit` being inert does NOT mean the usage is lost:
+litellm returns it on every response, mini's `DefaultAgent` keeps it on the assistant message as
+`extra.response`, and `dump_context` writes the whole message, so every call's receipt is sitting
+in `<agent>/context/messages.jsonl` under `messages[].extra.response.usage` -- together with the
+gateway's OWN billed figure at `metadata.usage_metric.total_token_cost`. Two things to know when
+reading it: the context is dumped BEFORE each step, so the same assistant message recurs in later
+dumps and rows must be de-duplicated by `response.id`; and `usage` is NOT among the top-level keys
+of a dump row (those are `round`, `step_in_round`, `global_step`, `n_messages`, `chars`,
+`messages`), so grepping the row keys suggests there is no token data when there is.
+
+Since 2026-10-17 this no longer needs archaeology: `StepResult.usage` carries each step's receipt
+into `traj/round_<n>.json`, `comm_stats.json` rows carry the per-round total, and
+`cost_stats.json` holds per-agent and per-instance totals. That is bookkeeping only -- it does not
+make `cost_limit` work, which is what the fix below is for.
+
+Two facts worth keeping, both from the gateway's own billed figure rather than our arithmetic:
+`cost_gateway` equals `tokens_in x $4/M + tokens_out x $20/M` exactly on all 50 solo instances and
+on both 6-round instances, and `reasoning_tokens` is 0 everywhere (the gateway reports
+`completion_tokens_details: null`). So there is no billed-but-unreported token category on this
+gateway -- extended thinking is never requested, `temperature: 0.0` would be incompatible with it
+anyway, and if it were ever enabled the provider would bill it inside `completion_tokens`.
 
 Fix: pass the same registry the solo arm uses (`solo/gateway_model_prices.json`, written by
 `build_solo.py::write_price_registry`) into `build_mini_config`'s model config, which makes

@@ -29,7 +29,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from scaffolds import NOTICE_MARK, SENT_MARKS, StepResult, prune_history
+from scaffolds import NOTICE_MARK, SENT_MARKS, StepResult, prune_history, sum_usage
 
 REPO_DIR = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_DIR / "mini-swe-agent" / "src"))
@@ -221,6 +221,38 @@ class ScopedDockerEnvironment(DockerEnvironment):
         return super().execute(command, cwd, timeout=timeout)
 
 
+def _usage_of(out: dict) -> dict:
+    """The token receipt for one model call, from what LitellmModel.query already returns.
+
+    `query()` hands back {"content": ..., "extra": {"response": response.model_dump()}}, so
+    `usage` is right there, and on the CreateAI gateway so is its own billed cost under
+    `metadata.usage_metric.total_token_cost` -- the figure the monthly budget is actually
+    debited by (`solo/run_solo.py::_gateway_cost` uses the same path). mini's DefaultAgent
+    keeps only `content`, which is why this has to be read at the call site.
+
+    `cost_gateway` is best-effort: litellm's ModelResponse may or may not carry that
+    non-standard top-level key through `model_dump()`. `tokens_out` already INCLUDES
+    reasoning tokens where a provider bills them as output; `reasoning_tokens` is recorded
+    separately when reported so the two can be told apart rather than assumed equal.
+    """
+    resp = ((out or {}).get("extra") or {}).get("response") or {}
+    u = resp.get("usage") or {}
+    rec = {"calls": 1,
+           "tokens_in": int(u.get("prompt_tokens") or 0),
+           "tokens_out": int(u.get("completion_tokens") or 0)}
+    reasoning = (u.get("completion_tokens_details") or {}).get("reasoning_tokens")
+    if reasoning:
+        rec["reasoning_tokens"] = int(reasoning)
+    cached = (u.get("prompt_tokens_details") or {}).get("cached_tokens")
+    if cached:
+        rec["cached_tokens"] = int(cached)
+    try:
+        rec["cost_gateway"] = float(resp["metadata"]["usage_metric"]["total_token_cost"])
+    except (KeyError, TypeError, ValueError):
+        pass
+    return rec
+
+
 # --------------------------------------------------------------------------- #
 # The scaffold
 # --------------------------------------------------------------------------- #
@@ -248,6 +280,7 @@ class MiniScaffold:
         self._steps = 0
         self._cfg = {}
         self._prev_round_start = 0     # index where the PREVIOUS round's messages begin
+        self._usage = []               # one receipt per model call, in call order
 
     # -- lifecycle ---------------------------------------------------------- #
     def start(self) -> None:
@@ -264,6 +297,7 @@ class MiniScaffold:
 
         model_cfg = dict(self._cfg.get("model") or {})
         model = get_model(config=model_cfg)
+        self._wrap_model(model)
         self.agent = DefaultAgent(model, self.env, **(self._cfg.get("agent") or {}))
         self._install_tools()
 
@@ -281,6 +315,42 @@ class MiniScaffold:
             "system", self.agent.render_template(self.agent.config.system_template))
         self.agent.add_message(
             "user", self.agent.render_template(self.agent.config.instance_template))
+
+    def _wrap_model(self, model) -> None:
+        """Record every call's token receipt on the way past.
+
+        A wrapper rather than a subclass because `get_model` picks the class from the config
+        (litellm here, but not necessarily), and rather than a patch to the submodule because
+        this is our bookkeeping, not a scaffold defect. Auditing must never break a paid run,
+        so a malformed response costs the receipt, not the step.
+        """
+        inner = model.query
+
+        def query(messages, **kwargs):
+            before = getattr(model, "cost", 0.0) or 0.0
+            out = inner(messages, **kwargs)
+            try:
+                rec = _usage_of(out)
+                # litellm's own figure, which is 0.0 until the price registry is wired
+                # (things_to_fix E4) -- kept so this starts reporting the moment it is.
+                spent = (getattr(model, "cost", 0.0) or 0.0) - before
+                if spent:
+                    rec["cost_litellm"] = spent
+                self._usage.append(rec)
+            except Exception:
+                pass
+            return out
+
+        model.query = query
+
+    def _usage_since(self, mark: int) -> dict:
+        """Receipts for the model calls made since `mark`, summed.
+
+        Normally exactly one call per step; a retry inside litellm never returns, so it adds
+        no receipt. Summing rather than taking the last one keeps a step honest if a backend
+        ever queries twice.
+        """
+        return sum_usage(self._usage[mark:])
 
     def _install_tools(self) -> None:
         """Copy the materialized comm bundle into the container and put it on PATH.
@@ -390,6 +460,7 @@ class MiniScaffold:
             TerminatingException,
         )
         self._steps += 1
+        mark = len(self._usage)        # receipts this step is responsible for
         try:
             out = self.agent.step()
         # Both handlers record the thought and action that CAUSED the exception. Leaving them
@@ -401,7 +472,8 @@ class MiniScaffold:
             thought, action = self._last_thought(), self._last_action()
             self.agent.add_message("user", str(e))
             return StepResult(step=self._steps, thought=thought, action=action,
-                              observation=str(e), exit_status="format_error")
+                              observation=str(e), exit_status="format_error",
+                              usage=self._usage_since(mark))
         except TerminatingException as e:
             submitted = isinstance(e, Submitted)
             thought, action = self._last_thought(), self._last_action()
@@ -411,10 +483,11 @@ class MiniScaffold:
                               tool_calls=[{"name": _command_name(action),
                                            "args": {"command": action}}] if action else [],
                               exit_status=type(e).__name__, done=True,
-                              submitted=submitted)
+                              submitted=submitted, usage=self._usage_since(mark))
         except Exception as e:                       # never let one step kill the run
             return StepResult(step=self._steps, observation=f"{type(e).__name__}: {e}",
-                              exit_status=type(e).__name__, done=True)
+                              exit_status=type(e).__name__, done=True,
+                              usage=self._usage_since(mark))
 
         action = self._last_action()
         return StepResult(
@@ -426,6 +499,7 @@ class MiniScaffold:
             # the same key so comm_stats' name-counting works identically for both scaffolds.
             tool_calls=[{"name": _command_name(action), "args": {"command": action}}],
             exit_status="",
+            usage=self._usage_since(mark),
         )
 
     def _last_assistant(self) -> str:
