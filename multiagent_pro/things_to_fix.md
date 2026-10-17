@@ -219,6 +219,42 @@ Fix: branch on `comm_mode.json`'s `scaffold` key (the single source of truth `or
 already uses to pick the backend) and validate `mini.yaml` against mini's own `AgentConfig` /
 `ScopedDockerEnvironmentConfig`.
 
+### E5. The pooled instance budget is not enforced on the SWE-agent arm
+
+`--per-agent-cost-budget X` (added 2026-10-17) pools X per agent into one cap of
+`X * n_agents` per instance, checked at each round barrier in `orchestrate.py`. The gate reads
+`StepResult.usage`, which only `MiniScaffold` fills in, so on the swe-agent scaffold every step
+reports $0.00 and the gate never fires. `run_agents` prints a WARNING when the flag is passed on
+that scaffold, but **a swe-agent cell is bounded by `step_limit` alone until this is done**, and
+a cost comparison between the two arms is meaningless before then (one is governed, one is not).
+
+What to do, all inside `SweAgentScaffold.step` in `aci/scaffolds.py`:
+
+* `self.agent.model.stats` is an `InstanceStats` (`SWE-agent/sweagent/agent/models.py:274`) with
+  `instance_cost`, `tokens_sent`, `tokens_received`, `api_calls`. It is cumulative per agent, and
+  the class defines `__sub__`, so the per-step delta is a subtraction, not bookkeeping:
+  take a copy before `self.agent.step()` and subtract after.
+* Map onto the shared keys `aci/scaffolds.py::USAGE_KEYS` expects, so `sum_usage` and
+  `_cost_stats` work unchanged: `tokens_sent -> tokens_in`, `tokens_received -> tokens_out`,
+  `api_calls -> calls`, `instance_cost -> cost_litellm`.
+* There is no `cost_gateway` equivalent here: SWE-agent's cost is litellm-computed, not the
+  gateway's own billed figure. `_spend()` already falls back to `cost_litellm`, so nothing else
+  changes -- but note the two arms' dollar figures then come from different sources, and record
+  that where the numbers are reported. On this gateway they agree exactly (CHECKPOINT 16, E4),
+  so it is a provenance difference, not a discrepancy.
+* Unlike mini's, this arm's cost accounting WORKS: the submodule pin `ddff6a5` is the litellm
+  cost-accounting fix these runs need (`docs/submodules.md`), so `instance_cost` is real and no
+  price registry has to be wired first.
+* Leave each agent's own `model.per_instance_cost_limit` well above its share, or at 0. It is a
+  PER-AGENT cap despite the name (`build_agent_config` writes the CLI's
+  `--per-instance-cost-limit` straight into it), so a tight value there would re-impose exactly
+  the per-agent ceiling the pooled gate is meant to replace -- and SWE-agent raises
+  `TotalCostLimitExceededError` out of `step()`, which `run_agents` catches by retiring the agent.
+
+Verification: no live run needed for the arithmetic -- `_cost_stats` and `_spend` are pure and
+already unit-tested. What does need a run is one short swe-agent instance with the flag set,
+checking `cost_stats.json` has `budget_enforceable: true` and non-zero `per_agent` shares.
+
 ### E4. mini's cost tracking is inert, so `cost_limit` cannot bite
 
 `build_mini_config` does not set `litellm_model_registry`, so litellm cannot price the gateway

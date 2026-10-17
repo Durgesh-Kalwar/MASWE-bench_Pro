@@ -213,6 +213,11 @@ class SweAgentScaffold:
         })
 
     def step(self) -> StepResult:
+        # NOTE: `usage` is deliberately left empty here, so the pooled instance budget
+        # (--per-agent-cost-budget) does NOT bite on this arm yet. `self.agent.model.stats` is
+        # a cumulative InstanceStats with a `__sub__`, so the per-step delta is a subtraction;
+        # things_to_fix E5 has the full mapping and the one caveat that matters (this arm's own
+        # per_instance_cost_limit is per AGENT and would re-impose the ceiling pooling removes).
         out = self.agent.step()
         done = bool(getattr(out, "done", False))
         # `done` covers ~10 outcomes, only one of which is a real submission (agents.py sets

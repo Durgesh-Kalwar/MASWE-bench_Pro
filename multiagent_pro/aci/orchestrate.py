@@ -36,7 +36,11 @@ from <id>/comm_mode.json):
               ever sees; the host replays them into each round notice and archives them per
               round as <id>/<agent>/beliefs_round_N.json.
 
-Per-round communication counts land in <id>/comm_stats.json.
+Per-round communication counts land in <id>/comm_stats.json, token and dollar totals in
+<id>/cost_stats.json. `--per-agent-cost-budget X` pools X per agent into one instance cap of
+X * n_agents, checked at the round barrier: no per-agent ceiling, so an agent may spend past
+its share while the instance has room, and the round in which the budget runs out completes
+for every agent. mini only for now (things_to_fix E5).
 
 Modes
 -----
@@ -195,20 +199,56 @@ def dump_context(path, sc, r, step_in_round):
         print(f"    (context dump skipped: {type(e).__name__}: {e})")
 
 
-def _cost_stats(stats):
+def _spend(usage) -> float:
+    """Dollars from one usage total, preferring the gateway's own billed figure.
+
+    `cost_gateway` is what the monthly budget is actually debited by, so it wins where
+    present; `cost_litellm` is the local computation from registered per-token prices and is
+    the fallback. On the CreateAI gateway the two agree exactly (verified on all 50 solo
+    instances and both 6-round multi-agent instances), so this is a preference, not a
+    reconciliation. Returns 0.0 when neither is available -- a budget cannot be enforced
+    against a cost nobody reported, and `budget_enforceable` records that.
+    """
+    u = usage or {}
+    return float(u.get("cost_gateway") or u.get("cost_litellm") or 0.0)
+
+
+def _cost_stats(stats, *, per_agent_budget=0.0, n_agents=0):
     """Per-agent and whole-instance token totals, folded up from the comm_stats rows.
 
     Written beside comm_stats.json and from the same source, so the two can never disagree.
     `cost_gateway` is the gateway's OWN billed figure and is authoritative where present;
     `cost_litellm` is computed locally from the registered per-token prices and stays 0.0
     until that registry is wired on this arm (things_to_fix E4).
+
+    The budget is POOLED across the instance: there is no per-agent ceiling, so an agent may
+    spend well past its nominal share while the instance total still has room. `per_agent`
+    shares are recorded so a lopsided instance is visible in the data rather than discovered
+    by surprise.
     """
     from scaffolds import sum_usage
     per_agent = {}
     for row in stats:
         per_agent.setdefault(row["agent"], []).append(row.get("usage") or {})
     agents = {aid: sum_usage(us) for aid, us in sorted(per_agent.items())}
-    return {"total": sum_usage(agents.values()), "per_agent": agents}
+    total = sum_usage(agents.values())
+    spent = _spend(total)
+    out = {"total": total, "spent": round(spent, 6), "per_agent": agents}
+    if per_agent_budget and n_agents:
+        budget = per_agent_budget * n_agents
+        out |= {
+            "per_agent_budget": per_agent_budget,
+            "n_agents": n_agents,
+            "instance_budget": round(budget, 6),
+            "fraction_spent": round(spent / budget, 4) if budget else None,
+            # False when no step reported a cost at all: the gate cannot bite and the run is
+            # bounded only by step_limit. Recorded so a $0.00 instance is never mistaken for
+            # a cheap one.
+            "budget_enforceable": bool(total.get("cost_gateway") or total.get("cost_litellm")),
+            "share_of_instance": {aid: round(_spend(u) / spent, 4) if spent else None
+                                  for aid, u in agents.items()},
+        }
+    return out
 
 
 def _format_usage(u):
@@ -410,7 +450,7 @@ def run_gold(inst_dir, spec):
 # agents mode (real LLM, round-based)
 # --------------------------------------------------------------------------- #
 def run_agents(inst_dir, spec, rounds, steps_per_round, dump_context_enabled=False,
-               stop_when_all_submitted=False):
+               stop_when_all_submitted=False, per_agent_cost_budget=0.0):
     import yaml
     sys.path.insert(0, str(Path(__file__).resolve().parent))     # for build_runtime_image
     sys.path.insert(0, str(REPO_DIR / "SWE-agent"))
@@ -440,6 +480,28 @@ def run_agents(inst_dir, spec, rounds, steps_per_round, dump_context_enabled=Fal
         # solver.yaml files already point at this deterministic tag with pull=never. mini
         # talks to the Pro image directly and needs no derived runtime.
         ensure_runtime_image(spec["image"])
+
+    # Pooled dollar budget for the whole instance, scaled by how many agents it has (3 to 13
+    # across bench34_noreq). There is NO per-agent ceiling: one agent may spend several times
+    # its nominal share as long as the instance total has room, which is the point of pooling.
+    # 0 disables the gate entirely.
+    #
+    # Deliberately NOT the scaffolds' own cost limits. mini's is inert (things_to_fix E4) and
+    # SWE-agent's `per_instance_cost_limit` is per AGENT despite its name, so both would cap
+    # each agent separately -- the opposite of pooling. This gate is also the only place that
+    # can see every agent of an instance at once.
+    instance_budget = (per_agent_cost_budget or 0.0) * len(spec["agents"])
+    if instance_budget:
+        print(f"  budget: ${instance_budget:.2f} pooled "
+              f"(${per_agent_cost_budget:.2f} x {len(spec['agents'])} agents), "
+              f"checked at each round barrier")
+        if scaffold_name != "mini":
+            # The gate needs per-step usage in StepResult, which only MiniScaffold reports
+            # today (things_to_fix E5 documents the SWE-agent side). Without it every step
+            # reports $0.00 and the gate silently never fires, which is worse than no gate at
+            # all -- so say so loudly rather than letting the run look governed.
+            print("  WARNING: --per-agent-cost-budget is NOT enforced on the swe-agent "
+                  "scaffold yet (no per-step usage) -- this run is bounded by step_limit only")
 
     scaffolds, retired = {}, {}
     for a in spec["agents"]:
@@ -546,10 +608,25 @@ def run_agents(inst_dir, spec, rounds, steps_per_round, dump_context_enabled=Fal
         # Rewritten every round, not just at the end, so a run killed mid-flight still leaves
         # usable communication counts behind.
         (inst_dir / "comm_stats.json").write_text(json.dumps(stats, indent=2))
-        cost = _cost_stats(stats)
+        cost = _cost_stats(stats, per_agent_budget=per_agent_cost_budget,
+                           n_agents=len(spec["agents"]))
         (inst_dir / "cost_stats.json").write_text(json.dumps(cost, indent=2))
         if cost["total"]:
-            print(f"    [instance so far] {_format_usage(cost['total'])}")
+            print(f"    [instance so far] {_format_usage(cost['total'])}"
+                  + (f"  of ${instance_budget:.2f}" if instance_budget else ""))
+        # The budget is checked HERE, at the barrier, and nowhere inside the agent loop. Agents
+        # are stepped in a fixed roster order every round, so a mid-round cut would always take
+        # its turns from the same tail of the roster; checking once per round means the round in
+        # which the budget runs out is still a complete round for everyone. The cost is a bounded
+        # overshoot of at most one round's spend, which is accepted deliberately and recorded.
+        if instance_budget and cost["spent"] >= instance_budget:
+            print(f"  instance budget exhausted: ${cost['spent']:.2f} of "
+                  f"${instance_budget:.2f} (${per_agent_cost_budget:.2f} x "
+                  f"{len(spec['agents'])} agents) after round {r + 1} -- stopping")
+            cost["stopped_for_budget"] = True
+            cost["stopped_after_round"] = r + 1
+            (inst_dir / "cost_stats.json").write_text(json.dumps(cost, indent=2))
+            break
         active = [a["id"] for a in spec["agents"] if not retired[a["id"]]]
         # Submitting no longer ends the run. An agent that finishes in round 2 keeps taking
         # turns, because it is the ONLY way a peer can still reach it -- and its patch stays
@@ -629,6 +706,14 @@ def main():
                          "run, so a peer can still reach an agent that finished early.")
     ap.add_argument("--steps-per-round", type=int, default=6,
                     help="(agents mode) agent.step() calls per agent per round")
+    ap.add_argument("--per-agent-cost-budget", type=float, default=0.0,
+                    help="(agents mode) dollar budget PER AGENT, pooled into one "
+                         "instance-level cap of this x n_agents. There is no per-agent "
+                         "ceiling: an agent may spend past its share while the instance "
+                         "total has room. Checked at each round barrier, so the round in "
+                         "which the budget runs out completes for every agent and overshoot "
+                         "is bounded by one round. 0 (default) disables it. mini only -- see "
+                         "things_to_fix E5 for the swe-agent side.")
     ap.add_argument("--prefix", default="multiagent")
     ap.add_argument("--grade", action="store_true", help="Run the Pro evaluator after merge")
     ap.add_argument("--dockerhub_username", default="jefzda")
@@ -679,7 +764,8 @@ def main():
             run_gold(inst_dir, spec)
         else:
             run_agents(inst_dir, spec, args.rounds, args.steps_per_round,
-                       dump_context_enabled=args.dump_context)
+                       dump_context_enabled=args.dump_context,
+                       per_agent_cost_budget=args.per_agent_cost_budget)
         solved.append(inst_dir)
 
     # Outside the loop: one merge covering every instance, then one grading pass.
