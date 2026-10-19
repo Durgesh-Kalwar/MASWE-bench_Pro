@@ -73,9 +73,7 @@ Every message you send goes to ALL of your peers at once. There is no way to sen
 """
 
 COORD_P2P = """
-A message may be addressed to ONE peer by id, or to 'all'. A message addressed to a single
-agent is delivered to that agent alone -- no one else sees it, so choose the recipient who can
-actually act on it. A published interface always reaches everyone.
+Every message you send can be sent to ONE peer by id, or to ‘all’ of your peers at once. A message addressed to a single agent is delivered to that agent alone, so choose the recipient who can actually act on it.
 """
 
 COORD_BELIEFS = """
