@@ -48,6 +48,68 @@ SUBMIT_SENTINEL = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
 # direction -- a segment is only ever exempted when its own first word is a comm bin.
 COMMAND_SEP = re.compile(r"&&|\|\||;|\n")
 
+# mini's own action regex, duplicated here so the override below counts blocks exactly as
+# DefaultAgent.parse_action does. Keep in step with default.py if the submodule pin moves.
+BASH_BLOCK = re.compile(r"```bash\s*\n(.*?)\n```", re.DOTALL)
+
+MULTI_BLOCK_NOTE = (
+    "\n\nNote: your reply contained {n} ```bash blocks. Only ONE command runs per step, so the "
+    "FIRST block was executed and the other {extra} were ignored. Send one block per reply; you "
+    "will get this observation back and can send the next command then."
+)
+
+
+def _first_action_agent_class():
+    """DefaultAgent, but a reply with SEVERAL bash blocks executes the FIRST instead of failing.
+
+    Multi-agent ONLY -- the paper's solo arm keeps upstream's exactly-one contract, so this is an
+    override here rather than a submodule edit (`docs/submodules.md`: a scaffold fix would have to
+    be pushed to the fork before the pin could move, and solo would inherit it).
+
+    Measured on the two gpt6_sol cells: 1,750/1,928 broadcast and 1,407/1,642 p2p format_error
+    steps were multi-block replies carrying a perfectly valid first command, so upstream's rule
+    threw away ~91% of them. Taking the FIRST block and not the last is the whole point: in 76% of
+    those replies the LAST block is `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`, which
+    has_finished() turns into Submitted -- a TerminatingException that would end the agent's round
+    on the spot and discard the real work queued in block 1. Later blocks are also written blind,
+    before the model has seen the first block's output, so they are speculative by construction.
+
+    ZERO blocks remains a FormatError: there is no action to run. That was 3 steps per cell.
+
+    NOT a no-op for Opus 5.5, though nearly so: replaying the recorded cells, exactly ONE step
+    per cell changes (broadcast a 2-block reply, p2p a 4-block one whose last block was the submit
+    echo). Its other recorded format_errors are 2 and 6 ExecutionTimeoutErrors -- which share this
+    exit_status label, parse fine and are untouched -- plus 1 and 5 genuine zero-block replies that
+    still fail. So re-running Opus under this override will NOT reproduce the recorded cells
+    byte-identically; 28/34 and 29/34 belong to the old parsing rule.
+    """
+    from minisweagent.agents.default import DefaultAgent, FormatError
+
+    class FirstActionAgent(DefaultAgent):
+        def parse_action(self, response: dict) -> dict:
+            actions = BASH_BLOCK.findall(response["content"])
+            if not actions:
+                raise FormatError(
+                    self.render_template(self.config.format_error_template, actions=actions))
+            self.n_blocks_last_parse = len(actions)
+            return {"action": actions[0].strip(), **response}
+
+        def get_observation(self, response: dict) -> dict:
+            """Append the ignored-block note to the observation the model sees.
+
+            Done here rather than in the template so `action_observation_template` stays byte-wise
+            swebp's (gen_solver_config.swebp_templates), and so a single-block reply -- every Opus
+            reply -- gets no extra text at all.
+            """
+            self.n_blocks_last_parse = 1
+            out = super().get_observation(response)
+            n = getattr(self, "n_blocks_last_parse", 1)
+            if n > 1 and self.messages and self.messages[-1].get("role") == "user":
+                self.messages[-1]["content"] += MULTI_BLOCK_NOTE.format(n=n, extra=n - 1)
+            return out
+
+    return FirstActionAgent
+
 # The comm bundle's bins (tools/comm/bin). Naming a peer's file in one of these is the intended
 # way to ask its owner about it, so these segments are exempt from the scope check.
 COMM_BINS = frozenset({"list_agents", "publish_interface", "send_message", "update_belief"})
@@ -285,7 +347,6 @@ class MiniScaffold:
     # -- lifecycle ---------------------------------------------------------- #
     def start(self) -> None:
         import yaml
-        from minisweagent.agents.default import DefaultAgent
         from minisweagent.models import get_model
 
         self._cfg = yaml.safe_load((self.inst_dir / self.aid / "mini.yaml").read_text())
@@ -298,7 +359,8 @@ class MiniScaffold:
         model_cfg = dict(self._cfg.get("model") or {})
         model = get_model(config=model_cfg)
         self._wrap_model(model)
-        self.agent = DefaultAgent(model, self.env, **(self._cfg.get("agent") or {}))
+        self.agent = _first_action_agent_class()(
+            model, self.env, **(self._cfg.get("agent") or {}))
         self._install_tools()
 
         # run() seeds these before its loop; we drive step() directly, so do it here.

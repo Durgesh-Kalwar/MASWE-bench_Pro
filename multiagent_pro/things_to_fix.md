@@ -289,3 +289,115 @@ Fix: pass the same registry the solo arm uses (`solo/gateway_model_prices.json`,
 `build_solo.py::write_price_registry`) into `build_mini_config`'s model config, which makes
 `cost_limit` a real dollar brake here as it is in the solo arm (CHECKPOINT 14.6). Note the
 registry must carry SPLIT input/output rates -- a blended rate understates Opus 5.5 output by 5x.
+
+### E6. FIXED (multi-agent only): a multi-block reply used to cost a step and run nothing
+
+Measured on the 2026-10-19 gpt6_sol sweeps (`openai/openai/gpt6_sol`, both cells, 34 instances
+each) against the Opus 5.5 cells on the same instance set, same prompts, same rounds and steps:
+
+| cell | steps | format_error | rate | graded |
+| --- | --- | --- | --- | --- |
+| broadcast / claude_opus_5_5 | 3,939 | 4 | 0.1% | 28/34 |
+| p2p / claude_opus_5_5 | 4,047 | 12 | 0.3% | 29/34 |
+| broadcast / gpt6_sol | 6,220 | 1,928 | **31.0%** | 15/34 |
+| p2p / gpt6_sol | 5,702 | 1,642 | **28.8%** | 20/34 |
+
+**An earlier version of this entry had the diagnosis exactly backwards** and is corrected here,
+because the wrong diagnosis implied the wrong fix. It claimed all 1,928 broadcast cases were
+*zero* ```bash blocks -- the model narrating and stopping. The error came from counting blocks in
+the trajectory's `thought` field, which is `_last_thought()` = everything before the first
+```` ```bash ````, so it has zero blocks by construction. Counting blocks in the raw assistant
+turns in `<agent>/context/messages.jsonl` instead gives the real distribution:
+
+| cause | broadcast | p2p |
+| --- | --- | --- |
+| multiple blocks, DIFFERENT commands | 1,750 (90.8%) | 1,407 (85.7%) |
+| redundant: every block identical | 174 (9.0%) | 231 (14.1%) |
+| zero blocks | **3** (0.2%) | **3** (0.2%) |
+
+Block counts, broadcast: 2 blocks 1,004 - 3 blocks 361 - 4 blocks 246 - 5 blocks 149 - 6+ 161.
+
+So gpt6_sol was not under-acting, it was **over-acting**: chaining a multi-step plan into one
+reply as several narration+block units, every block a valid command. `parse_action` requires
+exactly one and rejected the lot.
+
+Two further findings from the same scan:
+
+* The trajectory actively hides this. `_last_action()` (`mini_scaffold.py`) uses `re.search`, so
+  it displays the FIRST block, while `parse_action` uses `re.findall` and rejects on count. A
+  multi-block step therefore reads in `traj/round_*.json` as a clean, valid command that
+  inexplicably failed. Diagnosing this class from the trajectory alone is impossible.
+* `exit_status="format_error"` is wider than its name: `mini_scaffold.step()` labels every
+  `NonTerminatingException` that way, so `ExecutionTimeoutError` lands there too. Of the stored
+  1,928 broadcast cases, 3 parse cleanly and were timeouts. Do not read the counter as a pure
+  parse-failure count.
+* The whole-response duplication quirk previously thought specific to `gpt6_1_sol` does occur in
+  `gpt6_sol` (28 broadcast / 56 p2p whole-reply duplications), but it is a minority of the
+  failures, not the mechanism.
+
+#### Fix, as implemented
+
+`MiniScaffold` now runs a `FirstActionAgent(DefaultAgent)` subclass
+(`mini_scaffold.py::_first_action_agent_class`) that executes `actions[0]` when a reply carries
+one or more blocks, appends a note to the observation saying the other N-1 were ignored, and still
+raises `FormatError` on zero blocks. The submodule is NOT edited and the paper's solo arm keeps
+upstream's exactly-one contract, so solo stays comparable with published mini numbers
+(`docs/submodules.md`: a submodule fix would have to reach the fork before the pin could move,
+and solo would inherit it).
+
+**First, not last.** Taking the last block was considered and is actively dangerous: in 76% of
+broadcast multi-block replies (1,330/1,750) and 74.9% of p2p (1,054/1,407) the LAST block is
+`echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT` while the first is not. `has_finished()` turns that
+into `Submitted`, a TerminatingException -- it would end the agent's round at that step and
+discard the real work queued in block 1. Last blocks are 7.9% writes/edits versus 26.3% for first
+blocks; in 5.6% of cases the last block is a write while the first is the read-only check the
+model said it wanted first. Later blocks are also written blind, before the first block's output
+exists, so they are speculative by construction -- which is what the step loop is for.
+
+Verification, replaying every recorded step through the shipped class (raw assistant turns joined
+to `traj/round_*.json`; script pattern: `parse_action` on stored content, compare to the recorded
+`action`):
+
+| cell | steps compared | identical action | recovered | still FormatError | different action |
+| --- | --- | --- | --- | --- | --- |
+| broadcast / claude_opus_5_5 | 3,939 | 3,755 | 3 | 1 | **0** |
+| p2p / claude_opus_5_5 | 4,047 | 3,855 | 7 | 5 | **0** |
+| broadcast / gpt6_sol | 6,220 | 4,113 | 1,924 | 3 | **0** |
+| p2p / gpt6_sol | 5,702 | 3,881 | 1,638 | 3 | **0** |
+
+Zero divergences in 19,908 steps: wherever a command actually ran, the override extracts a
+byte-identical action. That is structural, not luck -- the recorded `action` already came from
+`_last_action()`'s first-block `re.search`, so execution now matches what the trajectory always
+displayed. 99.8% of gpt6_sol's parse failures are recovered; the 3 per cell that remain are
+genuine zero-block replies with nothing to run. The 180 uncaptured steps per cell are exactly one
+per agent (180 agents/cell) and always that agent's final step, because context snapshots are
+written before each query.
+
+**This is NOT a no-op for Opus**, contrary to a claim in the earlier version of this entry.
+Exactly one step per cell changes: a 2-block reply in broadcast, and in p2p a 4-block reply whose
+blocks were grep, `sed -i` on `task_include.py`, `send_message all`, then the submit echo -- the
+clearest case for first-over-last, since last-match would have submitted that agent before its
+edit ran. Its other recorded format_errors are 2 and 6 timeouts (untouched) plus 1 and 5 genuine
+zero-block replies (still fail). Consequence: **the recorded 28/34 and 29/34 belong to the old
+parsing rule and a re-run under the override will not reproduce them byte-identically.**
+
+#### Still open
+
+* The four graded cells were all produced under the OLD rule. gpt6_sol's 15/34 and 20/34 are
+  therefore scores for a cell that lost ~31% / ~29% of its steps to parsing, and the p2p-minus-
+  broadcast gap of +5 (versus Opus's +1) is not usable: 4 of its 7 flips are blowouts (broadcast
+  missing 10/11, 4/4, 15/56, 33/39 on instances p2p resolved perfectly), the genuinely close
+  instances are identical in both cells (same 6 near-misses, same margins), and the arm with more
+  wasted steps is the arm that lost. Re-running both gpt6_sol cells under the override is what
+  would make the model axis mean anything; until then only the Opus pair is a clean comparison.
+* `openai/gpt6_1_sol` emits its entire response twice on 11 of 12 calls under this prompt. The
+  override now handles identical repeated blocks (it runs the first), so the model may be usable,
+  but this is UNTESTED -- its duplication rate was measured on single probes, not a trajectory.
+  Priced in `custom_model_pricing.json` ($2/M in, $10/M out, solved from two probes).
+* The gateway injects a garbage delimiter between repeated units in `gpt6_sol` output -- the
+  literal string `รีเมียร์` appears verbatim between blocks. A serving-level defect, independent
+  of parsing, and a further reason to treat this model's numbers cautiously.
+* **A first-step probe cannot find any of this.** Pre-flight was 10/10 single-block, non-empty,
+  all on step 1 with no observation history. Future model pre-flights must run a short real
+  trajectory (2 rounds, one small instance) and read the `exit_status` histogram -- and, given the
+  `thought`-field error above, count blocks in `context/messages.jsonl`, never in the trajectory.
