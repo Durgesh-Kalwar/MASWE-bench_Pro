@@ -32,6 +32,46 @@ Fix: delete paragraph 1; paragraph 2 is correct and already says everything.
 
 ---
 
+### A8. The scope guard matches owned paths by SUBSTRING, so an agent can be locked out of its own file
+
+Found in the grading of the 2026-10-20 p2p Opus sweep (upasana27, CHECKPOINT 17.2), in
+`qutebrowser-e57b6e0`. `components/adblock.py` is a substring of `components/braveadblock.py`,
+so a command naming the latter also matches the former's needle, and the OWNER of
+`braveadblock.py` was refused access to its own file.
+
+Distinct from A6, which was about *which part of a command* is checked -- this is about the path
+match itself. The fix is to require a path-component boundary or equality rather than `in`:
+a needle must match the whole final component, or be preceded by `/` in the candidate. Note the
+basename form has to keep working, because agents legitimately refer to `adblock.py` with no
+directory, so a bare-basename needle must still match `components/adblock.py` -- and will then
+correctly NOT match `components/braveadblock.py`.
+
+Severity: this one is silent and self-inflicted. An agent refused access to its own gold file has
+no way to diagnose the refusal, and the round's budget drains on retries -- the
+`disguised_retry` findings in the safety audit (8 across 5 instances) are the signature.
+
+---
+
+### A9. A merge collision on a shared file silently zeroes the whole instance
+
+Two instances were lost this way in the p2p Opus sweep (CHECKPOINT 17.2). `merge_instance`
+concatenates the per-agent patches; when two agents edited the same file, the overlapping hunks
+make the combined patch fail `git apply`, and the instance scores False with no partial credit --
+including for the agents whose work was fine.
+
+The warning already exists and nothing acts on it. This was accepted knowingly when "owns a unique
+file along with the common files" went into the v2 prompt, so it is a consequence to handle rather
+than a surprise. Options, cheapest first: (1) record the WARNING in `comm_stats.json` so the
+dashboard can show which instances were lost to merge rather than to the model -- the grade alone
+cannot distinguish them; (2) apply agent patches sequentially with a 3-way merge instead of
+concatenating, so a collision costs one agent's hunks rather than every agent's; (3) grade both the
+merged patch and each agent patch alone, which separates "the team failed" from "the merge failed".
+
+(1) is pure instrumentation and should happen before the next sweep either way: at present a
+merge-lost instance is indistinguishable in the results from a genuinely unsolved one.
+
+---
+
 ### A6-residual. The scope guard still refuses commands that EXCLUDE a peer's file
 
 A6 proper is implemented (2026-10-15): `_denied()` now checks each `&&` / `||` / `;` / newline

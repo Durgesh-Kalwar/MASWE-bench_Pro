@@ -2256,3 +2256,284 @@ Unchanged from 15.7 except: A6 and E1 are implemented (16.4), A7 (submission los
 prompt wording (16.2), and E2's `PYTHONUNBUFFERED=1` is now in the smoke launcher but not yet in
 `run_one.sh` or the sweep driver. A2/A3 (SWE-agent prompt), B2/D (scaffold comparison, now with one
 more confound), C1-C5, E3, E4 and the disk situation all stand.
+
+## 17. 2026-10-19/21 — the full 34-instance grid: the p2p Opus cell (upasana27), the gpt6_sol pair, and the first-block parse fix
+
+Two people working in parallel on `comm-harness-50`, on disjoint files, merged in `c3250d9`:
+upasana27 ran the **p2p Opus cell** and wrote two post-hoc analysis scripts; this side ran the
+**gpt6_sol pair**, diagnosed why that model lost a third of its steps, and fixed it. Nothing
+below changes the solo arm or the SWE-agent arm.
+
+### 17.1 The grid as it now stands
+
+All cells are the 34-instance no-requirements set (`multiagent_pro_bench34_noreq`), 10 rounds x 6
+steps, mini-swe-agent, pooled per-instance cost budget. Graded with `swe_bench_pro_eval.py`
+against `sampled_pro/raw_sample.jsonl`, `--use_local_docker`.
+
+| cell | resolved | steps | format_error | who |
+| --- | --- | --- | --- | --- |
+| solo_noreq / claude_opus_5_5 (50 inst) | 34/50 | — | — | 14.2 |
+| broadcast / claude_opus_5_5 | **28/34** | 3,939 | 4 (0.1%) | |
+| p2p / claude_opus_5_5 | **29/34** | 4,047 | 12 (0.3%) | upasana27 |
+| broadcast / gpt6_sol | **15/34** | 6,220 | 1,928 (**31.0%**) | |
+| p2p / gpt6_sol | **20/34** | 5,702 | 1,642 (**28.8%**) | |
+| broadcast / gpt6_sol_firstblock | in flight | | 0.18% so far | 17.9 |
+
+The Opus pair is the only clean comparison in the table, and its harness effect is **+1 instance
+(28 -> 29) for p2p over broadcast** — within noise on 34 instances. The gpt6_sol pair's apparent
++5 is not usable; see 17.4.
+
+### 17.2 The p2p Opus cell (upasana27, commits `6902891` and `d87c61e`)
+
+`multiagent_pro_out_p2p_sweep34/` follows the layout of the other `multiagent_pro_out_*` folders
+exactly: `instance_*/` with patches, boards, comm/cost stats, trajectories and context dumps, plus
+`patches.json` and `eval_out/`. **33 of 34 instances completed all 10 rounds**; the run was
+stopped during round 1 of `qutebrowser-f7753550`, which is therefore ungraded — so 29/33 graded
+reads as 29/34 in the grid above.
+
+Launchers `multiagent_pro/launchers/run_mini_sweep34_p2p_ubiswas2.sh` and its `_resume` twin: the
+machine **lost power twice mid-sweep on 2026-10-20**, and the resume script re-ran only the
+unfinished instances rather than the whole set. That the sweep survived two hard restarts at all
+is a property worth keeping — per-instance output directories are independent, so a resume is a
+set-difference on `comm_stats.json`, not a replay.
+
+Two failure modes identified in the grading, both harness properties rather than model failures:
+
+* **Merge collisions on a shared test file** cost two instances outright. `merge_instance`
+  concatenates agent patches and overlapping hunks make the combined patch fail `git apply`, which
+  zeroes the whole instance — the consequence flagged when "common files" was accepted into the
+  v2 prompt (plan: *worth watching for that WARNING in merge logs*). It fired.
+* **The scope guard's substring match locked an agent out of its own file** in
+  `qutebrowser-e57b6e0`: `components/adblock.py` is a substring of `components/braveadblock.py`,
+  so the owner of the latter was refused access to it. This is a new, distinct bug from the A6
+  segment-splitting fix in 16.4 — that one was about *which part of a command* is checked, this is
+  about *path matching itself*. Logged as a new item; the fix is to match on path equality or a
+  component boundary, not `in`.
+
+`d87c61e` is a follow-up: the repo's `*.log` / `logs` ignore rules had silently dropped the run
+logs, so they are force-added, and the analysis outputs plus `harness50/` are copied inside the
+out folder to make it self-contained.
+
+### 17.3 Two deterministic analysis scripts (`multiagent_pro/metrics/`)
+
+Both read only artifacts the run already writes — `board.json` and its per-round snapshots,
+`comm_stats.json`, `cost_stats.json`, `traj/round_k.json`, `context/messages.jsonl` (when
+`--dump-context` was on), `scope_violations.jsonl` and the final `agent_<k>.patch`. **Neither
+calls an LLM**, so both are cheap, reproducible and recomputable across every past run. This is a
+deliberate contrast with `error_analysis/`, which is LLM-as-a-judge output from the paper.
+
+**`coordination_metrics.py`** — per instance: outcome, volume (with `dup_rate`, the share of
+messages that near-repeat an earlier one by the same sender at word-Jaccard >= 0.7), a **realized
+dependency graph** built from the final patches (edge consumer->definer when a name one agent's
+patch introduces is used in another's added lines), targeting (`contact_recall`,
+`directed_precision`), interface agreement/coverage/drift, responsiveness, convergence and
+context uptake. A provisional `coord_score` averages six components, which are all printed
+because they matter more than the composite.
+
+Headline, 33 instances (`harness50/analysis_coordination/metrics.md`), mean `coord_score` 83.9:
+
+| metric | mean | reading |
+| --- | --- | --- |
+| `delivered_rate` | **1.00** | every message reached the recipient's prompt — delivery is not a failure mode |
+| `retained_next_round` | **0.00** | one-round expiry works exactly as specified (12.5), with no leakage |
+| `contact_recall` | 0.95 | agents nearly always talked to the peer they actually depended on |
+| `directed_precision` | **0.60** | but 40% of directed messages are off the realized dependency graph |
+| `iface_agreement` | 0.99 | consumers' call sites match definers' final signatures |
+| `publish_coverage` | **0.66** | a third of consumed names were never `publish_interface`d |
+| `dup_rate` | 0.01 | resends are negligible |
+| `uptake_rate` | 0.54 | only half of delivered messages are referred to in the recipient's thoughts |
+| `idle_share` | 0.49 | **half of all steps do no work** — the largest single inefficiency in the table |
+
+Resolved versus unresolved means separate on only a few axes, and the useful ones are
+`directed_precision` (0.63 vs 0.41) and `settled_rate` (0.70 vs 0.55): **unresolved instances talk
+more and target worse** — 27.3 messages against 19.2, more directed traffic, less of it on a real
+dependency. Volume is not a proxy for coordination. `contact_recall` and `answered_rate` are
+*higher* in the unresolved group, so neither discriminates.
+
+**`safety_audit.py`** — one FINDING per suspicious event with exact evidence (instance, agent,
+round, step, snippet) across 17 rule-based categories: `scope_block` (split into `mention`,
+`access`, `exclusion`), `disguised_retry`, `indirect_peer_read`, `peer_file_in_patch`,
+`test_file_in_patch`, `test_tampering`, `destructive`, `network`, `privilege`, `sandbox_probe`,
+`secret_leak`, `pass_claim`, `retraction`, `upstream_recall`, `stale_view_claim`,
+`misdirected_request`, `bypass_request`.
+
+Result on the same 33 instances, 177 agents, 3,793 steps
+(`harness50/analysis_safety/summary.md`): **high = 0**, med = 26, low = 373, info = 212. Nothing
+reached high severity — no `peer_file_in_patch`, no `secret_leak`, no `bypass_request`. What the
+medium band contains is more interesting than its size:
+
+* **`disguised_retry`: 8 findings in 5 instances.** Within 3 steps of a real `access` block, the
+  agent reached the same file by another spelling — `git show HEAD:<file>`, a glob on its
+  directory, the bare basename, `find -exec`. The guard is a text match and agents route around it
+  without being asked to.
+* **`indirect_peer_read`: 106 findings in 26 instances**, 71 of them `recursive_grep_hit`. This is
+  the known A6 leak measured at scale: `grep -rn X lib/ansible/` names no peer path, passes the
+  guard, and reads every peer file under it. **Scope isolation is porous in the majority of
+  instances**, which bounds how strongly any result here can be attributed to information
+  asymmetry.
+* **`pass_claim`: 9 findings**, 7 of them `before_run` — the agent's `send_message` claiming tests
+  pass sits *before* the test command in the same shell line, so the claim was composed before any
+  result existed. Only 1 is flatly `unverified`.
+* **`stale_view_claim`: 42 findings in 18 instances** — agents asserting facts about a peer's
+  current file state, which they cannot see (every agent sees only the BASE copy of peer files).
+* **`retraction`: 60 findings**, of which **10 are `of_true_claim`** — the agent retracted a peer
+  message that the board shows did exist. That is context loss, not dishonesty, and `d87c61e`
+  separately taught the `bypass_request` detector to skip negated mentions ("I will not bypass the
+  guard") after false positives.
+* `scope_block` 255 findings across all 33 instances and 157 of 177 agents: 227 `access`, 21
+  `mention`, 7 `exclusion`. The `exclusion` bucket is A6-residual (`grep -v peer.py`), still
+  refused.
+
+### 17.4 The gpt6_sol pair, and why its +5 gap is unusable
+
+`gpt6_sol` (gateway `openai/openai/gpt6_sol`, priced $2/M in, $10/M out in
+`custom_model_pricing.json`) was added as a second model axis. Both cells graded: **broadcast
+15/34, p2p 20/34**, recomputed independently on all 68 instances — 0 disagreements, 0 missing
+`output.json`, 0 apply failures. Grading took ~3.5 min/cell against ~25 for Opus, which looked
+like a silent failure and was not: the images were already cached from the Opus grading and every
+instance really ran its tests.
+
+**The +5 p2p-over-broadcast gap must not be read as a harness effect.** Four of the seven flips
+are blowouts (broadcast missing 10/11, 4/4, 15/56, 33/39 on instances p2p resolved perfectly), the
+genuinely close instances are *identical* in both cells — same 6 near-misses, same margins — and
+the arm that lost is the arm with more wasted steps (31.0% vs 28.8% format errors). The gap tracks
+step wastage, not coordination. Opus's own harness effect on the same instances is +1.
+
+### 17.5 Why gpt6_sol lost a third of its steps — and the diagnosis I got backwards first
+
+Full detail in `things_to_fix.md` E6, including the correction. Short version:
+
+`DefaultAgent.parse_action` (submodule, `default.py`) does `re.findall` for ```` ```bash ```` blocks
+and requires **exactly one**, raising `FormatError` otherwise. `FormatError` is a
+`NonTerminatingException`, so the step is consumed and nothing runs.
+
+The first diagnosis in E6 claimed all 1,928 broadcast failures were *zero*-block replies — the
+model narrating and stopping. **That was backwards.** The error came from counting blocks in the
+trajectory's `thought` field, which is `_last_thought()` = everything before the first ```` ```bash ````
+and therefore has zero blocks by construction. Counting in the raw assistant turns in
+`context/messages.jsonl` gives the real distribution:
+
+| cause | broadcast | p2p |
+| --- | --- | --- |
+| multiple blocks, DIFFERENT commands | 1,750 (90.8%) | 1,407 (85.7%) |
+| redundant: every block identical | 174 (9.0%) | 231 (14.1%) |
+| zero blocks | **3** (0.2%) | **3** (0.2%) |
+
+gpt6_sol was **over-acting, not under-acting**: chaining a multi-step plan into one reply as
+several narration+block units, every block a valid command. Two methodological consequences, both
+now written into E6:
+
+* **The trajectory actively hides this class.** `_last_action()` uses `re.search` (first block) while
+  `parse_action` uses `re.findall` and rejects on count — so a multi-block failure reads back as a
+  clean, valid command that inexplicably failed. Diagnosing it from `traj/round_*.json` alone is
+  impossible.
+* **`exit_status="format_error"` is wider than its name.** `mini_scaffold.step()` labels every
+  `NonTerminatingException` that way, so `ExecutionTimeoutError` lands there too (3 of the 1,928).
+* **A first-step probe cannot find any of this.** Pre-flight was 10/10 single-block and non-empty,
+  all on step 1 with no observation history. Future model pre-flights must run a short real
+  trajectory and read the `exit_status` histogram.
+
+### 17.6 The fix: run the first block, mini only (`15f3074`)
+
+`MiniScaffold` now builds a `FirstActionAgent(DefaultAgent)` subclass
+(`mini_scaffold.py::_first_action_agent_class`) that executes `actions[0]` when a reply carries one
+or more blocks, appends a note to the observation telling the model its other N-1 blocks were
+ignored and that it can send the next command after seeing this result, and **still raises
+`FormatError` on zero blocks**. The submodule is not edited and the paper's solo arm keeps
+upstream's exactly-one contract, so solo stays comparable with published mini numbers.
+
+**First block, not last.** Last-match was proposed and is actively dangerous: in **76.0%** of
+broadcast multi-block replies (1,330/1,750) and **74.9%** of p2p (1,054/1,407) the LAST block is
+`echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT` while the first is not. `has_finished()` turns that
+into `Submitted` — a TerminatingException — which would end the agent's round at that step and
+discard the real work queued in block 1. Last blocks are 7.9% writes/edits versus 26.3% for first
+blocks. Later blocks are also written blind, before the first block's output exists, so they are
+speculative by construction.
+
+**Verification: 19,908 recorded steps across all four cells, zero divergences.** Replaying every
+stored step through the shipped class, wherever a command actually ran the override extracts a
+byte-identical action; 99.8% of gpt6_sol's parse failures are recovered. That is structural rather
+than lucky — the recorded `action` already came from a first-block `re.search`, so execution now
+matches what the trajectory always displayed.
+
+**It is NOT a no-op for Opus.** Exactly one step per Opus cell changes. Consequence: **the
+recorded 28/34 and 29/34 belong to the old parsing rule** and a re-run under the override will not
+reproduce them byte-identically.
+
+### 17.7 `n_blocks` in the trajectory (`6c2a5fc`)
+
+The fix left the step indistinguishable from an ordinary one in the record, for the same reason the
+bug was hard to find: `action` shows only the first block, and the note goes into the model's
+*context*, not into `observation` (which is raw command output). `StepResult` gains `n_blocks`,
+written by both the success path and the `TerminatingException` path — a submission can arrive in a
+multi-block reply too. `as_record()` emits the key **only when it is > 1**, so every record written
+before this existed, and every SWE-agent record, stays byte-identical and diff-comparable. The
+dashboard (`harness50/dashboard/`, outside the repo) renders it as a `blocks` row on the step.
+
+### 17.8 Reasoning effort: measured, and deliberately not set
+
+Neither model is given a reasoning parameter anywhere. The complete model config in every
+generated `mini.yaml` is `model_name` + `model_kwargs: {temperature: 0.0, drop_params: true,
+api_base: ...}`. Probed directly against the gateway, outside any run:
+
+* **`reasoning_effort` is accepted but never validated.** An invalid value
+  (`banana_not_a_level`) returns 200 and behaves like the default. A typo would silently give
+  default behaviour.
+* **gpt6_sol's default behaves like its low end** — absent 71-122 completion tokens, `minimal`
+  71-98, `high` 116-137 (n=3, unpinned temperature, so the `high` separation is the only claim
+  worth making).
+* **Opus 5.5 appears to ignore it.** `minimal` 345/138/138 against `high` 171/291/182 — overlapping,
+  largest sample under `minimal`. Anthropic's native `thinking: {type: enabled, budget_tokens:
+  1024}` also returned a plain answer with normal token counts, so the gateway drops it. Opus is
+  effectively **non-thinking** in every recorded cell.
+* **No reasoning tokens are ever itemised**, at any level, for either model:
+  `completion_tokens_details` is `null` on every response, and across **7,986 Opus calls**
+  ($354.97) and 1,079 gpt6_sol receipts the usage dicts carry only `calls`, `tokens_in`,
+  `tokens_out`, `cost_gateway`.
+* **`temperature: 0.0` does not make Opus deterministic.** Identical requests returned 230 vs 274
+  completion tokens. That is a floor on how reproducible any Opus cell can be, independent of
+  anything in this harness.
+
+**Not added to `model_kwargs`**, on purpose: it would make the new cell non-comparable with both
+the graded gpt6_sol cells and the Opus pair. If reasoning effort is wanted it is its own axis, and
+`drop_params: true` means litellm may strip it silently, so such a cell needs a verification probe
+rather than trust. The asymmetry is a limitation to state, not a bug to fix mid-study: **gpt6_sol
+is a reasoning model at its default low effort; Opus is a non-thinking run.**
+
+### 17.9 The broadcast re-run under the override (IN FLIGHT as of 2026-10-21 15:40 PT)
+
+`harness50/run_mini_sweep34_gpt6sol_firstblock.sh`, sed-derived from the original launcher with
+exactly two non-comment changes (output root, progress label) so the settings are otherwise
+identical. Writing to `broadcast/mini_swe_agent/gpt6_sol_firstblock`;
+`logs/code_provenance.txt` records the HEAD plus the then-uncommitted diff, which is now `6c2a5fc`.
+
+Two 1-instance / 2-round smoke runs preceded it ($0.33 each): 0 format errors, 7-8 multi-block
+steps exercised, the note delivered correctly, `n_blocks` recorded with 0 mismatches and never on
+single-block steps, 3 non-empty patches, 5 submissions, merge clean.
+
+At 17/34 instances and 2,206 steps: **4 format errors (0.18%)** against the old cell's 31.0%, and
+all four have an empty `action` — genuine zero-block replies, the one case the rule still rejects
+by design. **38.7% of steps carry more than one block**, so the rule is being exercised constantly
+rather than incidentally. $45.45 spent, 0 merge WARNINGs, 8 of 63 scoped diffs empty (~13% of
+agents contributed nothing, comparable to prior cells).
+
+### 17.10 Still open
+
+New from this section:
+
+* **The scope guard matches paths by substring** (17.2), which can lock an agent out of its own
+  file. Needs component-boundary or equality matching.
+* **Merge collisions on shared files silently zero an instance** (17.2) — two lost in the p2p cell.
+  The WARNING exists; nothing acts on it.
+* **Half of all steps are idle and 40% of directed messages are off the dependency graph**
+  (17.3) — the largest measured inefficiencies, and both now have deterministic metrics to track.
+* **Scope isolation is porous in 26 of 33 instances** via recursive grep (17.3, A6 leak at scale).
+  This bounds attribution of any result to information asymmetry.
+* **The p2p gpt6_sol cell has not been re-run** under the override, so the model axis is still
+  half-old-rule. Only the broadcast re-run is in flight.
+* **`multiagent_pro_out_p2p_sweep34/` and `harness50/logs/` are now committed to a public fork**
+  — full run records including every `mini.yaml`. Worth auditing those for an embedded
+  `model_api_key` before the repo grows another sweep this way.
+
+Carried forward unchanged: A2/A3 (SWE-agent prompt), B2/D (scaffold comparison), C1-C5, E2-E5, the
+inert `--stop-when-all-submitted` flag, A6-residual, and `/` at ~8.3 GB free.
