@@ -49,10 +49,15 @@ class StepResult:
     # does not surface usage. Recorded because the numbers arrive on every response and are
     # otherwise discarded -- see `sum_usage`.
     usage: dict = field(default_factory=dict)
+    # How many ```bash blocks the reply carried, when that is more than one. mini executes the
+    # FIRST and ignores the rest (mini_scaffold._first_action_agent_class); without this the step
+    # reads in the trajectory as an ordinary single command, because `action` has always shown
+    # only the first block. 0 means "one block, or not applicable" -- SWE-agent never sets it.
+    n_blocks: int = 0
 
     def as_record(self) -> dict:
         """The per-step dict written to <agent>/traj/round_<n>.json."""
-        return {
+        rec = {
             "step": self.step,
             "thought": self.thought,
             "tool_calls": self.tool_calls,
@@ -63,6 +68,11 @@ class StepResult:
             "exit_status": self.exit_status,
             "usage": self.usage,
         }
+        # Emitted only for a multi-block reply, so every record written before this existed --
+        # and every SWE-agent record -- stays byte-identical and diff-comparable.
+        if self.n_blocks > 1:
+            rec["n_blocks"] = self.n_blocks
+        return rec
 
 
 # Keys that add up across steps. Anything else in a usage dict (a model name, say) is

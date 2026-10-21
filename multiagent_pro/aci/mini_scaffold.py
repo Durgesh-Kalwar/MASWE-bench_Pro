@@ -545,7 +545,11 @@ class MiniScaffold:
                               tool_calls=[{"name": _command_name(action),
                                            "args": {"command": action}}] if action else [],
                               exit_status=type(e).__name__, done=True,
-                              submitted=submitted, usage=self._usage_since(mark))
+                              submitted=submitted,
+                              # A submission can arrive in a multi-block reply too -- first block
+                              # submits, later ones never run.
+                              n_blocks=getattr(self.agent, "n_blocks_last_parse", 1),
+                              usage=self._usage_since(mark))
         except Exception as e:                       # never let one step kill the run
             return StepResult(step=self._steps, observation=f"{type(e).__name__}: {e}",
                               exit_status=type(e).__name__, done=True,
@@ -556,6 +560,10 @@ class MiniScaffold:
             step=self._steps,
             thought=self._last_thought(),
             action=action,
+            # Only the FIRST block ran, so record how many arrived -- otherwise the trajectory
+            # shows a lone valid command and the multi-block reply is invisible. The note the
+            # model got lives in its context, not in `observation` (raw command output).
+            n_blocks=getattr(self.agent, "n_blocks_last_parse", 1),
             observation=str(out.get("output", "")),
             # No tool schema exists in mini; the bash command IS the action. Recorded under
             # the same key so comm_stats' name-counting works identically for both scaffolds.
