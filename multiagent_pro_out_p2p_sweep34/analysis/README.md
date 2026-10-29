@@ -10,8 +10,8 @@ changes the harness.
 |---|---|---|
 | `comm_measures/` | Six communication measures for every run, plus a topology label for every problem | done |
 | `privacy/` | Three privacy measures: access attempts, successful access, disclosure | done |
-| `beliefs/` | What the private belief notes reveal about convergence, uptake and retention | in progress |
-| `lib/` | Shared code: building the "who depends on whom" graph from the reference patches | done |
+| `beliefs/` | What the private belief notes reveal about convergence, uptake and retention | done |
+| `common/` | Shared code: building the "who depends on whom" graph from the reference patches | done |
 
 Runs covered (48 complete runs, all Claude Opus 5.5, 10 rounds × 6 steps):
 
@@ -174,6 +174,47 @@ Details that matter for reading the numbers:
   (out of the complete runs in that arm) had at least one event. Nothing is divided by message
   volume, and arms are reported separately.
 
+### The belief analyses (beliefs arm only)
+
+In the beliefs arm each agent can write a private note about each peer (`update_belief`). Its
+current notes are printed back to it at the start of every round; peers never see them. These are
+**not** extra metrics: they explain the coordination behind the measures above, in three analyses.
+There is no belief score.
+
+**1. Correct and stable convergence.** For each fact two linked agents must understand compatibly
+(signature, return type, defaults, error behaviour, ownership), collect every claim from notes,
+messages, publications, thoughts and code, then classify the fact:
+
+| Classification | Meaning |
+|---|---|
+| correct initially | right from the start |
+| aligned during the run | became correct and stayed correct; the first round is recorded |
+| persistent disagreement or uncertainty | never settled |
+| stable incorrect agreement | both sides agreed on something wrong |
+| correct then unsupported reversal | an agent dropped a correct belief without new evidence |
+
+**2. Message → belief → code.** For each relevant message:
+
+| Question | Labels |
+|---|---|
+| **Sender consistency**: did the message match the sender's own prior note? | consistent, inconsistent, no prior note |
+| **Receiver uptake**: how did the receiver's belief change after delivery (judged at delivery time, not send time)? | already held; incorporated missing; corrected incorrect; not incorporated; adopted incorrect or stale |
+| **Action alignment**: did the receiver's later code fit its belief? | fits; no action needed; understood but not implemented; not updated |
+
+**3. Retention.** Trace *message received → note recorded → message expires → note retained,
+omitted or reversed → later question or action*.
+
+| Classification | Meaning |
+|---|---|
+| never received | the information never reached the agent |
+| received, not incorporated | it arrived but the note never reflected it |
+| incorporated, then contradicted or lost | the note had it, then the agent explicitly denied it |
+| retained, not implemented | the belief stayed but the code didn't follow |
+| justified update | the belief changed because the contract did |
+
+Because each note replaces the last one selectively, a fact simply missing from a newer note is
+**not** counted as forgetting; only an explicit contradiction is.
+
 ### What the harness does to communication (verified in the code)
 
 These rules explain much of the redundancy, so the measures report them as causes:
@@ -193,7 +234,7 @@ These rules explain much of the redundancy, so the measures report them as cause
 ### Pipeline
 
 ```
-reference patches ──► lib/gold_dependencies.py ──► comm_measures/prep.py ──► prep/<arm>/<problem>.json
+reference patches ──► common/gold_dependencies.py ──► comm_measures/prep.py ──► prep/<arm>/<problem>.json
 run boards + prompts ─────────────────────────────►        │               (graph, topology, conversations,
                                                             │                directedness, relevance, coverage)
                                                             ▼
@@ -211,12 +252,12 @@ Measures 1–3, the topology label and the graph descriptions are **deterministi
 scripts gives the same numbers. Measures 4–6 need judgment, so they come from **contextual
 annotation** of the raw records under one written brief, then the script counts the labels.
 
-### `lib/patch_extract.py`
+### `common/patch_extract.py`
 
 Small parsers over patch text. `added_lines(patch)` returns the `+` lines (test files excluded).
 `defined_names(patch)` returns the functions, classes and constants a patch introduces.
 
-### `lib/gold_dependencies.py`
+### `common/gold_dependencies.py`
 
 `gold_graph(instance_dir)` reads each agent's reference slice
 (`multiagent_pro_bench34_noreq/<problem>/agent_k/gold.patch`) and draws a link from agent A to agent
@@ -366,9 +407,37 @@ cd multiagent_pro_out_p2p_sweep34/analysis/privacy
 python3 privacy_prep.py && python3 privacy_match.py && python3 privacy_final.py
 ```
 
+### Beliefs: `beliefs/`
+
+**`belief_prep.py`** builds one timeline per problem:
+- every accepted `update_belief` call, parsed from the trajectories with its round and step (refused
+  calls are excluded);
+- every message delivery (start of the round after sending);
+- every code edit and submit.
+
+It also checks availability: for each archived note (`agent_k/beliefs_round_r.json`), whether it
+appears in the agent's next-round prompt (`context/messages.jsonl`). 1147/1147 do. Output:
+`prep/<problem>.json`.
+
+**`BELIEF_BRIEF.md`** is the written rules four analysts followed. It covers the verified record
+semantics, the label sets above, and the evidence requirements (round/step references; comparisons
+at delivery time; an independent-inspection check before crediting a message). Analysts also
+compared each problem with its no-belief P2P run. Output: `instances/<problem>.json`.
+
+**`belief_build.py`** flattens the records and writes:
+- `facts.jsonl`, `exchanges.jsonl`, `retention.jsonl`;
+- `per_problem_summary.csv`: label counts per problem, next to the matching P2P and beliefs values
+  of the communication and privacy measures, taken from the two folders above;
+- `aggregates.md`.
+
+```bash
+cd multiagent_pro_out_p2p_sweep34/analysis/beliefs
+python3 belief_prep.py && python3 belief_build.py
+```
+
 ### Known limitations
 
-See `comm_measures/REPORT.md` §5 and `privacy/REPORT.md` §6. The most important one: the gold graph misses some real links
+See `comm_measures/REPORT.md` §5, `privacy/REPORT.md` §6 and `beliefs/REPORT.md`. The most important one: the gold graph misses some real links
 (where the shared call sits on an unchanged line of the reference patch) and contains a few spurious
 ones. The graph is kept fixed rather than corrected from the conversations, which would make
 directedness and coverage circular; the known cases and their direction of bias are listed in the
@@ -394,3 +463,16 @@ report.
   broadcast to everyone.
 - The guard also wrongly refused 29 legitimate commands (including an agent's own file) and 25
   coordination messages.
+
+**Beliefs** (`beliefs/REPORT.md`, 14 problems):
+- The agents' understanding of the actual contracts was almost always right: 46 of 78 shared facts
+  were correct from the start, 20 aligned during the run, and none ended in agreement on a wrong
+  value.
+- The failures were about peers' *state*. 11 correct beliefs ("my peer implemented it", "my peer
+  replied") were reversed without evidence.
+- Every false "no reply ever arrived" in the beliefs arm happened while the agent's own correct note
+  was on screen, the round after the supporting message expired: agents trusted the missing message
+  over their own note.
+- Forgotten answers were rarer than in the matching no-belief runs (7% vs 20% of requests). Redundancy
+  was unchanged, and disclosures were more frequent. All of this is descriptive, from one run per
+  problem.

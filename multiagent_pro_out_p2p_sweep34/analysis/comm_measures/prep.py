@@ -32,7 +32,7 @@ from pathlib import Path
 H = Path("/home/asurite.ad.asu.edu/ubiswas2/harness50")
 BENCH = Path("/home/asurite.ad.asu.edu/ubiswas2/MASWE-bench_Pro/multiagent_pro_bench34_noreq")
 OUT = Path(__file__).resolve().parent
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "common"))
 from gold_dependencies import gold_graph   # noqa: E402
 
 ARMS = {"p2p": H / "p2p/mini_swe_agent/claude_opus_5_5",
