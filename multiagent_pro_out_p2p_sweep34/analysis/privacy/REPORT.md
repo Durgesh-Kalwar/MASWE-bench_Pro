@@ -158,10 +158,55 @@ separately and not pooled.
 - **One run per problem per arm.** The beliefs and P2P arms differ in volume and in which problems
   completed, so arm differences are descriptive only.
 
+## 7. Why the exposures happened, and the fix (2026-11-04)
+
+Every exposed line is in `leaked_output.md` (per command: the command, the agent's file, the peer
+files whose lines came back, the complete output with the peer lines marked) and
+`leaked_lines.csv` (480 lines, one per row). Reading them, the cause is structural rather than
+a matter of a weak regex:
+
+1. **The peer files are physically present** in every agent's container, at the base commit,
+   because the repository has to import and run. "Invisible" was a policy enforced only by the
+   text guard.
+2. **The guard reads the command, not what the command opens.** 173 of the 198 exposures came
+   from `grep -rn <symbol> <directory>` (or `--include=*.py`, a glob, `find`): no peer path is
+   spelled out, so no needle matches, and grep walks the disk. Tracebacks and `python -c "import
+   …"` print peer frames the same way. Its output is never inspected either: a
+   `peer/path:N:` prefix that would have been refused as a command passes straight back.
+3. **The task text points at the peer files.** 78 of the 80 leaking commands search for a name
+   from the agent's own task text; those names are shared with the peer files *by construction*
+   (that is what makes the pair a gold link). 50 of the 80 are in round 1, 21 are the agent's
+   first command.
+4. **The guard taught the wrong lesson.** 50 of the 80 came from agents already refused once; the
+   next, broader search succeeded, so the agent concluded the base copy was fair game ("I see
+   stale copies of files I do not own").
+
+The fix is in the harness, not the analysis: `multiagent_pro/aci/mini_scaffold.py` now **seals**
+each agent's worktree at container start — every peer-owned and fixed file is removed, Python
+sources being swapped for a sourceless `.pyc` so imports and tests still work, with git's
+`skip-worktree` bit so the removal is invisible to `git diff`/`status` and survives `checkout .`,
+`stash`, `reset --hard` — and the guard gains rules for the git routes back into history
+(`show`, `log -p`, `cat-file`, `clone`, `grep <rev>`, non-HEAD `diff`). Details in
+`multiagent_pro/multiagent_aci.md` § "Scope enforcement under raw bash".
+
+`multiagent_pro/aci/verify_seal.py` replays the leaking commands against sealed containers.
+On the 10 instances whose images were on the analysis machine (19 of the 53 leaking agents, 28 of
+the 80 commands, 69 of the 198 incident rows): **0 peer lines came back** (4 commands show
+`grep: …pyc: binary file matches`, i.e. the file name only); 342 of 399 history/filesystem
+routes were refused and the other 57 (`grep -r`, `find -exec`, a Python glob over the peer's
+directory) ran and found nothing; all 76 sealed Python modules still import; the orchestrator's
+scoped diff after an edit to the agent's own file shows only that file. The control run with
+`--no-seal` on two instances reproduced the leaks (8 of 8 commands). Results:
+`verify_seal.json`, `verify_seal_noseal.json`.
+
+Every run in this folder predates the seal; its privacy numbers describe the guard-only harness.
+
 ## Files
 
 | File | Contents |
 |---|---|
+| `leaked_output.md`, `leaked_lines.csv`, `leaked_output.py` | every P2P exposure as command + owner + peer files + exact output, and one row per leaked line |
+| `verify_seal.json`, `verify_seal_noseal.json` | replay of the leaking commands against sealed containers (and the guard-only control), from `multiagent_pro/aci/verify_seal.py` |
 | `summary.csv` | one row per complete run: topology and the three measures with their components |
 | `incidents.csv` | every confirmed, blocked or uncertain incident with agent, round/step, raw reference, rule, protected file and version, action, channel, recipients, status |
 | `guard_findings.csv` | legitimate operations and messages refused |

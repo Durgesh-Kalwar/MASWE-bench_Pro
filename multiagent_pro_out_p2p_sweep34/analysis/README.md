@@ -132,6 +132,10 @@ Details that matter for reading the numbers:
    | unresolved | never correctly settled (agreement on wrong behaviour is not resolution) | undefined |
    | uncertain | not enough evidence | undefined |
 
+   The test for "initially settled" is whether any delivered message supplied or changed either
+   agent's decision. A decision fixed independently before any delivery (in code, or in the
+   agent's own round-1 plan) still counts as initial even if it was implemented later.
+
    The problem-level value is the median over resolved links (zeros included), reported next to the
    number of unresolved and uncertain links. Messages after settlement are recorded separately.
 
@@ -326,7 +330,14 @@ Joins the prep files with the annotations and:
 cd multiagent_pro_out_p2p_sweep34/analysis/comm_measures
 python3 prep.py     # rebuilds graphs, topology, conversation table, measures 1-3
 python3 build.py    # recomputes measures 4-6 from the annotations and rewrites the CSVs
+python3 settlement_audit/settlement_audit.py   # P2P only: checks initially_settled labels against trajectories
 ```
+
+The settlement audit (`settlement_audit/AUDIT.md`) finds each endpoint's first file edit naming a
+link's shared object. A link labelled initially settled whose later endpoint first writes the name
+after a message naming it was delivered is flagged for a manual check. Of 13 flagged P2P links, one
+was revised to `resolved` (`7f6b722a` agent_2–agent_6); the revision is recorded in that link's
+annotation under `audit`.
 
 `prep.py` reads the run data from `~/harness50/<arm>/mini_swe_agent/claude_opus_5_5/` and the
 reference patches from `multiagent_pro_bench34_noreq/`. The annotations are inputs, not regenerated.
@@ -449,7 +460,8 @@ report.
 
 **Communication** (`comm_measures/REPORT.md`):
 - Coverage was nearly complete (0.98) and almost every request was answered correctly (0.97).
-- But 132 of 163 dependencies were settled before any message could matter.
+- But 131 of 163 dependencies were settled before any message could matter (P2P: 100 of 126;
+  audited against the trajectories in `comm_measures/settlement_audit/`, one label revised).
 - About a quarter of the talk was redundant, 88% of it caused by the harness (forgotten messages,
   unedited peer files, crossing messages) rather than by the agents.
 
@@ -463,6 +475,11 @@ report.
   broadcast to everyone.
 - The guard also wrongly refused 29 legitimate commands (including an agent's own file) and 25
   coordination messages.
+- Cause and fix (`privacy/REPORT.md` §7, `privacy/leaked_output.md`): the peer files were on disk
+  and the guard only read command text, so `grep -rn <symbol> <dir>` walked into them (173 of 198).
+  Since 2026-11-04 the harness removes peer sources from each agent's worktree at start
+  (`mini_scaffold.seal_script`); replaying the leaking commands sealed returned 0 peer lines
+  (`privacy/verify_seal.json`). All runs in this folder are from the guard-only harness.
 
 **Beliefs** (`beliefs/REPORT.md`, 14 problems):
 - The agents' understanding of the actual contracts was almost always right: 46 of 78 shared facts

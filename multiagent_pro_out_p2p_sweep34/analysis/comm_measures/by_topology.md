@@ -9,9 +9,9 @@ Pooled over runs (numerators and denominators summed). Topology labels are the p
 | star | 30 | 676 | 0.649 (439/676) | 0.772 (522/676) | 1.0 (67/67) | 0.251 (170/676; harness 152, agent 18; partly 142) | 0.975 (356/365; partly 5, incorrect 1, unanswered 3) | median of run medians 0; links: 62 initially settled, 3 via communication, 2 unresolved, 0 uncertain |
 | chain | 4 | 103 | 0.67 (69/103) | 0.854 (88/103) | 0.917 (11/12) | 0.282 (29/103; harness 28, agent 1; partly 24) | 0.924 (73/79; partly 4, incorrect 1, unanswered 1) | median of run medians 0.0; links: 10 initially settled, 2 via communication, 0 unresolved, 0 uncertain |
 | tree | 2 | 84 | 0.655 (55/84) | 0.893 (75/84) | 1.0 (12/12) | 0.476 (40/84; harness 35, agent 5; partly 8) | 1.0 (60/60; partly 0, incorrect 0, unanswered 0) | median of run medians 0.0; links: 11 initially settled, 1 via communication, 0 unresolved, 0 uncertain |
-| mesh | 9 | 274 | 0.803 (220/274) | 0.88 (241/274) | 1.0 (63/63) | 0.252 (69/274; harness 61, agent 8; partly 51) | 0.96 (169/176; partly 3, incorrect 3, unanswered 1) | median of run medians 0.0; links: 41 initially settled, 21 via communication, 1 unresolved, 0 uncertain |
+| mesh | 9 | 274 | 0.803 (220/274) | 0.88 (241/274) | 1.0 (63/63) | 0.252 (69/274; harness 61, agent 8; partly 51) | 0.96 (169/176; partly 3, incorrect 3, unanswered 1) | median of run medians 0; links: 40 initially settled, 22 via communication, 1 unresolved, 0 uncertain |
 | disconnected | 3 | 68 | 0.588 (40/68) | 0.676 (46/68) | 0.778 (7/9) | 0.221 (15/68; harness 8, agent 7; partly 16) | 0.95 (19/20; partly 1, incorrect 0, unanswered 0) | median of run medians 0.0; links: 8 initially settled, 1 via communication, 0 unresolved, 0 uncertain |
-| **overall** | 48 | 1205 | 0.683 (823/1205) | 0.807 (972/1205) | 0.982 (160/163) | 0.268 (323/1205; harness 284, agent 39; partly 241) | 0.967 (677/700; partly 13, incorrect 5, unanswered 5) | median of run medians 0; links: 132 initially settled, 28 via communication, 3 unresolved, 0 uncertain |
+| **overall** | 48 | 1205 | 0.683 (823/1205) | 0.807 (972/1205) | 0.982 (160/163) | 0.268 (323/1205; harness 284, agent 39; partly 241) | 0.967 (677/700; partly 13, incorrect 5, unanswered 5) | median of run medians 0; links: 131 initially settled, 29 via communication, 3 unresolved, 0 uncertain |
 
 ## p2p (33 runs)
 
@@ -20,9 +20,9 @@ Pooled over runs (numerators and denominators summed). Topology labels are the p
 | star | 18 | 360 | 0.628 (226/360) | 0.728 (262/360) | 1.0 (41/41) | 0.239 (86/360; harness 75, agent 11; partly 82) | 0.978 (180/184; partly 2, incorrect 0, unanswered 2) | median of run medians 0.0; links: 38 initially settled, 1 via communication, 2 unresolved, 0 uncertain |
 | chain | 3 | 67 | 0.642 (43/67) | 0.791 (53/67) | 0.889 (8/9) | 0.328 (22/67; harness 21, agent 1; partly 15) | 0.942 (49/52; partly 2, incorrect 0, unanswered 1) | median of run medians 0; links: 7 initially settled, 2 via communication, 0 unresolved, 0 uncertain |
 | tree | 2 | 84 | 0.655 (55/84) | 0.893 (75/84) | 1.0 (12/12) | 0.476 (40/84; harness 35, agent 5; partly 8) | 1.0 (60/60; partly 0, incorrect 0, unanswered 0) | median of run medians 0.0; links: 11 initially settled, 1 via communication, 0 unresolved, 0 uncertain |
-| mesh | 7 | 229 | 0.777 (178/229) | 0.865 (198/229) | 1.0 (55/55) | 0.271 (62/229; harness 55, agent 7; partly 42) | 0.957 (134/140; partly 3, incorrect 3, unanswered 0) | median of run medians 0; links: 37 initially settled, 17 via communication, 1 unresolved, 0 uncertain |
+| mesh | 7 | 229 | 0.777 (178/229) | 0.865 (198/229) | 1.0 (55/55) | 0.271 (62/229; harness 55, agent 7; partly 42) | 0.957 (134/140; partly 3, incorrect 3, unanswered 0) | median of run medians 0; links: 36 initially settled, 18 via communication, 1 unresolved, 0 uncertain |
 | disconnected | 3 | 68 | 0.588 (40/68) | 0.676 (46/68) | 0.778 (7/9) | 0.221 (15/68; harness 8, agent 7; partly 16) | 0.95 (19/20; partly 1, incorrect 0, unanswered 0) | median of run medians 0.0; links: 8 initially settled, 1 via communication, 0 unresolved, 0 uncertain |
-| **overall** | 33 | 808 | 0.671 (542/808) | 0.785 (634/808) | 0.976 (123/126) | 0.278 (225/808; harness 194, agent 31; partly 163) | 0.969 (442/456; partly 8, incorrect 3, unanswered 3) | median of run medians 0.0; links: 101 initially settled, 22 via communication, 3 unresolved, 0 uncertain |
+| **overall** | 33 | 808 | 0.671 (542/808) | 0.785 (634/808) | 0.976 (123/126) | 0.278 (225/808; harness 194, agent 31; partly 163) | 0.969 (442/456; partly 8, incorrect 3, unanswered 3) | median of run medians 0.0; links: 100 initially settled, 23 via communication, 3 unresolved, 0 uncertain |
 
 ## p2p_beliefs (14 runs)
 

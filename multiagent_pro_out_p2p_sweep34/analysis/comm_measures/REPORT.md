@@ -71,9 +71,9 @@ Topology of the 34 problems (P2P labels): star 18, mesh 7, chain 3, tree 2, disc
 | star | 18 | 360 | 0.63 (226/360) | 0.73 (262/360) | 1.00 (41/41) | 0.24 (86/360) | 0.98 (180/184) | 38 / 1 / 2 | 0 |
 | chain | 3 | 67 | 0.64 (43/67) | 0.79 (53/67) | 0.89 (8/9) | 0.33 (22/67) | 0.94 (49/52) | 7 / 2 / 0 | 0 |
 | tree | 2 | 84 | 0.65 (55/84) | 0.89 (75/84) | 1.00 (12/12) | 0.48 (40/84) | 1.00 (60/60) | 11 / 1 / 0 | 0 |
-| mesh | 7 | 229 | 0.78 (178/229) | 0.87 (198/229) | 1.00 (55/55) | 0.27 (62/229) | 0.96 (134/140) | 37 / 17 / 1 | 0 |
+| mesh | 7 | 229 | 0.78 (178/229) | 0.87 (198/229) | 1.00 (55/55) | 0.27 (62/229) | 0.96 (134/140) | 36 / 18 / 1 | 0 |
 | disconnected | 3 | 68 | 0.59 (40/68) | 0.68 (46/68) | 0.78 (7/9) | 0.22 (15/68) | 0.95 (19/20) | 8 / 1 / 0 | 0 |
-| **all** | 33 | 808 | 0.67 (542/808) | 0.79 (634/808) | 0.98 (123/126) | 0.28 (225/808) | 0.97 (442/456) | 101 / 22 / 3 | 0 |
+| **all** | 33 | 808 | 0.67 (542/808) | 0.79 (634/808) | 0.98 (123/126) | 0.28 (225/808) | 0.97 (442/456) | 100 / 23 / 3 | 0 |
 
 **P2P + beliefs arm, 14 runs**: directedness 0.69 (261/376), relevance 0.84 (317/376), coverage
 1.00 (35/35), redundancy 0.25 (94/376), response fulfillment 0.97 (222/230), links 29 settled
@@ -124,9 +124,23 @@ answered and then forgotten** by the asker: the reply was delivered (visible in 
 acknowledged, and later denied ("I never received a reply"). That is 99 of 476 requests in P2P
 (21%), 17 of 236 in the beliefs arm (7%), 7 of 16 in the no-interface run.
 
-**Messages to resolution is 0 for 132 of 163 links.** The task text or an identical round-1
-implementation settled them before any message could arrive. 28 links were settled through
-communication, in 1–5 messages (median 2); meshes account for 21 of them. Three links were never
+**Messages to resolution is 0 for 131 of 163 links.** The task text or an identical round-1
+implementation settled them before any message could arrive. 29 links were settled through
+communication, in 1–5 messages (median 2); meshes account for 22 of them. In P2P that is 100
+initially settled and 23 resolved, with resolved links taking 1–4 messages (median 2), all
+settled in round 2 or 3.
+
+The initial labels were audited (`settlement_audit/AUDIT.md`). For every P2P link the audit finds
+each endpoint's first edit naming the shared object. In 75 of the 101 initially settled links both
+endpoints wrote it in round 1; in 13 only one endpoint ever writes it. In the other 13 the later
+endpoint first writes it after a message naming it was delivered. Checked by hand, one of those 13
+was settled by a message and is now `resolved` (`7f6b722a` agent_2–agent_6: the shared API came
+from agent_3's `SearchScheme` publication, #2). The other 12 were decided independently, existed in
+base code, or are not real links.
+
+Many initially settled links still carry later messages (median 6 per P2P link after
+settlement), mostly confirmation of what the code already did; the 0 counts messages needed, not
+messages sent. Three links were never
 correctly settled, all in P2P:
 
 | Link | Why unresolved |
@@ -187,15 +201,18 @@ answers; whether that reflects the persistent notes is examined in the belief an
   would make directedness and coverage circular.
 - **Small graphs.** 7 runs have two participants; their density is 1 by construction and
   directedness there mostly reflects the unlinked agents' traffic.
-- **One model, one run per cell.** Opus 5.5 recalls these upstream fixes, which is why 132 of 163
+- **One model, one run per cell.** Opus 5.5 recalls these upstream fixes, which is why 131 of 163
   links were settled initially; a model without that recall would raise messages to resolution.
 - **Ungraded arms.** Beliefs and no-interface correctness was judged from requirements and code.
 - **Contextual labels** are single-annotated under a shared brief; counts of conversations and
-  links were validated mechanically, the labels were not double-coded.
+  links were validated mechanically, the labels were not double-coded. The P2P `initially_settled`
+  labels were additionally audited against the trajectories (one revised); the beliefs-arm labels
+  and the other contextual labels were not.
 
 ## Files
 
 `summary.csv` (one row per run: topology, k/N, density, six measures with numerators and
 denominators), `by_topology.md`, `conversation_labels.csv` (1205 rows), `requests.csv` (728),
 `links.csv` (163), `validation.md`, `prep_summary.json`, `prep/<arm>/<instance>.json`,
-`annotations/<arm>/<instance>.json`, `ANNOTATION_BRIEF.md`, scripts `prep.py`, `build.py`.
+`annotations/<arm>/<instance>.json`, `ANNOTATION_BRIEF.md`, scripts `prep.py`, `build.py`;
+`settlement_audit/` (`AUDIT.md`, `settlement_audit.py`, `link_edits.csv`, `needs_check.csv`).
