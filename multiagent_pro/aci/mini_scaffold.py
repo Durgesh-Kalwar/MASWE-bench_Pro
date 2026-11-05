@@ -9,9 +9,15 @@ and no `bash`, so a peer's file is simply unreachable. With raw bash that is gon
 matter more than writes: an agent that can `cat` a peer's file never needs to ask, so every
 communication harness would look identical and the comparison would measure nothing.
 
-`ScopedDockerEnvironment` restores the asymmetry by refusing commands that name a peer-owned
-path. See its docstring for exactly how far that goes -- it is a guard, not a sandbox, and the
-leak rate is measured rather than assumed.
+`ScopedDockerEnvironment` restores the asymmetry in two layers. The SEAL removes every
+peer-owned file's source from the agent's worktree at container start (Python files are
+swapped for their bytecode so the repo still imports and tests still run; see `seal_script`),
+and the GUARD refuses commands that name a peer-owned path or reach into git history, where
+the removed sources still live. The guard alone was measured on the 34-instance P2P sweep:
+198 of its allowed commands printed peer source, 173 of them plain `grep -r` over a directory,
+because matching the command text cannot know which files a recursive search will open. The
+seal closes that by leaving nothing to print; the guard remains for the routes the seal cannot
+cover (`git show`, `git clone`, a direct path).
 
 Nothing here modifies the mini-swe-agent submodule. The environment is registered by dotted
 path (`get_environment_class` falls back to importlib), and the agent is driven directly
@@ -41,6 +47,10 @@ from minisweagent.environments.docker import (  # noqa: E402
 
 # The sentinel mini's DefaultAgent.has_finished() matches on a command's FIRST output line.
 SUBMIT_SENTINEL = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
+
+# Gateway keys that answered "exhausted its monthly budget", shared by every agent in this
+# process so a dead key is skipped by all of them (see MiniScaffold._install_key_rotation).
+_EXHAUSTED_KEYS: set = set()
 
 # Shell segment separators, for checking scope per command rather than per whole line. Not a
 # shell parser: it does not know about quotes or subshells, so a separator inside a string
@@ -174,6 +184,88 @@ def deny_pairs(deny_paths: list[str]) -> list[tuple[str, str, str]]:
     return out
 
 
+# --------------------------------------------------------------------------- #
+# Filesystem seal
+# --------------------------------------------------------------------------- #
+def seal_script(deny_paths: list[str], repo_root: str = "/app") -> str:
+    """Bash that removes the SOURCE of every denied file from the worktree, idempotently.
+
+    The guard below inspects command text, so it cannot stop `grep -rn X lib/`, a glob, or a
+    Python traceback from printing a peer's file: those never spell the path out, and the file
+    is sitting on disk. The seal makes the file not be there.
+
+      * `.py`   -> compiled to a sourceless `<name>.pyc` NEXT TO where the source was (the
+                   legacy layout; Python ignores `__pycache__` when the source is missing),
+                   then the `.py` is deleted. Imports resolve, tests run, `inspect.getsource`
+                   raises OSError, and a traceback shows the frame but no source line.
+      * other  -> deleted. Templates and YAML cannot be stubbed; a local test that renders a
+                   peer's template fails, as it would anyway once the peer edits it.
+
+    Every sealed path then gets git's `skip-worktree` bit, so the deletion is invisible to
+    `git status`/`git diff`/`git add -A` (otherwise `git diff` would print the whole file as
+    removed lines, a worse leak than the one being fixed) and `git checkout .`, `git stash`
+    and `git reset --hard` leave the file absent (verified in the ansible image). The bit can
+    be undone (`sparse-checkout disable`, `--no-skip-worktree`) and history is still in `.git`
+    (`git show HEAD:path`, `git cat-file`, `git clone`): `_denied_git` refuses those routes,
+    and the environment reseals after every agent command that mentions git.
+
+    Compiled with `python3` from PATH, i.e. the interpreter the image's tests use. A file
+    python3 cannot compile is deleted anyway -- it was not importable by that interpreter.
+
+    The `.pyc` is also copied to `/root/.scope_seal/<path>c`, and a reseal restores it from
+    there if it has gone: agents seeing an ImportError against a peer's frozen module have
+    read it as a "stray .pyc" and gone looking for it, and a routine
+    `find . -name '*.pyc' -delete` would otherwise turn the peer's module into
+    ModuleNotFoundError for the rest of the run. Prints one line per path: `sealed`,
+    `compile_failed`, `restored`, `absent`, so the caller can report.
+    """
+    lines = [
+        f"cd {shlex.quote(repo_root)} 2>/dev/null || exit 0",
+        "seal_one() {",
+        "  p=\"$1\"; b=\"/root/.scope_seal/$p\"",
+        "  if [ -f \"$p\" ]; then",
+        "    case \"$p\" in",
+        "      *.py) [ -f \"${p}c\" ] || python3 - \"$p\" <<'PYEOF' || echo \"compile_failed $p\"",
+        "import py_compile, sys",
+        "py_compile.compile(sys.argv[1], cfile=sys.argv[1] + 'c', doraise=True)",
+        "PYEOF",
+        "      ;;",
+        "    esac",
+        "    rm -f -- \"$p\" && echo \"sealed $p\"",
+        "  else",
+        "    echo \"absent $p\"",
+        "  fi",
+        "  case \"$p\" in",
+        "    *.py)",
+        "      if [ -f \"${p}c\" ]; then",
+        "        [ -f \"${b}c\" ] || { mkdir -p \"$(dirname \"$b\")\" && cp -p \"${p}c\" \"${b}c\"; }",
+        "      elif [ -f \"${b}c\" ]; then",
+        "        cp -p \"${b}c\" \"${p}c\" && echo \"restored ${p}c\"",
+        "      fi",
+        "      ;;",
+        "  esac",
+        "  git update-index --skip-worktree -- \"$p\" >/dev/null 2>&1 || true",
+        "}",
+    ]
+    for p in deny_paths:
+        p = p.strip().lstrip("./")
+        if p:
+            lines.append(f"seal_one {shlex.quote(p)}")
+    return "\n".join(lines)
+
+
+# git subcommands that read blobs out of history or make a second checkout; none is needed to
+# work on the agent's own file in the working tree.
+GIT_HISTORY_SUBCMDS = frozenset({
+    "clone", "worktree", "archive", "bundle", "cat-file", "sparse-checkout", "read-tree",
+    "checkout-index", "format-patch", "fast-export", "filter-branch", "replay",
+})
+GIT_PATCH_FLAGS = frozenset({"-p", "-u", "--patch", "--full-diff", "--cc"})
+GIT_SHOW_SAFE = frozenset({"--stat", "--name-only", "--name-status", "-s", "--no-patch",
+                           "--shortstat", "--summary", "--oneline"})
+_REV_RE = re.compile(r"^(HEAD|@|[0-9a-f]{7,40})([~^]|@\{|$)")
+
+
 @dataclass
 class ScopedDockerEnvironmentConfig(DockerEnvironmentConfig):
     scope_deny: list[str] = field(default_factory=list)
@@ -181,24 +273,36 @@ class ScopedDockerEnvironmentConfig(DockerEnvironmentConfig):
     repo_root: str = "/app"
     violation_log: str = ""
     """Host path for the scope_violations.jsonl audit trail (empty disables logging)."""
+    scope_seal: bool = True
+    """Remove peer-owned sources from the worktree at start (`seal_script`). Off reproduces the
+    guard-only behaviour of the sweep34 runs."""
+    scope_base_commit: str = ""
+    """The instance's base commit. `git diff <base>` is the working-tree diff and is allowed;
+    any other revision in `git diff`/`git grep` reaches history and is refused."""
 
 
 class ScopedDockerEnvironment(DockerEnvironment):
-    """DockerEnvironment that refuses commands touching peer-owned files.
+    """DockerEnvironment in which peer-owned files are absent from the worktree and commands
+    that could reach them anyway are refused.
+
+    Two layers. `seal()` (run once by the scaffold after the container is up, and again after
+    any agent command that mentions git) applies `seal_script`: peer sources are gone from
+    disk, so `grep -r`, globs, `find`, tracebacks and `cat` have nothing of theirs to print.
+    The guard, `_denied` + `_denied_git`, refuses the routes that survive the seal: a command
+    that names a peer path (the file's bytecode is still there, and `git show HEAD:path` would
+    print the source), and git subcommands that read history or make a second checkout.
 
     A refusal is returned in the SAME shape as a normal result (`{"output", "returncode": 1}`)
     and the command is never run, so the model sees it exactly as it would see a failing
     command and can recover -- the message names the file and points at `send_message`, the
     way scoped_fs does.
 
-    LIMITATION, stated plainly: this is substring matching over the command string. It stops
-    an agent doing the obvious thing (`cat`, `sed`, `grep`, `python peer_file.py`). It does
-    NOT stop a determined one -- `find /app -name 'mana*' -exec cat {} \\;`, a `cd` in an
-    earlier command followed by a bare basename, reading via a variable, or base64 round-trips
-    all get through. Agents here are not adversarial, they are trying to do a task; this keeps
-    them honest without pretending to be a sandbox. Every refusal is logged, and the
-    verification suite deliberately measures how many obfuscated reads leak so the number is
-    reported rather than assumed.
+    What still gets through, stated plainly: the `.pyc` is readable (`strings` on it yields
+    names, docstrings and string constants, not source), the file's NAME is visible in
+    listings and in `grep: ... binary file matches`, and `git diff <branch>` against a branch
+    the guard does not recognise as a revision would print historical hunks. With the seal off
+    (`scope_seal: false`) only the text guard remains, which the sweep34 analysis measured at
+    198 peer-source exposures over 34 runs.
 
     Harness-issued commands (board writes, belief reads, diff collection) bypass the check via
     `execute(..., internal=True)` -- the orchestrator is not an agent and legitimately touches
@@ -211,14 +315,90 @@ class ScopedDockerEnvironment(DockerEnvironment):
     # nothing, which is correct: that startup probe is the harness's, not an agent's.
     _needles: list = []
     _pairs: list = []
+    _deny: list = []
 
     def __init__(self, *, config_class: type = ScopedDockerEnvironmentConfig, **kwargs):
         self.violations: list[dict] = []
         self.round = 0
+        self.seal_report: dict = {}
         super().__init__(config_class=config_class, **kwargs)
         deny = list(self.config.scope_deny or [])
+        self._deny = deny
         self._needles = deny_needles(deny, self.config.repo_root)
         self._pairs = deny_pairs(deny)
+
+    def seal(self) -> dict:
+        """Apply `seal_script` (idempotent) and return {sealed, compile_failed, absent, raw}.
+
+        Called by the scaffold once at start and by `execute` after any agent command that
+        mentions git, as the backstop for routes that restore a sealed file. A reseal finds
+        the `.pyc` already present and only re-deletes the source / re-sets the bit."""
+        if not self._deny or not getattr(self, "config", None) or not self.config.scope_seal:
+            return {}
+        r = super().execute(seal_script(self._deny, self.config.repo_root), timeout=300)
+        rep: dict = {"sealed": [], "compile_failed": [], "restored": [], "absent": [], "raw": r.get("output", "")}
+        for line in r.get("output", "").splitlines():
+            kind, _, p = line.partition(" ")
+            if kind in rep and p:
+                rep[kind].append(p)
+        if not self.seal_report:                   # keep the first (start-up) report
+            self.seal_report = rep
+        return rep
+
+    def _denied_git(self, command: str) -> str | None:
+        """The git route this command would take into history, or None.
+
+        The seal leaves `.git` intact, so a peer's source is one `git show HEAD:path` away.
+        Direct path forms are caught by `_denied`; this covers the forms that name no path:
+        blob reads (`cat-file`, `show <sha>`), history diffs (`log -p`, `diff HEAD~1`,
+        `grep <pat> HEAD`), second checkouts (`clone`, `worktree`, `archive`) and undoing the
+        skip-worktree bit. `git status`, `git diff`, `git diff HEAD`, `git diff <base>`,
+        `git show --stat`, `git log` (no patch), `git blame <own file>` all pass."""
+        base = (self.config.scope_base_commit or "") if getattr(self, "config", None) else ""
+        for seg in COMMAND_SEP.split(command):
+            seg = seg.strip()
+            if not seg:
+                continue
+            toks = shlex.split(seg) if _splittable(seg) else seg.split()
+            if not toks or toks[0] != "git":
+                continue
+            i = 1
+            while i < len(toks) and toks[i].startswith("-"):     # global opts: -C <dir>, --no-pager
+                i += 2 if toks[i] in ("-C", "-c", "--git-dir", "--work-tree") else 1
+            if i >= len(toks):
+                continue
+            sub, args = toks[i], toks[i + 1:]
+            args_before_dd = args[:args.index("--")] if "--" in args else args
+
+            def is_rev(a: str) -> bool:
+                return bool(_REV_RE.match(a))
+
+            def is_historic(a: str) -> bool:
+                # HEAD and the base commit (any prefix of it) are the working-tree baseline.
+                return is_rev(a) and a != "HEAD" and not (base and len(a) >= 7 and base.startswith(a))
+
+            if sub in GIT_HISTORY_SUBCMDS:
+                return f"git {sub}"
+            if sub == "update-index" and "--no-skip-worktree" in args:
+                return "git update-index --no-skip-worktree"
+            if sub in ("log", "stash", "whatchanged") and any(
+                    a in GIT_PATCH_FLAGS or a.startswith("-L") for a in args):
+                return f"git {sub} -p"
+            if sub == "show":
+                # `git show HEAD:own/file.py` is a legitimate look at one's own file (the path
+                # part is checked by `_denied`), and `--stat`-style forms print no content.
+                # Anything else -- bare `git show`, a commit, a blob sha -- prints source.
+                if not any(a in GIT_SHOW_SAFE for a in args) and not any(":" in a for a in args_before_dd):
+                    return "git show <revision>"
+            if sub == "grep" and any(is_rev(a) for a in args_before_dd):
+                # `git grep <pat> HEAD` searches the committed tree, where the sealed sources
+                # still are; without a revision it searches the worktree, which is fine.
+                return "git grep <revision>"
+            if sub in ("diff", "difftool", "blame", "annotate", "restore", "checkout", "switch"):
+                if any(is_historic(a) or (a.startswith("--source=") and is_historic(a[9:]))
+                       for a in args_before_dd):
+                    return f"git {sub} <historic revision>"
+        return None
 
     def _denied(self, command: str) -> str | None:
         """The peer path this command names, or None. Longest needle first so the reported
@@ -280,7 +460,31 @@ class ScopedDockerEnvironment(DockerEnvironment):
                 ),
                 "returncode": 1,
             }
-        return super().execute(command, cwd, timeout=timeout)
+        if not internal and self._deny and (route := self._denied_git(command)):
+            self._record(command, f"git-history:{route}")
+            return {
+                "output": (
+                    f"REFUSED: `{route}` reads the repository history or makes a second "
+                    f"checkout, where files owned by other agents are visible. Nothing was "
+                    f"executed.\n"
+                    f"Work from the working tree instead: `git status`, `git diff`, "
+                    f"`git diff HEAD`, `git show --stat`, `git log` (without -p) are all "
+                    f"allowed, as is anything on your own file."
+                ),
+                "returncode": 1,
+            }
+        out = super().execute(command, cwd, timeout=timeout)
+        # Backstop for the seal after EVERY agent command: a git command may have restored a
+        # sealed source (checkout of another ref, sparse-checkout, an un-set bit) and a cleanup
+        # (`find . -name '*.pyc' -delete`, `git clean -xdf`) may have removed the bytecode the
+        # peer's module now lives in. One extra exec per step that normally finds nothing to do;
+        # a few tens of milliseconds against a model call.
+        if not internal and self._deny:
+            try:
+                self.seal()
+            except Exception:
+                pass                        # the seal must never break a paid run
+        return out
 
 
 def _usage_of(out: dict) -> dict:
@@ -362,6 +566,7 @@ class MiniScaffold:
         self.agent = _first_action_agent_class()(
             model, self.env, **(self._cfg.get("agent") or {}))
         self._install_tools()
+        self._seal_peers()
 
         # run() seeds these before its loop; we drive step() directly, so do it here.
         # `problem_statement` is this agent's OWN local_issue.md -- under --route-interface
@@ -386,6 +591,7 @@ class MiniScaffold:
         this is our bookkeeping, not a scaffold defect. Auditing must never break a paid run,
         so a malformed response costs the receipt, not the step.
         """
+        self._install_key_rotation(model)
         inner = model.query
 
         def query(messages, **kwargs):
@@ -404,6 +610,53 @@ class MiniScaffold:
             return out
 
         model.query = query
+
+    def _install_key_rotation(self, model) -> None:
+        """Swap to the next gateway key when the current one's MONTHLY budget is exhausted.
+
+        The CreateAI gateway answers a spent project with a 429 whose text says "exhausted its
+        monthly budget"; litellm maps it to RateLimitError and mini's tenacity policy retries
+        it ten times with backoff -- against a key that will not recover until next month, so
+        the agent burns its round and the instance dies. Measured 2026-11-04: key #1 ran dry
+        mid-instance after ~12 instances across two arms.
+
+        If CREATEAI_KEYS (space-separated) is in the environment, `_query` is re-wrapped with
+        the SAME tenacity policy (`Retrying.wraps`), and a budget 429 rotates
+        `model_kwargs["api_key"]` to the next key not yet seen exhausted before re-raising, so
+        the retry that follows goes out on a key with budget. Exhausted keys are remembered
+        process-wide (one orchestrate = one shard = many agents), so every agent in the shard
+        skips them. Other 429s (true rate limits) are left to the normal backoff. Without
+        CREATEAI_KEYS this is a no-op and the model behaves exactly as upstream.
+        """
+        pool = [k for k in os.environ.get("CREATEAI_KEYS", "").split() if k]
+        kw = getattr(getattr(model, "config", None), "model_kwargs", None)
+        retrying = getattr(type(model)._query, "retry", None) if hasattr(type(model), "_query") else None
+        raw = getattr(type(model)._query, "__wrapped__", None) if retrying else None
+        if len(pool) < 2 or not isinstance(kw, dict) or raw is None:
+            return
+        import litellm  # noqa: WPS433  (already imported by the model)
+
+        aid = self.aid
+
+        def rotating(messages, **kwargs):
+            try:
+                return raw(model, messages, **kwargs)
+            except litellm.exceptions.RateLimitError as e:
+                if "monthly budget" in str(e):
+                    cur = kw.get("api_key")
+                    _EXHAUSTED_KEYS.add(cur)
+                    start = pool.index(cur) + 1 if cur in pool else 0
+                    nxt = next((pool[(start + i) % len(pool)] for i in range(len(pool))
+                                if pool[(start + i) % len(pool)] not in _EXHAUSTED_KEYS), None)
+                    if nxt is None:
+                        print(f"    [{aid}] every gateway key in CREATEAI_KEYS is exhausted")
+                    else:
+                        kw["api_key"] = nxt
+                        print(f"    [{aid}] gateway key #{pool.index(cur) + 1 if cur in pool else '?'} "
+                              f"exhausted its monthly budget -> switching to key #{pool.index(nxt) + 1}")
+                raise
+
+        model._query = retrying.wraps(rotating)
 
     def _usage_since(self, mark: int) -> dict:
         """Receipts for the model calls made since `mark`, summed.
@@ -471,6 +724,23 @@ class MiniScaffold:
             "true"
         )
         self.env.execute(script, internal=True)
+
+    def _seal_peers(self) -> None:
+        """Remove peer-owned sources from this agent's worktree (see `seal_script`) and record
+        what happened in agent_<k>/scope_seal.json, next to scope_violations.jsonl. A path the
+        seal could not compile is reported, not hidden: it means that peer's module was not
+        importable by the image's python3 to begin with."""
+        try:
+            rep = self.env.seal()
+        except Exception as e:
+            rep = {"error": f"{type(e).__name__}: {e}"}
+        if rep:
+            (self.inst_dir / self.aid / "scope_seal.json").write_text(
+                json.dumps({k: v for k, v in rep.items() if k != "raw"}, indent=1))
+            n, bad = len(rep.get("sealed", [])), rep.get("compile_failed", [])
+            print(f"    {self.aid}: sealed {n} peer/fixed file(s)"
+                  + (f", {len(bad)} not compilable: {bad}" if bad else "")
+                  + (f" ({rep['error']})" if "error" in rep else ""))
 
     def close(self) -> None:
         if self.env is not None:

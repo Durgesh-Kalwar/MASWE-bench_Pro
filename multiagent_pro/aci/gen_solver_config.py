@@ -472,6 +472,10 @@ def build_mini_config(spec, agent, inst_dir, *, model, roster, comm_bundle, api_
             "run_args": ["--rm", "--entrypoint", ""],
             "repo_root": REPO_ROOT_IN_IMAGE,
             "scope_deny": agent.get("deny", []),
+            # Peer sources are removed from the worktree at start (mini_scaffold.seal_script);
+            # the base commit lets the git guard allow `git diff <base>` as a working-tree diff.
+            "scope_seal": True,
+            "scope_base_commit": spec.get("base_commit", ""),
             "env": {
                 "REPO_ROOT": REPO_ROOT_IN_IMAGE,
                 "SCOPE_FILES": json.dumps(agent["scope"]),

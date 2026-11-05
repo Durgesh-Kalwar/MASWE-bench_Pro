@@ -440,15 +440,48 @@ mini has bash, so that guarantee is gone — and **reads matter more than writes
 can `cat` a peer's file never needs to ask, which would make every communication harness look
 identical and the comparison measure nothing.
 
-`mini_scaffold.ScopedDockerEnvironment` refuses commands naming a peer-owned path before running
-them, returning a refusal in the shape of a normal result so the model can recover, and logging
-every attempt to `<agent>/scope_violations.jsonl`. Matching covers the relative path, the
-absolute path, the last two components, and a split reference (`cd <peer dir> && cat <base>`).
+`mini_scaffold.ScopedDockerEnvironment` enforces this in two layers.
 
-It is a **guard, not a sandbox**. Measured: obvious reads, writes and split references are all
-refused, own files are untouched, and **3 of 3 obfuscated reads get through** (`find -exec`, a
-`python -c` assembling the path from `chr()`, shell-variable splicing). Agents in practice
-attempted zero violations. Quote it as best-effort, never as isolation.
+**The seal** (`seal_script`, applied by `MiniScaffold._seal_peers()` once the container is up,
+recorded in `<agent>/scope_seal.json`). Every peer-owned and fixed file is removed from the
+agent's worktree: a `.py` is first compiled to a sourceless `<name>.pyc` beside where the source
+was, so the repo still imports and tests still run, but `grep -r`, globs, `find`, `cat` and
+tracebacks have no source of the peer's to print (`inspect.getsource` raises; a traceback shows
+the frame line without code). Non-Python files (templates, YAML fragments) are deleted outright.
+Each sealed path gets git's `skip-worktree` bit, so `git status`/`git diff`/`git add -A` do not
+see a deletion (otherwise `git diff` would print the whole file as `-` lines) and `git checkout
+.`, `git stash`, `git reset --hard` leave the file absent. The environment reseals after every
+agent command (one extra exec that normally finds nothing to do), restoring the bytecode from
+`/root/.scope_seal/` if a cleanup such as `find . -name '*.pyc' -delete` removed it. Turn it off
+with `scope_seal: false` in `mini.yaml` to reproduce the guard-only behaviour of the 2026-10-20
+sweep.
+
+Observed in the first sealed smoke run (2026-11-04): an agent importing a peer's module gets the
+frozen base version, and the traceback cites `<peer>.pyc`. Agents read that as a "stray .pyc" the
+peer should delete and spent several messages per round on it, in both arms. It is the old
+stale-view problem (peers' edits never reach another agent's container) in a new costume, and the
+prompt has to say so explicitly for the seal not to cost coordination.
+
+**The guard** (`_denied`, `_denied_git`) refuses, before running, commands that name a
+peer-owned path (relative, absolute, last two components, or `cd <peer dir> && cat <base>`) and
+git subcommands that reach the sources still stored in `.git`: `clone`/`worktree`/`archive`,
+`cat-file`, `show` without `--stat` (except `show <rev>:<own path>`), `log -p`, `grep <rev>`,
+`diff`/`checkout`/`restore` against any revision other than `HEAD` or the base commit, and
+`sparse-checkout`/`--no-skip-worktree`. A refusal comes back in the shape of a normal result so
+the model can recover, and every refusal is logged to `<agent>/scope_violations.jsonl`.
+
+Why two layers: the guard alone, measured on the 34-instance P2P sweep
+(`multiagent_pro_out_p2p_sweep34/analysis/privacy/`), let **198 commands print peer source**,
+173 of them a plain `grep -rn <symbol> <dir>` that named no peer path — the command text cannot
+tell which files a recursive search will open. The seal leaves nothing to open.
+`aci/verify_seal.py` replays those exact commands in sealed containers and reports what comes
+back (`verify_seal.json`); `--no-seal` is the control.
+
+What still gets through, deliberately recorded: the file's **name** (in listings, in
+`grep: ... binary file matches`), the `.pyc` itself (`strings` yields identifiers, docstrings
+and string constants, not source), and `git diff <branch-name>` against a branch the guard does
+not recognise as a revision. Quote the result as "peer source absent from the worktree, history
+guarded", not as a sandbox.
 
 ### Operational notes for mini
 

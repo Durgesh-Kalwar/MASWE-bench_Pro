@@ -90,9 +90,16 @@ twice in the 2026-10-15 run (`ansible-395e5e20`, agent_1 round 4; the agent reco
 `--exclude-dir`). Deliberately not fixed: telling an exclusion from an access needs per-flag
 argument analysis, which is easy to get wrong in the permissive direction.
 
-Note the opposite hole is older and still open: `grep -rn X lib/ansible/` names no peer path and
-is allowed, yet recursion reads every peer file under it. That is the §10.5 / §13.6 "guard, not a
-sandbox" leak, not something the segment check changed.
+Note the opposite hole is older: `grep -rn X lib/ansible/` names no peer path and is allowed, yet
+recursion reads every peer file under it. That is the §10.5 / §13.6 "guard, not a sandbox" leak,
+not something the segment check changed. **Closed 2026-11-04** by the filesystem seal
+(`mini_scaffold.seal_script`, on by default via `scope_seal`): peer sources are removed from the
+worktree at container start (`.py` -> sourceless `.pyc`, so imports still resolve), with git's
+`skip-worktree` bit so the removal is invisible to `git diff`/`status` and survives `checkout .`
+/ `stash` / `reset --hard`; `_denied_git` refuses the history routes (`show`, `log -p`,
+`cat-file`, `clone`, `grep <rev>`, non-HEAD `diff`). The sweep34 privacy analysis measured the
+guard-only leak at 198 commands / 480 peer lines; `aci/verify_seal.py` replays them sealed.
+Runs before this date (all sweep34 cells) were guard-only.
 
 ---
 

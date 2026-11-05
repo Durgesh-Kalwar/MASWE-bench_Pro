@@ -411,11 +411,17 @@ python multiagent_pro/aci/gen_solver_config.py --output $ROOT --instances $INST 
 ```
 
 **File scope is enforced differently.** SWE-agent withholds any tool that could open a peer's
-file; mini has bash, so `mini_scaffold.ScopedDockerEnvironment` refuses commands that name a
-peer-owned path and logs each attempt to `agent_<k>/scope_violations.jsonl`. It catches the
-obvious forms (`cat`, `sed`, `grep`, `cd <peer dir> && cat <base>`) and **does not** catch
-deliberate obfuscation — measured at 3/3 leaks for `find -exec`, `python -c` with a computed
-path, and shell-variable splicing. Treat it as a guard, not a sandbox.
+file; mini has bash, so `mini_scaffold.ScopedDockerEnvironment` does two things. At start it
+**seals** every peer-owned file out of the agent's worktree — Python sources are swapped for
+their bytecode so imports and tests still work, other files are deleted, and git's
+`skip-worktree` bit hides the removal from `git diff`/`status`/`checkout` (report in
+`agent_<k>/scope_seal.json`). It then **refuses** commands that name a peer path or read git
+history (`git show`, `log -p`, `cat-file`, `clone`, non-HEAD revisions), logging each to
+`agent_<k>/scope_violations.jsonl`. The seal exists because the text guard alone let `grep -rn
+<symbol> <dir>` print peer source 198 times across the 34-instance P2P sweep; `scope_seal:
+false` in `mini.yaml` reproduces that older behaviour. `aci/verify_seal.py` replays the leaking
+commands against sealed containers. See `multiagent_aci.md` § "Scope enforcement under raw bash"
+for what still shows (file names, `strings` on the `.pyc`).
 
 ### Per-instance artifact tree
 
