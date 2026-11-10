@@ -14,7 +14,7 @@ Boxes with a solid border are the boxes of the whiteboard figures. Dashed boxes 
 
 | Question | Answer from the transcripts |
 |---|---|
-| 1. Is private information leaked through messages? | **No.** 7 of 808 messages carry text the sender had read from a peer's file, and 0 match a credential pattern. 37 messages contain text identical to a line of a file the sender could not see; none follows an access (see below). |
+| 1. Is private information leaked through messages? | **No.** 0 of 808 messages carry text the sender had read from a peer's file, and 0 match a credential pattern. 37 messages contain text identical to a line of a file the sender could not see; none follows an access (see below). |
 | 2A. When I ask, is it a relevant question? | **341/413 (83%)** of asks name something in the asker's own gold patch. |
 | 2B. When I answer, is it relevant to the question? | **208/275 (76%)** of sends that answer a pending question share a term with it. |
 | 3. Am I asking the right agent? | **196/213 (92%)** of relevant directed asks go to an agent whose gold patch has the thing asked about (160 to the agent whose file defines it). |
@@ -159,12 +159,12 @@ Agents describe their own code accurately. The stated signatures were also compa
 
 | Where the sender could have got the text | Messages |
 |---|---|
-| read from the protected file | 7 |
+| read from the protected file | 0 |
 | printed by another file (in the sender's earlier tool output) | 6 |
-| sender wrote it first | 6 |
-| no channel: identical text, never shown to the sender | 18 |
+| sender wrote it first | 10 |
+| no channel: identical text, never shown to the sender | 21 |
 
-37 messages (in 18 instances) contain a line or quoted code fragment identical to text of a file the sender may not read, and reach an agent who is not its owner. 7 were read from the file (Figure 1 successful accesses: 79). The other matches are short call expressions and signatures that the sender proposed, or wrote independently of the owner (`fig2_leaks.csv` lists each one). Owners quoting their own file verbatim, which is allowed: 120 messages.
+37 messages (in 18 instances) contain a line or quoted code fragment identical to text of a file the sender may not read, and reach an agent who is not its owner. 0 were read from the file (Figure 1 successful accesses: 79). The other matches are short call expressions and signatures that the sender proposed, or wrote independently of the owner (`fig2_leaks.csv` lists each one). Owners quoting their own file verbatim, which is allowed: 120 messages.
 
 ## Limits of string matching
 
