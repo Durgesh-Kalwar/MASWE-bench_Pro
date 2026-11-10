@@ -350,8 +350,8 @@ for d in instances():
             edits = "\n".join(l for f, l in added_lines(I["agents"][o]["patch"] if o else I["fixed_patch"]) if f == p)
             for src, text in (("base", I["base"].get(p) or ""), ("peer edit", edits)):
                 ptext = norm(text)
-                found = [("line", l) for l in distinctive_lines(text) if l in body] + \
-                        [("quoted fragment", f) for f in frs if f in ptext]
+                found = [("line", l) for l in sorted(distinctive_lines(text)) if l in body] + \
+                        [("quoted fragment", f) for f in sorted(frs) if f in ptext]
                 for how, l in found:
                     if l in own_text or l in told:
                         continue

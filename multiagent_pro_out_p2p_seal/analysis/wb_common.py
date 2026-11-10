@@ -5,8 +5,9 @@ No model is called anywhere in this folder: every label is produced by the regul
 and set operations defined here and in fig1_agent_actions.py / fig2_message_analysis.py.
 
 Inputs (all relative to this file):
-  ..                              the run folder (instance_*/board.json, traj, patches, eval_out)
-  ../../multiagent_pro_bench34_noreq   per-agent gold patches (<instance>/<agent>/gold.patch)
+  the run folder                  the nearest parent holding instance_*/ (board.json, traj,
+                                  patches) and eval_out/
+  <repo>/multiagent_pro_bench34_noreq   per-agent gold patches (<instance>/<agent>/gold.patch)
   base_files/<instance>.json      base-commit text of every owned / fixed file of the instance
 """
 import json, re
@@ -14,12 +15,15 @@ from collections import defaultdict
 from pathlib import Path
 
 A = Path(__file__).resolve().parent
-RUN = A.parent
+RUN = next(p for p in A.parents if (p / "eval_out").exists() or any(p.glob("instance_*")))   # the run folder
 REPO = RUN.parent
 BENCH = REPO / "multiagent_pro_bench34_noreq"
 BASE = A / "base_files"
 OUT = A / "results"
 ARM = RUN.name.replace("multiagent_pro_out_", "")
+SEALED = any(RUN.glob("instance_*/agent_*/scope_seal.json"))    # False for the guard-only runs
+TITLE = {"p2p_seal": "sealed P2P", "p2p_beliefs_seal": "sealed P2P + beliefs",
+         "p2p_sweep34": "pre-seal P2P (guard only)"}.get(ARM, ARM)
 
 IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 AGENT_ID = re.compile(r"\bagent_\d+\b")
@@ -269,7 +273,13 @@ def load(d):
 
 
 def instances():
-    return sorted(p for p in RUN.glob("instance_*") if (p / "spec.json").exists())
+    """Complete instances only: a board and one patch per agent."""
+    out = []
+    for p in sorted(RUN.glob("instance_*")):
+        if (p / "spec.json").exists() and (p / "board.json").exists() and \
+                len(list(p.glob("agent_*.patch"))) == json.loads((p / "spec.json").read_text())["num_agents"]:
+            out.append(p)
+    return out
 
 
 def short(inst):

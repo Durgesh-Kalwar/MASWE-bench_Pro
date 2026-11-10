@@ -9,12 +9,11 @@ additions (the user's questions 1 and 4, and sends that answer no question).
 """
 import json, subprocess
 
-from wb_common import ARM, OUT, RUN, pct
+from wb_common import ARM, OUT, RUN, SEALED, TITLE, pct
 
 F1 = json.load(open(OUT / "fig1_summary.json"))
 F2 = json.load(open(OUT / "fig2_summary.json"))
 seal = json.load(open(RUN / "scope_seal_summary.json"))["totals"] if (RUN / "scope_seal_summary.json").exists() else {}
-TITLE = {"p2p_seal": "sealed P2P", "p2p_beliefs_seal": "sealed P2P + beliefs"}.get(ARM, ARM)
 
 ROOT = 'shape=box, style="rounded,filled", fillcolor="#3b5876", fontcolor=white, color="#3b5876", fontsize=15, margin="0.25,0.18"'
 HEAD = 'shape=box, style="rounded,filled", fillcolor="#d9e4f0", color="#3b5876", fontsize=13, margin="0.22,0.14"'
@@ -57,9 +56,13 @@ g += node("succ", BOX, f"An agent successfully accesses lines\nfrom another agen
                        f"({s['success_agents']} agents, {s['success_instances']} instances)")
 g += node("issue", BOX, f"Issues with sandbox design\nstill possible: listing a peer module's names\nthrough its bytecode stand-in (<b>{s['name_probes']}</b> commands);\n"
                         f"guard also refused <b>{s['guard_refused_messages']}</b> messages\nthat only named a peer's path")
-g += node("sol", BOX, f"Solution: Docker implementation\n(one sandboxed container per agent)\n{seal.get('sealed', '?')} peer files sealed out, "
-                      f"{seal.get('compile_failed', 0)} failures")
-g += node("q", ASK, f"Question: what is the success rate when we\ndon't let agents access other agents' files?\n<b>{F1['resolved']}/{F1['instances']} resolved ({pct(F1['resolved'], F1['instances'])})</b>")
+if SEALED:
+    g += node("sol", BOX, f"Solution: Docker implementation\n(one sandboxed container per agent)\n{seal.get('sealed', '?')} peer files sealed out, "
+                          f"{seal.get('compile_failed', 0)} failures")
+    g += node("q", ASK, f"Question: what is the success rate when we\ndon't let agents access other agents' files?\n<b>{F1['resolved']}/{F1['instances']} resolved ({pct(F1['resolved'], F1['instances'])})</b>")
+else:
+    g += node("sol", BOX, "Solution: Docker implementation\n(one sandboxed container per agent)\n<b>not applied in this run</b>: peers' files were on disk,\nonly the command guard stood in the way")
+    g += node("q", ASK, f"Success rate in this run, where agents\ncould still reach other agents' files:\n<b>{F1['resolved']}/{F1['instances']} resolved ({pct(F1['resolved'], F1['instances'])})</b>")
 g += node("leak", ADD, f"Q1. Private text leaked through messages?\n<b>{F2['leak']['true_leaks']}</b> of {F2['leak']['messages_scanned']} messages carry text\nthe sender read from a peer's file\n"
                        f"({F2['leak']['credential_patterns']} credential patterns)")
 g += node("rmn", BOX, f"rm\n<b>{d['rm_total']}</b> commands, {d['rm_agents']} agents\n" + " · ".join(f"{v} {k.split(' (')[0]}" for k, v in rm.items()))

@@ -59,7 +59,7 @@ A refused command is mostly a `grep`/`sed -n` that lists a peer's file among its
 - `git stash` comes in pairs with `git stash pop`: the agent sets its edits aside, runs the tests on the original code, and brings the edits back. That is a comparison, not a reversal of a mistake. `git checkout <file>` throws an edit away for good.
 - Instances with an undo resolved 7/10; without, 21/24. The groups are too small to read a difference into.
 - Agents correct their work by reading `git diff` and editing the file again (88/296 diffs are followed by an edit), not by rolling back. A world without `git checkout`/`stash` would have affected the agents above; a world without re-editing would affect nearly all of them.
-- `rm` of bytecode is agents deleting `.pyc` files they took for stale caches; the harness restores the sealed stand-ins after every command. `rm` on repository paths is the agents removing scratch test files they created (each one is listed in `fig1_destructive.csv`).
+- `rm` of bytecode is agents deleting `.pyc` files and `__pycache__` they took for stale caches; the harness restores the sealed stand-ins after every command. `rm` on repository paths is the agents removing scratch test files they created (each one is listed in `fig1_destructive.csv`).
 
 ### ③ Data contamination: resolving without communication where the gold patch requires it
 
